@@ -61,8 +61,8 @@ async function seed() {
     .insert(productIdentifiers)
     .values({
       productId: product.id,
-      type: 'OTHER',
-      value: 'TEST-ID-001',
+      type: 'EAN',
+      value: '4000000000001',
     })
     .onConflictDoNothing()
 

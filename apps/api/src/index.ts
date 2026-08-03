@@ -3,6 +3,7 @@ import { serve } from '@hono/node-server'
 import {
   createDatabase,
   platforms,
+  productIdentifiers,
   products,
 } from '@karcher-commerce-hub/database'
 import { neon } from '@neondatabase/serverless'
@@ -26,7 +27,7 @@ const db = databaseUrl
 
 app.get('/', (context) => {
   return context.json({
-    name: 'KĂ¤rcher Commerce Hub API',
+    name: 'Kärcher Commerce Hub API',
     version: '0.1.0',
   })
 })
@@ -80,49 +81,6 @@ app.get('/database/health', async (context) => {
   }
 })
 
-app.get('/products', async (context) => {
-  if (!db) {
-    return context.json(
-      {
-        status: 'error',
-        message: 'Database is not configured',
-      },
-      500,
-    )
-  }
-
-  try {
-    const result = await db
-      .select({
-        id: products.id,
-        sku: products.sku,
-        name: products.name,
-        productLine: products.productLine,
-        category: products.category,
-        active: products.active,
-        createdAt: products.createdAt,
-        updatedAt: products.updatedAt,
-      })
-      .from(products)
-
-    return context.json({
-      status: 'ok',
-      count: result.length,
-      data: result,
-    })
-  } catch (error) {
-    console.error('Product query failed:', error)
-
-    return context.json(
-      {
-        status: 'error',
-        message: 'Could not load products',
-      },
-      500,
-    )
-  }
-})
-
 app.get('/platforms', async (context) => {
   if (!db) {
     return context.json(
@@ -163,6 +121,69 @@ app.get('/platforms', async (context) => {
   }
 })
 
+app.get('/products', async (context) => {
+  if (!db) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database is not configured',
+      },
+      500,
+    )
+  }
+
+  try {
+    const productRows = await db
+      .select({
+        id: products.id,
+        sku: products.sku,
+        name: products.name,
+        productLine: products.productLine,
+        category: products.category,
+        active: products.active,
+        createdAt: products.createdAt,
+        updatedAt: products.updatedAt,
+      })
+      .from(products)
+
+    const identifierRows = await db
+      .select({
+        id: productIdentifiers.id,
+        productId: productIdentifiers.productId,
+        type: productIdentifiers.type,
+        value: productIdentifiers.value,
+      })
+      .from(productIdentifiers)
+
+    const result = productRows.map((product) => ({
+      ...product,
+      identifiers: identifierRows
+        .filter((identifier) => identifier.productId === product.id)
+        .map((identifier) => ({
+          id: identifier.id,
+          type: identifier.type,
+          value: identifier.value,
+        })),
+    }))
+
+    return context.json({
+      status: 'ok',
+      count: result.length,
+      data: result,
+    })
+  } catch (error) {
+    console.error('Product query failed:', error)
+
+    return context.json(
+      {
+        status: 'error',
+        message: 'Could not load products',
+      },
+      500,
+    )
+  }
+})
+
 const port = 3000
 
 serve(
@@ -177,5 +198,6 @@ serve(
       `Database health: http://localhost:${info.port}/database/health`,
     )
     console.log(`Platforms: http://localhost:${info.port}/platforms`)
+    console.log(`Products: http://localhost:${info.port}/products`)
   },
 )

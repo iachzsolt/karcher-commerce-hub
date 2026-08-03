@@ -16,6 +16,12 @@ type Platform = {
   createdAt: string
 }
 
+type ProductIdentifier = {
+  id: string
+  type: 'EAN' | 'MANUFACTURER_SKU' | 'SAP_ID' | 'OTHER'
+  value: string
+}
+
 type Product = {
   id: string
   sku: string
@@ -25,6 +31,7 @@ type Product = {
   active: boolean
   createdAt: string
   updatedAt: string
+  identifiers: ProductIdentifier[]
 }
 
 type PlatformResponse = {
@@ -55,6 +62,14 @@ function statusLabel(status: ServiceStatus['status']) {
   if (status === 'working') return 'Működik'
   if (status === 'prepared') return 'Előkészítve'
   return 'Nincs csatlakoztatva'
+}
+
+function getPrimaryEan(product: Product) {
+  return (
+    product.identifiers.find(
+      (identifier) => identifier.type === 'EAN',
+    )?.value ?? '–'
+  )
 }
 
 function App() {
@@ -93,7 +108,9 @@ function App() {
         setApiHealth(healthData)
         setPlatforms(platformData.data)
         setProducts(productData.data)
-      } catch {
+      } catch (error) {
+        console.error('Commerce Hub data loading failed:', error)
+
         setApiHealth(null)
         setPlatforms([])
         setProducts([])
@@ -232,6 +249,7 @@ function App() {
               <thead>
                 <tr>
                   <th>Cikkszám</th>
+                  <th>EAN</th>
                   <th>Terméknév</th>
                   <th>Termékvonal</th>
                   <th>Kategória</th>
@@ -243,6 +261,7 @@ function App() {
                 {products.map((product) => (
                   <tr key={product.id}>
                     <td className="sku-cell">{product.sku}</td>
+                    <td>{getPrimaryEan(product)}</td>
                     <td>{product.name}</td>
                     <td>{formatProductLine(product.productLine)}</td>
                     <td>{product.category ?? '–'}</td>
@@ -262,7 +281,7 @@ function App() {
 
                 {!loading && products.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="empty-state">
+                    <td colSpan={6} className="empty-state">
                       Nincs megjeleníthető termék.
                     </td>
                   </tr>
@@ -277,12 +296,12 @@ function App() {
 
           <div>
             <p className="section-label">KÖVETKEZŐ LÉPÉS</p>
-            <h3>Termékazonosítók és Allegro-ajánlatok</h3>
+            <h3>Allegro-ajánlatok</h3>
 
             <p>
-              Következőként az EAN-okat kapcsoljuk a termékekhez,
-              majd elkezdjük felépíteni az Allegro-ajánlatok
-              adatmodelljét és importfolyamatát.
+              A termékazonosítás alapja működik. Következőként az
+              Allegro-ajánlatok aktuális és kívánt állapotának
+              adatmodelljét építjük fel.
             </p>
           </div>
         </section>
