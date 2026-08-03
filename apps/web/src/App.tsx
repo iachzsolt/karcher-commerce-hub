@@ -16,50 +16,96 @@ type Platform = {
   createdAt: string
 }
 
+type Product = {
+  id: string
+  sku: string
+  name: string
+  productLine: 'HG' | 'PROFESSIONAL' | 'UNASSIGNED'
+  category: string | null
+  active: boolean
+  createdAt: string
+  updatedAt: string
+}
+
 type PlatformResponse = {
   status: string
   count: number
   data: Platform[]
 }
 
+type ProductResponse = {
+  status: string
+  count: number
+  data: Product[]
+}
+
 type ServiceStatus = {
   name: string
   description: string
-  status: 'Működik' | 'Nincs csatlakoztatva' | 'Tervezett'
+  status: 'Működik' | 'Nincs csatlakoztatva'
+}
+
+function formatProductLine(value: Product['productLine']) {
+  if (value === 'HG') return 'H&G'
+  if (value === 'PROFESSIONAL') return 'Professional'
+  return 'Nincs besorolva'
 }
 
 function App() {
   const [apiHealth, setApiHealth] = useState<HealthResponse | null>(null)
   const [platforms, setPlatforms] = useState<Platform[]>([])
+  const [products, setProducts] = useState<Product[]>([])
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const loadSystemStatus = async () => {
+    const loadData = async () => {
       try {
-        const [healthResponse, platformResponse] = await Promise.all([
-          fetch('http://localhost:3000/health'),
-          fetch('http://localhost:3000/platforms'),
-        ])
+        const [healthResponse, platformResponse, productResponse] =
+          await Promise.all([
+            fetch('http://localhost:3000/health'),
+            fetch('http://localhost:3000/platforms'),
+            fetch('http://localhost:3000/products'),
+          ])
 
-        if (!healthResponse.ok || !platformResponse.ok) {
+        if (
+          !healthResponse.ok ||
+          !platformResponse.ok ||
+          !productResponse.ok
+        ) {
           throw new Error('API request failed')
         }
 
-        const healthData = (await healthResponse.json()) as HealthResponse
-        const platformData = (await platformResponse.json()) as PlatformResponse
+        const healthData =
+          (await healthResponse.json()) as HealthResponse
+
+        const platformData =
+          (await platformResponse.json()) as PlatformResponse
+
+        const productData =
+          (await productResponse.json()) as ProductResponse
 
         setApiHealth(healthData)
         setPlatforms(platformData.data)
+        setProducts(productData.data)
       } catch {
         setApiHealth(null)
         setPlatforms([])
+        setProducts([])
+      } finally {
+        setLoading(false)
       }
     }
 
-    void loadSystemStatus()
+    void loadData()
   }, [])
 
-  const allegro = platforms.find((platform) => platform.code === 'ALLEGRO')
-  const arukereso = platforms.find((platform) => platform.code === 'ARUKERESO')
+  const allegro = platforms.find(
+    (platform) => platform.code === 'ALLEGRO',
+  )
+
+  const arukereso = platforms.find(
+    (platform) => platform.code === 'ARUKERESO',
+  )
 
   const services: ServiceStatus[] = [
     {
@@ -76,21 +122,21 @@ function App() {
     },
     {
       name: 'PostgreSQL adatbázis',
-      description: 'Neon PostgreSQL kapcsolat aktív',
+      description: 'Neon PostgreSQL kapcsolat',
       status: apiHealth ? 'Működik' : 'Nincs csatlakoztatva',
     },
     {
       name: 'Allegro',
       description: allegro
-        ? 'Platform rekord betöltve a Neon adatbázisból'
-        : 'A platform még nem érhető el',
+        ? 'Platform rekord betöltve'
+        : 'A platform nem érhető el',
       status: allegro ? 'Működik' : 'Nincs csatlakoztatva',
     },
     {
       name: 'Árukereső',
       description: arukereso
-        ? 'Platform rekord betöltve a Neon adatbázisból'
-        : 'A platform még nem érhető el',
+        ? 'Platform rekord betöltve'
+        : 'A platform nem érhető el',
       status: arukereso ? 'Működik' : 'Nincs csatlakoztatva',
     },
   ]
@@ -99,20 +145,23 @@ function App() {
     <div className="app-shell">
       <header className="topbar">
         <div className="brand">
-          <div className="brand-mark" aria-hidden="true" />
+          <div className="brand-mark" />
           <div>
             <p className="eyebrow">KÄRCHER</p>
             <h1>Commerce Hub</h1>
           </div>
         </div>
 
-        <div className="environment-badge">Helyi fejlesztői környezet</div>
+        <div className="environment-badge">
+          Helyi fejlesztői környezet
+        </div>
       </header>
 
       <main className="content">
         <section className="hero">
           <div>
             <p className="section-label">RENDSZERÁLLAPOT</p>
+
             <h2>
               {apiHealth
                 ? 'A teljes alapinfrastruktúra működik'
@@ -120,9 +169,8 @@ function App() {
             </h2>
 
             <p className="hero-text">
-              {apiHealth
-                ? 'A Commerce Hub adminfelülete sikeresen kapcsolódik a backend API-hoz és a Neon PostgreSQL-adatbázishoz.'
-                : 'A frontend működik, de a háttérrendszer jelenleg nem érhető el.'}
+              A Commerce Hub már valódi adatokat olvas a Neon
+              PostgreSQL-adatbázisból.
             </p>
           </div>
 
@@ -163,17 +211,74 @@ function App() {
           </div>
         </section>
 
+        <section className="products-section">
+          <div className="section-heading">
+            <div>
+              <p className="section-label">TERMÉKTÖRZS</p>
+              <h3>Termékek</h3>
+            </div>
+
+            <span>
+              {loading ? 'Betöltés...' : `${products.length} termék`}
+            </span>
+          </div>
+
+          <div className="table-card">
+            <table className="products-table">
+              <thead>
+                <tr>
+                  <th>Cikkszám</th>
+                  <th>Terméknév</th>
+                  <th>Termékvonal</th>
+                  <th>Kategória</th>
+                  <th>Státusz</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {products.map((product) => (
+                  <tr key={product.id}>
+                    <td className="sku-cell">{product.sku}</td>
+                    <td>{product.name}</td>
+                    <td>{formatProductLine(product.productLine)}</td>
+                    <td>{product.category ?? '–'}</td>
+                    <td>
+                      <span
+                        className={`product-status ${
+                          product.active
+                            ? 'product-active'
+                            : 'product-inactive'
+                        }`}
+                      >
+                        {product.active ? 'Aktív' : 'Inaktív'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+
+                {!loading && products.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="empty-state">
+                      Nincs megjeleníthető termék.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
         <section className="next-step">
-          <div className="step-number">04</div>
+          <div className="step-number">05</div>
 
           <div>
             <p className="section-label">KÖVETKEZŐ LÉPÉS</p>
-            <h3>Első termékadat betöltése</h3>
+            <h3>Termékazonosítók és Allegro-ajánlatok</h3>
 
             <p>
-              Létrehozunk egy tesztterméket a központi terméktörzsben,
-              hozzáadjuk az EAN-azonosítóját, majd API-n keresztül lekérjük a
-              frontend számára.
+              Következőként az EAN-okat kapcsoljuk a termékekhez,
+              majd elkezdjük felépíteni az Allegro-ajánlatok
+              adatmodelljét és importfolyamatát.
             </p>
           </div>
         </section>
