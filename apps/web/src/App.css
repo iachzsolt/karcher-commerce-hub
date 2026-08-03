@@ -338,3 +338,23 @@ textarea {
     min-width: 750px;
   }
 }
+
+.status-előkészítve {
+  color: #705800;
+  background: #fff6d8;
+}
+
+.status-working {
+  color: #155e37;
+  background: #eaf8ef;
+}
+
+.status-prepared {
+  color: #705800;
+  background: #fff6d8;
+}
+
+.status-disconnected {
+  color: #895900;
+  background: #fff0d8;
+}

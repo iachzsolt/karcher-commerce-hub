@@ -42,13 +42,19 @@ type ProductResponse = {
 type ServiceStatus = {
   name: string
   description: string
-  status: 'Működik' | 'Nincs csatlakoztatva'
+  status: 'working' | 'prepared' | 'disconnected'
 }
 
 function formatProductLine(value: Product['productLine']) {
   if (value === 'HG') return 'H&G'
   if (value === 'PROFESSIONAL') return 'Professional'
   return 'Nincs besorolva'
+}
+
+function statusLabel(status: ServiceStatus['status']) {
+  if (status === 'working') return 'Működik'
+  if (status === 'prepared') return 'Előkészítve'
+  return 'Nincs csatlakoztatva'
 }
 
 function App() {
@@ -111,33 +117,33 @@ function App() {
     {
       name: 'Adminfelület',
       description: 'React + TypeScript alkalmazás',
-      status: 'Működik',
+      status: 'working',
     },
     {
       name: 'Backend API',
       description: apiHealth
         ? `Kapcsolódva • ${apiHealth.service}`
         : 'A backend jelenleg nem érhető el',
-      status: apiHealth ? 'Működik' : 'Nincs csatlakoztatva',
+      status: apiHealth ? 'working' : 'disconnected',
     },
     {
       name: 'PostgreSQL adatbázis',
       description: 'Neon PostgreSQL kapcsolat',
-      status: apiHealth ? 'Működik' : 'Nincs csatlakoztatva',
+      status: apiHealth ? 'working' : 'disconnected',
     },
     {
       name: 'Allegro',
       description: allegro
-        ? 'Platform rekord betöltve'
+        ? 'Platform előkészítve az integrációhoz'
         : 'A platform nem érhető el',
-      status: allegro ? 'Működik' : 'Nincs csatlakoztatva',
+      status: allegro ? 'prepared' : 'disconnected',
     },
     {
       name: 'Árukereső',
       description: arukereso
-        ? 'Platform rekord betöltve'
+        ? 'Platform előkészítve az integrációhoz'
         : 'A platform nem érhető el',
-      status: arukereso ? 'Működik' : 'Nincs csatlakoztatva',
+      status: arukereso ? 'prepared' : 'disconnected',
     },
   ]
 
@@ -197,11 +203,9 @@ function App() {
                   <h4>{service.name}</h4>
 
                   <span
-                    className={`status-pill status-${service.status
-                      .toLowerCase()
-                      .replaceAll(' ', '-')}`}
+                    className={`status-pill status-${service.status}`}
                   >
-                    {service.status}
+                    {statusLabel(service.status)}
                   </span>
                 </div>
 
