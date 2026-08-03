@@ -1,0 +1,1 @@
+ALTER TABLE "platform_accounts" ADD COLUMN "environment" text DEFAULT 'SANDBOX' NOT NULL;

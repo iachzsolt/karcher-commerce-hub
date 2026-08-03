@@ -8,6 +8,20 @@
       "when": 1785766570376,
       "tag": "0000_initial-commerce-schema",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1785771555361,
+      "tag": "0001_allegro-listing-state-model",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1785771976062,
+      "tag": "0002_add-platform-environment",
+      "breakpoints": true
     }
   ]
 }

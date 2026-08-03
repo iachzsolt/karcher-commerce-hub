@@ -18,6 +18,7 @@ export const productLineEnum = pgEnum('product_line', [
 
 export const listingStatusEnum = pgEnum('listing_status', [
   'ACTIVE',
+  'ACTIVATING',
   'INACTIVE',
   'ENDED',
   'UNKNOWN',
@@ -32,6 +33,13 @@ export const productIdentifierTypeEnum = pgEnum(
     'OTHER',
   ],
 )
+
+export const campaignTypeEnum = pgEnum('campaign_type', [
+  'STANDARD',
+  'DISCOUNT',
+  'SOURCING',
+  'OTHER',
+])
 
 export const products = pgTable(
   'products',
@@ -122,6 +130,50 @@ export const platforms = pgTable(
   ],
 )
 
+export const platformAccounts = pgTable(
+  'platform_accounts',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+
+    platformId: uuid('platform_id')
+      .notNull()
+      .references(() => platforms.id),
+
+    code: text('code').notNull(),
+    name: text('name').notNull(),
+
+    externalAccountId: text('external_account_id'),
+
+    marketplace: text('marketplace'),
+
+    environment: text('environment')
+      .notNull()
+      .default('SANDBOX'),
+
+    active: boolean('active')
+      .notNull()
+      .default(true),
+
+    createdAt: timestamp('created_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp('updated_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('platform_account_unique').on(
+      table.platformId,
+      table.code,
+    ),
+  ],
+)
+
 export const platformListings = pgTable(
   'platform_listings',
   {
@@ -135,23 +187,214 @@ export const platformListings = pgTable(
       .notNull()
       .references(() => platforms.id),
 
+    accountId: uuid('account_id')
+      .notNull()
+      .references(() => platformAccounts.id),
+
     externalListingId: text('external_listing_id').notNull(),
+
     externalProductId: text('external_product_id'),
+
+    externalReference: text('external_reference'),
 
     marketplace: text('marketplace'),
 
-    status: listingStatusEnum('status')
-      .notNull()
-      .default('UNKNOWN'),
+    categoryId: text('category_id'),
 
-    currentPriceMinor: integer('current_price_minor'),
-    currentStock: integer('current_stock'),
+    listingName: text('listing_name'),
+
+    listingUrl: text('listing_url'),
+
+    createdAt: timestamp('created_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp('updated_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('platform_listing_unique').on(
+      table.platformId,
+      table.accountId,
+      table.externalListingId,
+    ),
+
+    index('platform_listings_product_index').on(
+      table.productId,
+    ),
+  ],
+)
+
+export const listingRemoteStates = pgTable(
+  'listing_remote_states',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+
+    listingId: uuid('listing_id')
+      .notNull()
+      .references(() => platformListings.id),
+
+    priceMinor: integer('price_minor'),
 
     currency: text('currency')
       .notNull()
       .default('HUF'),
 
-    listingUrl: text('listing_url'),
+    stockAvailable: integer('stock_available'),
+
+    stockSold: integer('stock_sold'),
+
+    publicationStatus: listingStatusEnum('publication_status')
+      .notNull()
+      .default('UNKNOWN'),
+
+    publicationStartingAt: timestamp('publication_starting_at', {
+      withTimezone: true,
+    }),
+
+    publicationEndingAt: timestamp('publication_ending_at', {
+      withTimezone: true,
+    }),
+
+    priceAutomationRuleId: text('price_automation_rule_id'),
+
+    priceAutomationRuleType: text('price_automation_rule_type'),
+
+    isFulfillment: boolean('is_fulfillment')
+      .notNull()
+      .default(false),
+
+    sourceUpdatedAt: timestamp('source_updated_at', {
+      withTimezone: true,
+    }),
+
+    lastSyncedAt: timestamp('last_synced_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp('updated_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('listing_remote_state_unique').on(
+      table.listingId,
+    ),
+  ],
+)
+
+export const listingDesiredStates = pgTable(
+  'listing_desired_states',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+
+    listingId: uuid('listing_id')
+      .notNull()
+      .references(() => platformListings.id),
+
+    listPriceMinor: integer('list_price_minor'),
+
+    regularPriceMinor: integer('regular_price_minor'),
+
+    desiredStock: integer('desired_stock'),
+
+    desiredPublicationStatus:
+      listingStatusEnum('desired_publication_status')
+        .notNull()
+        .default('UNKNOWN'),
+
+    priceLocked: boolean('price_locked')
+      .notNull()
+      .default(false),
+
+    stockLocked: boolean('stock_locked')
+      .notNull()
+      .default(false),
+
+    autoPriceSync: boolean('auto_price_sync')
+      .notNull()
+      .default(false),
+
+    autoStockSync: boolean('auto_stock_sync')
+      .notNull()
+      .default(false),
+
+    updatedBy: text('updated_by'),
+
+    updatedAt: timestamp('updated_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    createdAt: timestamp('created_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('listing_desired_state_unique').on(
+      table.listingId,
+    ),
+  ],
+)
+
+export const listingCampaigns = pgTable(
+  'listing_campaigns',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+
+    listingId: uuid('listing_id')
+      .notNull()
+      .references(() => platformListings.id),
+
+    externalCampaignId: text('external_campaign_id').notNull(),
+
+    campaignName: text('campaign_name'),
+
+    campaignType: campaignTypeEnum('campaign_type')
+      .notNull()
+      .default('OTHER'),
+
+    marketplace: text('marketplace'),
+
+    desiredPriceMinor: integer('desired_price_minor'),
+
+    remotePriceMinor: integer('remote_price_minor'),
+
+    referencePriceMinor: integer('reference_price_minor'),
+
+    dedicatedStock: integer('dedicated_stock'),
+
+    priceLocked: boolean('price_locked')
+      .notNull()
+      .default(false),
+
+    autoSync: boolean('auto_sync')
+      .notNull()
+      .default(false),
+
+    applicationStatus: text('application_status'),
+
+    campaignStatus: text('campaign_status'),
+
+    validFrom: timestamp('valid_from', {
+      withTimezone: true,
+    }),
+
+    validTo: timestamp('valid_to', {
+      withTimezone: true,
+    }),
 
     lastSyncedAt: timestamp('last_synced_at', {
       withTimezone: true,
@@ -170,13 +413,13 @@ export const platformListings = pgTable(
       .defaultNow(),
   },
   (table) => [
-    uniqueIndex('platform_listing_unique').on(
-      table.platformId,
-      table.externalListingId,
+    uniqueIndex('listing_campaign_unique').on(
+      table.listingId,
+      table.externalCampaignId,
     ),
 
-    index('platform_listings_product_index').on(
-      table.productId,
+    index('listing_campaigns_listing_index').on(
+      table.listingId,
     ),
   ],
 )
