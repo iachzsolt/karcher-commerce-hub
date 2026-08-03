@@ -8,15 +8,18 @@
     "./schema": "./src/schema.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "seed": "tsx src/seed.ts"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
     "drizzle-orm": "^0.45.2"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
     "dotenv": "^17.4.2",
     "drizzle-kit": "^0.31.10",
+    "tsx": "^4.23.4",
     "typescript": "^7.0.2"
   }
 }

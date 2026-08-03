@@ -8,6 +8,20 @@ type HealthResponse = {
   timestamp: string
 }
 
+type Platform = {
+  id: string
+  code: string
+  name: string
+  active: boolean
+  createdAt: string
+}
+
+type PlatformResponse = {
+  status: string
+  count: number
+  data: Platform[]
+}
+
 type ServiceStatus = {
   name: string
   description: string
@@ -16,25 +30,36 @@ type ServiceStatus = {
 
 function App() {
   const [apiHealth, setApiHealth] = useState<HealthResponse | null>(null)
+  const [platforms, setPlatforms] = useState<Platform[]>([])
 
   useEffect(() => {
-    const checkApi = async () => {
+    const loadSystemStatus = async () => {
       try {
-        const response = await fetch('http://localhost:3000/health')
+        const [healthResponse, platformResponse] = await Promise.all([
+          fetch('http://localhost:3000/health'),
+          fetch('http://localhost:3000/platforms'),
+        ])
 
-        if (!response.ok) {
-          throw new Error('A backend nem válaszolt megfelelően.')
+        if (!healthResponse.ok || !platformResponse.ok) {
+          throw new Error('API request failed')
         }
 
-        const data = (await response.json()) as HealthResponse
-        setApiHealth(data)
+        const healthData = (await healthResponse.json()) as HealthResponse
+        const platformData = (await platformResponse.json()) as PlatformResponse
+
+        setApiHealth(healthData)
+        setPlatforms(platformData.data)
       } catch {
         setApiHealth(null)
+        setPlatforms([])
       }
     }
 
-    void checkApi()
+    void loadSystemStatus()
   }, [])
+
+  const allegro = platforms.find((platform) => platform.code === 'ALLEGRO')
+  const arukereso = platforms.find((platform) => platform.code === 'ARUKERESO')
 
   const services: ServiceStatus[] = [
     {
@@ -51,13 +76,22 @@ function App() {
     },
     {
       name: 'PostgreSQL adatbázis',
-      description: 'Helyi fejlesztői adatbázis',
-      status: 'Nincs csatlakoztatva',
+      description: 'Neon PostgreSQL kapcsolat aktív',
+      status: apiHealth ? 'Működik' : 'Nincs csatlakoztatva',
     },
     {
-      name: 'Allegro integráció',
-      description: 'Először tesztadatokkal építjük meg',
-      status: 'Tervezett',
+      name: 'Allegro',
+      description: allegro
+        ? 'Platform rekord betöltve a Neon adatbázisból'
+        : 'A platform még nem érhető el',
+      status: allegro ? 'Működik' : 'Nincs csatlakoztatva',
+    },
+    {
+      name: 'Árukereső',
+      description: arukereso
+        ? 'Platform rekord betöltve a Neon adatbázisból'
+        : 'A platform még nem érhető el',
+      status: arukereso ? 'Működik' : 'Nincs csatlakoztatva',
     },
   ]
 
@@ -81,20 +115,20 @@ function App() {
             <p className="section-label">RENDSZERÁLLAPOT</p>
             <h2>
               {apiHealth
-                ? 'A frontend és a backend működik'
+                ? 'A teljes alapinfrastruktúra működik'
                 : 'A frontend működik'}
             </h2>
 
             <p className="hero-text">
               {apiHealth
-                ? 'A Commerce Hub adminfelülete sikeresen kapcsolódott a backend API-hoz. A következő lépésben létrehozzuk és csatlakoztatjuk a PostgreSQL-adatbázist.'
-                : 'A frontend működik, de a backend API jelenleg nem érhető el.'}
+                ? 'A Commerce Hub adminfelülete sikeresen kapcsolódik a backend API-hoz és a Neon PostgreSQL-adatbázishoz.'
+                : 'A frontend működik, de a háttérrendszer jelenleg nem érhető el.'}
             </p>
           </div>
 
           <div className="hero-status">
             <span className="status-dot" />
-            {apiHealth ? 'Frontend és backend aktív' : 'Frontend aktív'}
+            {apiHealth ? 'Rendszer aktív' : 'Frontend aktív'}
           </div>
         </section>
 
@@ -130,15 +164,16 @@ function App() {
         </section>
 
         <section className="next-step">
-          <div className="step-number">03</div>
+          <div className="step-number">04</div>
 
           <div>
             <p className="section-label">KÖVETKEZŐ LÉPÉS</p>
-            <h3>PostgreSQL-adatbázis létrehozása</h3>
+            <h3>Első termékadat betöltése</h3>
 
             <p>
-              Elkészítjük a helyi fejlesztői adatbázist, majd létrehozzuk az
-              első adatbázis-kapcsolatot és ellenőrző végpontot.
+              Létrehozunk egy tesztterméket a központi terméktörzsben,
+              hozzáadjuk az EAN-azonosítóját, majd API-n keresztül lekérjük a
+              frontend számára.
             </p>
           </div>
         </section>

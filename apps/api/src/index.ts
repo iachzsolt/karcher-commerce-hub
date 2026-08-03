@@ -1,5 +1,10 @@
 import 'dotenv/config'
 import { serve } from '@hono/node-server'
+import {
+  createDatabase,
+  platforms,
+  products,
+} from '@karcher-commerce-hub/database'
 import { neon } from '@neondatabase/serverless'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
@@ -13,9 +18,15 @@ app.use(
   }),
 )
 
+const databaseUrl = process.env.DATABASE_URL
+
+const db = databaseUrl
+  ? createDatabase(databaseUrl)
+  : null
+
 app.get('/', (context) => {
   return context.json({
-    name: 'Kärcher Commerce Hub API',
+    name: 'KĂ¤rcher Commerce Hub API',
     version: '0.1.0',
   })
 })
@@ -30,8 +41,6 @@ app.get('/health', (context) => {
 })
 
 app.get('/database/health', async (context) => {
-  const databaseUrl = process.env.DATABASE_URL
-
   if (!databaseUrl) {
     return context.json(
       {
@@ -71,6 +80,89 @@ app.get('/database/health', async (context) => {
   }
 })
 
+app.get('/products', async (context) => {
+  if (!db) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database is not configured',
+      },
+      500,
+    )
+  }
+
+  try {
+    const result = await db
+      .select({
+        id: products.id,
+        sku: products.sku,
+        name: products.name,
+        productLine: products.productLine,
+        category: products.category,
+        active: products.active,
+        createdAt: products.createdAt,
+        updatedAt: products.updatedAt,
+      })
+      .from(products)
+
+    return context.json({
+      status: 'ok',
+      count: result.length,
+      data: result,
+    })
+  } catch (error) {
+    console.error('Product query failed:', error)
+
+    return context.json(
+      {
+        status: 'error',
+        message: 'Could not load products',
+      },
+      500,
+    )
+  }
+})
+
+app.get('/platforms', async (context) => {
+  if (!db) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database is not configured',
+      },
+      500,
+    )
+  }
+
+  try {
+    const result = await db
+      .select({
+        id: platforms.id,
+        code: platforms.code,
+        name: platforms.name,
+        active: platforms.active,
+        createdAt: platforms.createdAt,
+      })
+      .from(platforms)
+
+    return context.json({
+      status: 'ok',
+      count: result.length,
+      data: result,
+    })
+  } catch (error) {
+    console.error('Platform query failed:', error)
+
+    return context.json(
+      {
+        status: 'error',
+        message: 'Could not load platforms',
+      },
+      500,
+    )
+  }
+})
+
 const port = 3000
 
 serve(
@@ -84,5 +176,6 @@ serve(
     console.log(
       `Database health: http://localhost:${info.port}/database/health`,
     )
+    console.log(`Platforms: http://localhost:${info.port}/platforms`)
   },
 )
