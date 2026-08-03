@@ -1,4 +1,6 @@
+import 'dotenv/config'
 import { serve } from '@hono/node-server'
+import { neon } from '@neondatabase/serverless'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 
@@ -27,6 +29,48 @@ app.get('/health', (context) => {
   })
 })
 
+app.get('/database/health', async (context) => {
+  const databaseUrl = process.env.DATABASE_URL
+
+  if (!databaseUrl) {
+    return context.json(
+      {
+        status: 'error',
+        database: 'not-configured',
+      },
+      500,
+    )
+  }
+
+  try {
+    const sql = neon(databaseUrl)
+
+    const result = await sql`
+      SELECT
+        current_database() AS database_name,
+        NOW() AS database_time
+    `
+
+    return context.json({
+      status: 'ok',
+      database: 'postgresql',
+      provider: 'neon',
+      databaseName: result[0].database_name,
+      databaseTime: result[0].database_time,
+    })
+  } catch (error) {
+    console.error('Database health check failed:', error)
+
+    return context.json(
+      {
+        status: 'error',
+        database: 'unreachable',
+      },
+      500,
+    )
+  }
+})
+
 const port = 3000
 
 serve(
@@ -37,5 +81,8 @@ serve(
   (info) => {
     console.log(`Commerce Hub API: http://localhost:${info.port}`)
     console.log(`Health check: http://localhost:${info.port}/health`)
+    console.log(
+      `Database health: http://localhost:${info.port}/database/health`,
+    )
   },
 )
