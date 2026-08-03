@@ -9,8 +9,11 @@ import {
 import { neon } from '@neondatabase/serverless'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
+import { allegroAuth } from './allegro-auth.js'
 
 const app = new Hono()
+
+app.route('/auth/allegro', allegroAuth)
 
 app.use(
   '*',
