@@ -1,0 +1,261 @@
+:root {
+  font-family:
+    Inter, Arial, Helvetica, sans-serif;
+  color: #1b1b1b;
+  background: #f3f4f5;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.app-shell {
+  min-height: 100vh;
+}
+
+.topbar {
+  min-height: 82px;
+  padding: 16px 5vw;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  background: #ffffff;
+  border-bottom: 1px solid #dedede;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.brand-mark {
+  width: 13px;
+  height: 50px;
+  background: #ffed00;
+  border-radius: 2px;
+}
+
+.eyebrow,
+.section-label {
+  margin: 0 0 5px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.13em;
+}
+
+.brand h1 {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.environment-badge {
+  padding: 9px 13px;
+  border: 1px solid #d7d7d7;
+  border-radius: 999px;
+  color: #555555;
+  background: #fafafa;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.content {
+  width: min(1180px, 90vw);
+  margin: 0 auto;
+  padding: 52px 0 72px;
+}
+
+.hero {
+  padding: 38px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 40px;
+  background: #ffffff;
+  border-radius: 16px;
+  border: 1px solid #e0e0e0;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.06);
+}
+
+.hero h2 {
+  max-width: 700px;
+  margin: 0;
+  font-size: clamp(31px, 5vw, 52px);
+  line-height: 1.08;
+}
+
+.hero-text {
+  max-width: 750px;
+  margin: 22px 0 0;
+  color: #5c5c5c;
+  font-size: 17px;
+  line-height: 1.7;
+}
+
+.hero-status {
+  flex-shrink: 0;
+  padding: 11px 15px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border-radius: 10px;
+  color: #155e37;
+  background: #eaf8ef;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #1d9d56;
+  box-shadow: 0 0 0 4px rgba(29, 157, 86, 0.13);
+}
+
+.section-heading {
+  margin: 52px 0 20px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.section-heading h3,
+.next-step h3 {
+  margin: 0;
+  font-size: 25px;
+}
+
+.section-heading > span {
+  color: #727272;
+  font-size: 14px;
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 17px;
+}
+
+.status-card {
+  min-height: 150px;
+  padding: 24px;
+  background: #ffffff;
+  border: 1px solid #e0e0e0;
+  border-radius: 13px;
+}
+
+.card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.status-card h4 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.status-card p {
+  margin: 25px 0 0;
+  color: #666666;
+  line-height: 1.5;
+}
+
+.status-pill {
+  padding: 7px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.status-működik {
+  color: #155e37;
+  background: #eaf8ef;
+}
+
+.status-nincs-csatlakoztatva {
+  color: #895900;
+  background: #fff6d8;
+}
+
+.status-tervezett {
+  color: #515151;
+  background: #eeeeee;
+}
+
+.next-step {
+  margin-top: 44px;
+  padding: 30px;
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+  color: #ffffff;
+  background: #202020;
+  border-radius: 15px;
+}
+
+.step-number {
+  min-width: 66px;
+  height: 66px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  color: #111111;
+  background: #ffed00;
+  font-size: 22px;
+  font-weight: 900;
+}
+
+.next-step p:last-child {
+  max-width: 760px;
+  margin: 12px 0 0;
+  color: #cccccc;
+  line-height: 1.6;
+}
+
+@media (max-width: 760px) {
+  .topbar,
+  .hero,
+  .section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .content {
+    width: min(92vw, 1180px);
+    padding-top: 30px;
+  }
+
+  .hero {
+    padding: 26px;
+  }
+
+  .status-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .next-step {
+    flex-direction: column;
+  }
+}
