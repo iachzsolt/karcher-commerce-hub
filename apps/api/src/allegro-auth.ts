@@ -325,6 +325,68 @@ allegroAuth.get('/callback', async (context) => {
   })
 })
 
+allegroAuth.get('/offers', async (context) => {
+  if (!currentSession) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Allegro account is not connected',
+      },
+      401,
+    )
+  }
+
+  const apiUrl = process.env.ALLEGRO_API_URL
+
+  if (!apiUrl) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'ALLEGRO_API_URL is missing',
+      },
+      500,
+    )
+  }
+
+  const response = await fetch(
+    `${apiUrl}/sale/offers?limit=20`,
+    {
+      headers: {
+        Authorization:
+          `Bearer ${currentSession.accessToken}`,
+        Accept:
+          'application/vnd.allegro.public.v1+json',
+      },
+    },
+  )
+
+  const body = await response.text()
+
+  if (!response.ok) {
+    console.error(
+      'Allegro offers request failed:',
+      response.status,
+      body,
+    )
+
+    return context.json(
+      {
+        status: 'error',
+        httpStatus: response.status,
+        response: body,
+      },
+      500,
+    )
+  }
+
+  return new Response(body, {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  })
+})
+
 allegroAuth.get('/status', (context) => {
   if (!currentSession) {
     return context.json({
