@@ -34,6 +34,28 @@ type Product = {
   identifiers: ProductIdentifier[]
 }
 
+type AllegroListing = {
+  id: string
+  offerId: string
+  marketplace: string
+  categoryId: string | null
+  sku: string
+  productName: string
+  accountName: string
+  environment: string
+  priceMinor: number | null
+  currency: string
+  stockAvailable: number | null
+  stockSold: number | null
+  publicationStatus:
+    | 'ACTIVE'
+    | 'ACTIVATING'
+    | 'INACTIVE'
+    | 'ENDED'
+    | 'UNKNOWN'
+  lastSyncedAt: string | null
+}
+
 type PlatformResponse = {
   status: string
   count: number
@@ -44,6 +66,12 @@ type ProductResponse = {
   status: string
   count: number
   data: Product[]
+}
+
+type AllegroListingResponse = {
+  status: string
+  count: number
+  data: AllegroListing[]
 }
 
 type ServiceStatus = {
@@ -72,26 +100,80 @@ function getPrimaryEan(product: Product) {
   )
 }
 
+function formatMoney(
+  priceMinor: number | null,
+  currency: string,
+) {
+  if (priceMinor === null) {
+    return '–'
+  }
+
+  return new Intl.NumberFormat('hu-HU', {
+    style: 'currency',
+    currency,
+    maximumFractionDigits: currency === 'HUF' ? 0 : 2,
+  }).format(priceMinor / 100)
+}
+
+function formatListingStatus(
+  status: AllegroListing['publicationStatus'],
+) {
+  if (status === 'ACTIVE') return 'Aktív'
+  if (status === 'ACTIVATING') return 'Aktiválás alatt'
+  if (status === 'INACTIVE') return 'Inaktív'
+  if (status === 'ENDED') return 'Lejárt'
+  return 'Ismeretlen'
+}
+
+function formatDate(value: string | null) {
+  if (!value) {
+    return '–'
+  }
+
+  return new Intl.DateTimeFormat('hu-HU', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(value))
+}
+
 function App() {
-  const [apiHealth, setApiHealth] = useState<HealthResponse | null>(null)
-  const [platforms, setPlatforms] = useState<Platform[]>([])
-  const [products, setProducts] = useState<Product[]>([])
+  const [apiHealth, setApiHealth] =
+    useState<HealthResponse | null>(null)
+
+  const [platforms, setPlatforms] =
+    useState<Platform[]>([])
+
+  const [products, setProducts] =
+    useState<Product[]>([])
+
+  const [allegroListings, setAllegroListings] =
+    useState<AllegroListing[]>([])
+
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     const loadData = async () => {
       try {
-        const [healthResponse, platformResponse, productResponse] =
-          await Promise.all([
-            fetch('http://localhost:3000/health'),
-            fetch('http://localhost:3000/platforms'),
-            fetch('http://localhost:3000/products'),
-          ])
+        const [
+          healthResponse,
+          platformResponse,
+          productResponse,
+          allegroResponse,
+        ] = await Promise.all([
+          fetch('http://localhost:3000/health'),
+          fetch('http://localhost:3000/platforms'),
+          fetch('http://localhost:3000/products'),
+          fetch('http://localhost:3000/allegro/listings'),
+        ])
 
         if (
           !healthResponse.ok ||
           !platformResponse.ok ||
-          !productResponse.ok
+          !productResponse.ok ||
+          !allegroResponse.ok
         ) {
           throw new Error('API request failed')
         }
@@ -105,15 +187,23 @@ function App() {
         const productData =
           (await productResponse.json()) as ProductResponse
 
+        const allegroData =
+          (await allegroResponse.json()) as AllegroListingResponse
+
         setApiHealth(healthData)
         setPlatforms(platformData.data)
         setProducts(productData.data)
+        setAllegroListings(allegroData.data)
       } catch (error) {
-        console.error('Commerce Hub data loading failed:', error)
+        console.error(
+          'Commerce Hub data loading failed:',
+          error,
+        )
 
         setApiHealth(null)
         setPlatforms([])
         setProducts([])
+        setAllegroListings([])
       } finally {
         setLoading(false)
       }
@@ -150,10 +240,13 @@ function App() {
     },
     {
       name: 'Allegro',
-      description: allegro
-        ? 'Platform előkészítve az integrációhoz'
-        : 'A platform nem érhető el',
-      status: allegro ? 'prepared' : 'disconnected',
+      description:
+        allegro && allegroListings.length > 0
+          ? `${allegroListings.length} magyar ajánlat szinkronizálva`
+          : allegro
+            ? 'Platform csatlakoztatva'
+            : 'A platform nem érhető el',
+      status: allegro ? 'working' : 'disconnected',
     },
     {
       name: 'Árukereső',
@@ -169,6 +262,7 @@ function App() {
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark" />
+
           <div>
             <p className="eyebrow">KÄRCHER</p>
             <h1>Commerce Hub</h1>
@@ -187,13 +281,13 @@ function App() {
 
             <h2>
               {apiHealth
-                ? 'A teljes alapinfrastruktúra működik'
+                ? 'A Commerce Hub működik'
                 : 'A frontend működik'}
             </h2>
 
             <p className="hero-text">
-              A Commerce Hub már valódi adatokat olvas a Neon
-              PostgreSQL-adatbázisból.
+              A rendszer már valódi termék- és Allegro-adatokat
+              olvas a Neon PostgreSQL-adatbázisból.
             </p>
           </div>
 
@@ -215,7 +309,10 @@ function App() {
 
           <div className="status-grid">
             {services.map((service) => (
-              <article className="status-card" key={service.name}>
+              <article
+                className="status-card"
+                key={service.name}
+              >
                 <div className="card-header">
                   <h4>{service.name}</h4>
 
@@ -240,7 +337,9 @@ function App() {
             </div>
 
             <span>
-              {loading ? 'Betöltés...' : `${products.length} termék`}
+              {loading
+                ? 'Betöltés...'
+                : `${products.length} termék`}
             </span>
           </div>
 
@@ -260,11 +359,22 @@ function App() {
               <tbody>
                 {products.map((product) => (
                   <tr key={product.id}>
-                    <td className="sku-cell">{product.sku}</td>
+                    <td className="sku-cell">
+                      {product.sku}
+                    </td>
+
                     <td>{getPrimaryEan(product)}</td>
+
                     <td>{product.name}</td>
-                    <td>{formatProductLine(product.productLine)}</td>
+
+                    <td>
+                      {formatProductLine(
+                        product.productLine,
+                      )}
+                    </td>
+
                     <td>{product.category ?? '–'}</td>
+
                     <td>
                       <span
                         className={`product-status ${
@@ -273,7 +383,9 @@ function App() {
                             : 'product-inactive'
                         }`}
                       >
-                        {product.active ? 'Aktív' : 'Inaktív'}
+                        {product.active
+                          ? 'Aktív'
+                          : 'Inaktív'}
                       </span>
                     </td>
                   </tr>
@@ -281,7 +393,10 @@ function App() {
 
                 {!loading && products.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="empty-state">
+                    <td
+                      colSpan={6}
+                      className="empty-state"
+                    >
                       Nincs megjeleníthető termék.
                     </td>
                   </tr>
@@ -291,17 +406,114 @@ function App() {
           </div>
         </section>
 
+        <section className="allegro-section">
+          <div className="section-heading">
+            <div>
+              <p className="section-label">
+                ALLEGRO MAGYARORSZÁG
+              </p>
+
+              <h3>Ajánlatok</h3>
+            </div>
+
+            <span>
+              {loading
+                ? 'Betöltés...'
+                : `${allegroListings.length} ajánlat`}
+            </span>
+          </div>
+
+          <div className="table-card">
+            <table className="products-table allegro-table">
+              <thead>
+                <tr>
+                  <th>Cikkszám</th>
+                  <th>Terméknév</th>
+                  <th>Offer ID</th>
+                  <th>Ár</th>
+                  <th>Készlet</th>
+                  <th>Eladott</th>
+                  <th>Státusz</th>
+                  <th>Utolsó szinkron</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {allegroListings.map((listing) => (
+                  <tr key={listing.id}>
+                    <td className="sku-cell">
+                      {listing.sku}
+                    </td>
+
+                    <td>{listing.productName}</td>
+
+                    <td className="offer-id-cell">
+                      {listing.offerId}
+                    </td>
+
+                    <td className="price-cell">
+                      {formatMoney(
+                        listing.priceMinor,
+                        listing.currency,
+                      )}
+                    </td>
+
+                    <td>
+                      {listing.stockAvailable ?? '–'} db
+                    </td>
+
+                    <td>{listing.stockSold ?? 0} db</td>
+
+                    <td>
+                      <span
+                        className={`listing-status listing-${listing.publicationStatus.toLowerCase()}`}
+                      >
+                        {formatListingStatus(
+                          listing.publicationStatus,
+                        )}
+                      </span>
+                    </td>
+
+                    <td className="sync-cell">
+                      {formatDate(
+                        listing.lastSyncedAt,
+                      )}
+                    </td>
+                  </tr>
+                ))}
+
+                {!loading &&
+                  allegroListings.length === 0 && (
+                    <tr>
+                      <td
+                        colSpan={8}
+                        className="empty-state"
+                      >
+                        Nincs szinkronizált Allegro
+                        ajánlat.
+                      </td>
+                    </tr>
+                  )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
         <section className="next-step">
-          <div className="step-number">05</div>
+          <div className="step-number">06</div>
 
           <div>
-            <p className="section-label">KÖVETKEZŐ LÉPÉS</p>
-            <h3>Allegro-ajánlatok</h3>
+            <p className="section-label">
+              KÖVETKEZŐ LÉPÉS
+            </p>
+
+            <h3>Kívánt állapot és szinkron</h3>
 
             <p>
-              A termékazonosítás alapja működik. Következőként az
-              Allegro-ajánlatok aktuális és kívánt állapotának
-              adatmodelljét építjük fel.
+              Következőként összekötjük az Allegro aktuális
+              állapotát a Commerce Hub kívánt állapotával, így
+              kezelhetővé válik az ár, a készlet és később a
+              kampányárak módosítása.
             </p>
           </div>
         </section>

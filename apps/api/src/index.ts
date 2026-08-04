@@ -2,11 +2,15 @@ import 'dotenv/config'
 import { serve } from '@hono/node-server'
 import {
   createDatabase,
+  listingRemoteStates,
+  platformAccounts,
+  platformListings,
   platforms,
   productIdentifiers,
   products,
 } from '@karcher-commerce-hub/database'
 import { neon } from '@neondatabase/serverless'
+import { and, eq } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { allegroAuth } from './allegro-auth.js'
@@ -187,6 +191,101 @@ app.get('/products', async (context) => {
   }
 })
 
+
+app.get('/allegro/listings', async (context) => {
+  if (!db) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database is not configured',
+      },
+      500,
+    )
+  }
+
+  try {
+    const result = await db
+      .select({
+        id: platformListings.id,
+
+        offerId: platformListings.externalListingId,
+        marketplace: platformListings.marketplace,
+        categoryId: platformListings.categoryId,
+
+        sku: products.sku,
+        productName: products.name,
+
+        accountName: platformAccounts.name,
+        environment: platformAccounts.environment,
+
+        priceMinor: listingRemoteStates.priceMinor,
+        currency: listingRemoteStates.currency,
+
+        stockAvailable: listingRemoteStates.stockAvailable,
+        stockSold: listingRemoteStates.stockSold,
+
+        publicationStatus:
+          listingRemoteStates.publicationStatus,
+
+        lastSyncedAt:
+          listingRemoteStates.lastSyncedAt,
+      })
+      .from(platformListings)
+      .innerJoin(
+        products,
+        eq(platformListings.productId, products.id),
+      )
+      .innerJoin(
+        platformAccounts,
+        eq(
+          platformListings.accountId,
+          platformAccounts.id,
+        ),
+      )
+      .innerJoin(
+        platforms,
+        eq(
+          platformListings.platformId,
+          platforms.id,
+        ),
+      )
+      .leftJoin(
+        listingRemoteStates,
+        eq(
+          listingRemoteStates.listingId,
+          platformListings.id,
+        ),
+      )
+      .where(
+        and(
+          eq(platforms.code, 'ALLEGRO'),
+          eq(
+            platformListings.marketplace,
+            'allegro-hu',
+          ),
+        ),
+      )
+
+    return context.json({
+      status: 'ok',
+      count: result.length,
+      data: result,
+    })
+  } catch (error) {
+    console.error(
+      'Allegro listing query failed:',
+      error,
+    )
+
+    return context.json(
+      {
+        status: 'error',
+        message: 'Could not load Allegro listings',
+      },
+      500,
+    )
+  }
+})
 const port = 3000
 
 serve(
