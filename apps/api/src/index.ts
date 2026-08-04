@@ -406,6 +406,95 @@ app.patch('/allegro/listings/:id/desired-price', async (context) => {
     )
   }
 })
+
+app.patch('/allegro/listings/:id/desired-stock', async (context) => {
+  if (!db) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database is not configured',
+      },
+      500,
+    )
+  }
+
+  try {
+    const listingId = context.req.param('id')
+
+    const body = await context.req.json<{
+      desiredStock: number
+    }>()
+
+    const desiredStock = Number(body.desiredStock)
+
+    if (
+      !Number.isInteger(desiredStock) ||
+      desiredStock < 0
+    ) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Invalid desired stock',
+        },
+        400,
+      )
+    }
+
+    const [updated] = await db
+      .update(listingDesiredStates)
+      .set({
+        desiredStock,
+        stockLocked: true,
+        updatedBy: 'COMMERCE_HUB_UI',
+        updatedAt: new Date(),
+      })
+      .where(
+        eq(
+          listingDesiredStates.listingId,
+          listingId,
+        ),
+      )
+      .returning({
+        listingId: listingDesiredStates.listingId,
+        desiredStock:
+          listingDesiredStates.desiredStock,
+        stockLocked:
+          listingDesiredStates.stockLocked,
+        updatedBy:
+          listingDesiredStates.updatedBy,
+        updatedAt:
+          listingDesiredStates.updatedAt,
+      })
+
+    if (!updated) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Desired state was not found',
+        },
+        404,
+      )
+    }
+
+    return context.json({
+      status: 'ok',
+      data: updated,
+    })
+  } catch (error) {
+    console.error(
+      'Desired stock update failed:',
+      error,
+    )
+
+    return context.json(
+      {
+        status: 'error',
+        message: 'Could not update desired stock',
+      },
+      500,
+    )
+  }
+})
 const port = 3000
 
 serve(

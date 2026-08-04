@@ -1115,3 +1115,255 @@ allegroAuth.post('/push-price/:listingId', async (context) => {
     202,
   )
 })
+
+allegroAuth.post('/push-stock/:listingId', async (context) => {
+  if (!currentSession) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Allegro account is not connected',
+      },
+      401,
+    )
+  }
+
+  const databaseUrl = process.env.DATABASE_URL
+  const apiUrl = process.env.ALLEGRO_API_URL
+
+  if (!databaseUrl || !apiUrl) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database or Allegro API configuration is missing',
+      },
+      500,
+    )
+  }
+
+  const listingId = context.req.param('listingId')
+  const db = createDatabase(databaseUrl)
+
+  const [row] = await db
+    .select({
+      listingId: platformListings.id,
+      offerId: platformListings.externalListingId,
+
+      desiredStock:
+        listingDesiredStates.desiredStock,
+
+      stockLocked:
+        listingDesiredStates.stockLocked,
+    })
+    .from(platformListings)
+    .innerJoin(
+      listingDesiredStates,
+      eq(
+        listingDesiredStates.listingId,
+        platformListings.id,
+      ),
+    )
+    .where(
+      eq(platformListings.id, listingId),
+    )
+    .limit(1)
+
+  if (!row) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Listing or desired state was not found',
+      },
+      404,
+    )
+  }
+
+  if (row.desiredStock === null) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Desired stock is missing',
+      },
+      400,
+    )
+  }
+
+  if (row.desiredStock < 0) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Desired stock cannot be negative',
+      },
+      400,
+    )
+  }
+
+  const commandId = randomUUID()
+
+  const commandResponse = await fetch(
+    `${apiUrl}/sale/offer-quantity-change-commands/${commandId}`,
+    {
+      method: 'PUT',
+
+      headers: {
+        Authorization:
+          `Bearer ${currentSession.accessToken}`,
+
+        Accept:
+          'application/vnd.allegro.public.v1+json',
+
+        'Content-Type':
+          'application/vnd.allegro.public.v1+json',
+      },
+
+      body: JSON.stringify({
+        modification: {
+          changeType: 'FIXED',
+          value: row.desiredStock,
+        },
+
+        offerCriteria: [
+          {
+            type: 'CONTAINS_OFFERS',
+
+            offers: [
+              {
+                id: row.offerId,
+              },
+            ],
+          },
+        ],
+      }),
+    },
+  )
+
+  if (!commandResponse.ok) {
+    const errorBody =
+      await commandResponse.text()
+
+    console.error(
+      'Allegro stock command failed:',
+      commandResponse.status,
+      errorBody,
+    )
+
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Allegro rejected the stock change command',
+
+        httpStatus:
+          commandResponse.status,
+
+        allegroResponse:
+          errorBody,
+      },
+      502,
+    )
+  }
+
+  const sleep = (ms: number) =>
+    new Promise((resolve) =>
+      setTimeout(resolve, ms),
+    )
+
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await sleep(500)
+
+    const taskResponse = await fetch(
+      `${apiUrl}/sale/offer-quantity-change-commands/${commandId}/tasks`,
+      {
+        headers: {
+          Authorization:
+            `Bearer ${currentSession.accessToken}`,
+
+          Accept:
+            'application/vnd.allegro.public.v1+json',
+        },
+      },
+    )
+
+    if (!taskResponse.ok) {
+      continue
+    }
+
+    const taskData = (await taskResponse.json()) as {
+      tasks?: Array<{
+        offer?: {
+          id?: string
+        }
+
+        status?: string
+        message?: string
+        field?: string
+      }>
+    }
+
+    const task = taskData.tasks?.find(
+      (item) =>
+        item.offer?.id === row.offerId,
+    )
+
+    if (!task) {
+      continue
+    }
+
+    if (task.status === 'FAILED') {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Allegro stock update failed',
+
+          commandId,
+          task,
+        },
+        502,
+      )
+    }
+
+    if (task.status === 'SUCCESS') {
+      return context.json({
+        status: 'ok',
+
+        message:
+          'Allegro stock updated successfully',
+
+        commandId,
+
+        listingId:
+          row.listingId,
+
+        offerId:
+          row.offerId,
+
+        desiredStock:
+          row.desiredStock,
+
+        allegroTaskStatus:
+          task.status,
+      })
+    }
+  }
+
+  return context.json(
+    {
+      status: 'pending',
+
+      message:
+        'Allegro accepted the command, but it is still processing',
+
+      commandId,
+
+      listingId:
+        row.listingId,
+
+      offerId:
+        row.offerId,
+
+      desiredStock:
+        row.desiredStock,
+    },
+    202,
+  )
+})

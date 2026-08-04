@@ -175,7 +175,16 @@ function App() {
   const [savingDesiredPrice, setSavingDesiredPrice] =
     useState<string | null>(null)
 
+  const [desiredStockDrafts, setDesiredStockDrafts] =
+    useState<Record<string, string>>({})
+
+  const [savingDesiredStock, setSavingDesiredStock] =
+    useState<string | null>(null)
+
   const [syncingListingId, setSyncingListingId] =
+    useState<string | null>(null)
+
+  const [syncingStockListingId, setSyncingStockListingId] =
     useState<string | null>(null)
 
   const [loading, setLoading] = useState(true)
@@ -227,6 +236,17 @@ function App() {
               listing.id,
               listing.desiredPriceMinor !== null
                 ? String(listing.desiredPriceMinor / 100)
+                : '',
+            ]),
+          ),
+        )
+
+        setDesiredStockDrafts(
+          Object.fromEntries(
+            allegroData.data.map((listing) => [
+              listing.id,
+              listing.desiredStock !== null
+                ? String(listing.desiredStock)
                 : '',
             ]),
           ),
@@ -327,6 +347,197 @@ function App() {
       )
     } finally {
       setSavingDesiredPrice(null)
+    }
+  }
+  const saveDesiredStock = async (
+    listing: AllegroListing,
+  ) => {
+    const draft =
+      desiredStockDrafts[listing.id] ?? ''
+
+    const desiredStock = Number(draft)
+
+    if (
+      !Number.isInteger(desiredStock) ||
+      desiredStock < 0
+    ) {
+      window.alert(
+        'Adj meg egy érvényes egész készletértéket.',
+      )
+      return
+    }
+
+    setSavingDesiredStock(listing.id)
+
+    try {
+      const response = await fetch(
+        `http://localhost:3000/allegro/listings/${listing.id}/desired-stock`,
+        {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            desiredStock,
+          }),
+        },
+      )
+
+      if (!response.ok) {
+        throw new Error(
+          'A kívánt készlet mentése sikertelen.',
+        )
+      }
+
+      const result = (await response.json()) as {
+        status: string
+        data: {
+          desiredStock: number
+          stockLocked: boolean
+        }
+      }
+
+      setAllegroListings((current) =>
+        current.map((item) =>
+          item.id === listing.id
+            ? {
+                ...item,
+                desiredStock:
+                  result.data.desiredStock,
+                stockLocked:
+                  result.data.stockLocked,
+              }
+            : item,
+        ),
+      )
+
+      setDesiredStockDrafts((current) => ({
+        ...current,
+        [listing.id]: String(
+          result.data.desiredStock,
+        ),
+      }))
+    } catch (error) {
+      console.error(
+        'Desired stock save failed:',
+        error,
+      )
+
+      window.alert(
+        'Nem sikerült elmenteni a kívánt készletet.',
+      )
+    } finally {
+      setSavingDesiredStock(null)
+    }
+  }
+  const pushDesiredStockToAllegro = async (
+    listing: AllegroListing,
+  ) => {
+    if (
+      listing.desiredStock === null ||
+      listing.stockAvailable === listing.desiredStock
+    ) {
+      return
+    }
+
+    const confirmed = window.confirm(
+      `Biztosan módosítod az Allegro készletet?\n\n` +
+        `${listing.stockAvailable ?? 0} db → ${listing.desiredStock} db`,
+    )
+
+    if (!confirmed) {
+      return
+    }
+
+    setSyncingStockListingId(listing.id)
+
+    try {
+      const pushResponse = await fetch(
+        `http://localhost:3000/auth/allegro/push-stock/${listing.id}`,
+        {
+          method: 'POST',
+        },
+      )
+
+      const pushData = (await pushResponse.json()) as {
+        status: string
+        message?: string
+      }
+
+      if (!pushResponse.ok) {
+        if (pushResponse.status === 401) {
+          throw new Error(
+            'Az Allegro-fiók nincs csatlakoztatva.',
+          )
+        }
+
+        throw new Error(
+          pushData.message ??
+            'Az Allegro készletfrissítés sikertelen.',
+        )
+      }
+
+      if (pushData.status !== 'ok') {
+        throw new Error(
+          'Az Allegro még feldolgozza a készletmódosítást.',
+        )
+      }
+
+      const syncResponse = await fetch(
+        'http://localhost:3000/auth/allegro/sync',
+        {
+          method: 'POST',
+        },
+      )
+
+      if (!syncResponse.ok) {
+        throw new Error(
+          'A készlet módosult, de az új állapot visszaolvasása sikertelen.',
+        )
+      }
+
+      const listingResponse = await fetch(
+        'http://localhost:3000/allegro/listings',
+      )
+
+      if (!listingResponse.ok) {
+        throw new Error(
+          'Nem sikerült frissíteni az ajánlatlistát.',
+        )
+      }
+
+      const listingData =
+        (await listingResponse.json()) as AllegroListingResponse
+
+      setAllegroListings(listingData.data)
+
+      setDesiredStockDrafts(
+        Object.fromEntries(
+          listingData.data.map((item) => [
+            item.id,
+            item.desiredStock !== null
+              ? String(item.desiredStock)
+              : '',
+          ]),
+        ),
+      )
+
+      window.alert(
+        'Az Allegro készlet sikeresen frissült.',
+      )
+    } catch (error) {
+      console.error(
+        'Allegro stock synchronization failed:',
+        error,
+      )
+
+      window.alert(
+        error instanceof Error
+          ? error.message
+          : 'Az Allegro készletszinkron sikertelen.',
+      )
+    } finally {
+      setSyncingStockListingId(null)
     }
   }
   const pushDesiredPriceToAllegro = async (
@@ -746,8 +957,52 @@ function App() {
                       {listing.stockAvailable ?? '–'} db
                     </td>
 
-                    <td>
-                      {listing.desiredStock ?? '–'} db
+                    <td className="desired-stock-cell">
+                      <div className="desired-stock-editor">
+                        <div className="stock-input-wrapper">
+                          <input
+                            className="stock-input"
+                            type="number"
+                            min="0"
+                            step="1"
+                            value={
+                              desiredStockDrafts[
+                                listing.id
+                              ] ?? ''
+                            }
+                            onChange={(event) =>
+                              setDesiredStockDrafts(
+                                (current) => ({
+                                  ...current,
+                                  [listing.id]:
+                                    event.target.value,
+                                }),
+                              )
+                            }
+                          />
+
+                          <span>db</span>
+                        </div>
+
+                        <button
+                          className="save-stock-button"
+                          type="button"
+                          disabled={
+                            savingDesiredStock ===
+                            listing.id
+                          }
+                          onClick={() =>
+                            void saveDesiredStock(
+                              listing,
+                            )
+                          }
+                        >
+                          {savingDesiredStock ===
+                          listing.id
+                            ? 'Mentés...'
+                            : 'Mentés'}
+                        </button>
+                      </div>
                     </td>
 
                     <td>
@@ -783,7 +1038,29 @@ function App() {
                       >
                         {syncingListingId === listing.id
                           ? 'Szinkron...'
-                          : 'Küldés az Allegróra'}
+                          : 'Ár küldése'}
+                      </button>
+
+                      <button
+                        className="sync-stock-button"
+                        type="button"
+                        disabled={
+                          listing.desiredStock === null ||
+                          listing.stockAvailable ===
+                            listing.desiredStock ||
+                          syncingStockListingId ===
+                            listing.id
+                        }
+                        onClick={() =>
+                          void pushDesiredStockToAllegro(
+                            listing,
+                          )
+                        }
+                      >
+                        {syncingStockListingId ===
+                        listing.id
+                          ? 'Szinkron...'
+                          : 'Készlet küldése'}
                       </button>
                     </td>
 

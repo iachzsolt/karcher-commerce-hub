@@ -515,3 +515,85 @@ textarea {
   background: #eeeeee;
   cursor: default;
 }
+.desired-stock-cell {
+  min-width: 170px;
+}
+
+.desired-stock-editor {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stock-input-wrapper {
+  width: 82px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 9px;
+  background: #ffffff;
+  border: 1px solid #d6d6d6;
+  border-radius: 8px;
+}
+
+.stock-input-wrapper:focus-within {
+  border-color: #202020;
+}
+
+.stock-input {
+  width: 45px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-weight: 800;
+}
+
+.stock-input-wrapper span {
+  color: #666666;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.save-stock-button {
+  padding: 8px 11px;
+  border: 0;
+  border-radius: 8px;
+  color: #111111;
+  background: #ffed00;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.save-stock-button:hover {
+  filter: brightness(0.97);
+}
+
+.save-stock-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+.sync-stock-button {
+  margin-left: 6px;
+  padding: 9px 12px;
+  border: 1px solid #d6d6d6;
+  border-radius: 8px;
+  color: #202020;
+  background: #ffffff;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.sync-stock-button:hover:not(:disabled) {
+  background: #f5f5f5;
+}
+
+.sync-stock-button:disabled {
+  color: #999999;
+  background: #eeeeee;
+  border-color: #eeeeee;
+  cursor: default;
+}
