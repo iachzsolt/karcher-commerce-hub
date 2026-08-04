@@ -187,13 +187,6 @@ function App() {
   const [syncingStockListingId, setSyncingStockListingId] =
     useState<string | null>(null)
 
-  const [selectedListingIds, setSelectedListingIds] =
-    useState<string[]>([])
-
-  const [syncingWholeListingId, setSyncingWholeListingId] =
-    useState<string | null>(null)
-
-
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -663,182 +656,6 @@ function App() {
       setSyncingListingId(null)
     }
   }
-  const toggleListingSelection = (
-    listingId: string,
-  ) => {
-    setSelectedListingIds((current) =>
-      current.includes(listingId)
-        ? current.filter((id) => id !== listingId)
-        : [...current, listingId],
-    )
-  }
-
-  const toggleAllListings = () => {
-    const allSelected =
-      allegroListings.length > 0 &&
-      allegroListings.every((listing) =>
-        selectedListingIds.includes(listing.id),
-      )
-
-    setSelectedListingIds(
-      allSelected
-        ? []
-        : allegroListings.map(
-            (listing) => listing.id,
-          ),
-    )
-  }
-
-  const allListingsSelected =
-    allegroListings.length > 0 &&
-    allegroListings.every((listing) =>
-      selectedListingIds.includes(listing.id),
-    )
-  const syncWholeListingToAllegro = async (
-    listing: AllegroListing,
-  ) => {
-    const priceChanged =
-      listing.desiredPriceMinor !== null &&
-      listing.priceMinor !== listing.desiredPriceMinor
-
-    const stockChanged =
-      listing.desiredStock !== null &&
-      listing.stockAvailable !== listing.desiredStock
-
-    if (!priceChanged && !stockChanged) {
-      return
-    }
-
-    const changes: string[] = []
-
-    if (priceChanged) {
-      changes.push(
-        `Ár: ${formatMoney(
-          listing.priceMinor,
-          listing.currency,
-        )} → ${formatMoney(
-          listing.desiredPriceMinor,
-          listing.currency,
-        )}`,
-      )
-    }
-
-    if (stockChanged) {
-      changes.push(
-        `Készlet: ${listing.stockAvailable ?? 0} db → ${listing.desiredStock} db`,
-      )
-    }
-
-    const confirmed = window.confirm(
-      `Biztosan szinkronizálod az ajánlatot?
-
-${changes.join('\n')}`,
-    )
-
-    if (!confirmed) {
-      return
-    }
-
-    setSyncingWholeListingId(listing.id)
-
-    try {
-      if (priceChanged) {
-        const response = await fetch(
-          `http://localhost:3000/auth/allegro/push-price/${listing.id}`,
-          { method: 'POST' },
-        )
-
-        const data = (await response.json()) as {
-          status: string
-          message?: string
-        }
-
-        if (!response.ok) {
-          throw new Error(
-            data.message ?? 'Az ár szinkronizálása sikertelen.',
-          )
-        }
-      }
-
-      if (stockChanged) {
-        const response = await fetch(
-          `http://localhost:3000/auth/allegro/push-stock/${listing.id}`,
-          { method: 'POST' },
-        )
-
-        const data = (await response.json()) as {
-          status: string
-          message?: string
-        }
-
-        if (!response.ok) {
-          throw new Error(
-            data.message ?? 'A készlet szinkronizálása sikertelen.',
-          )
-        }
-      }
-
-      const syncResponse = await fetch(
-        'http://localhost:3000/auth/allegro/sync',
-        { method: 'POST' },
-      )
-
-      if (!syncResponse.ok) {
-        throw new Error(
-          'A visszaellenőrző szinkron sikertelen.',
-        )
-      }
-
-      const listingResponse = await fetch(
-        'http://localhost:3000/allegro/listings',
-      )
-
-      if (!listingResponse.ok) {
-        throw new Error(
-          'Nem sikerült frissíteni az ajánlatlistát.',
-        )
-      }
-
-      const listingData =
-        (await listingResponse.json()) as AllegroListingResponse
-
-      setAllegroListings(listingData.data)
-
-      setDesiredPriceDrafts(
-        Object.fromEntries(
-          listingData.data.map((item) => [
-            item.id,
-            item.desiredPriceMinor !== null
-              ? String(item.desiredPriceMinor / 100)
-              : '',
-          ]),
-        ),
-      )
-
-      setDesiredStockDrafts(
-        Object.fromEntries(
-          listingData.data.map((item) => [
-            item.id,
-            item.desiredStock !== null
-              ? String(item.desiredStock)
-              : '',
-          ]),
-        ),
-      )
-
-      window.alert('Az ajánlat sikeresen szinkronizálva.')
-    } catch (error) {
-      console.error('Listing sync failed:', error)
-
-      window.alert(
-        error instanceof Error
-          ? error.message
-          : 'A szinkronizálás sikertelen.',
-      )
-    } finally {
-      setSyncingWholeListingId(null)
-    }
-  }
   const allegro = platforms.find(
     (platform) => platform.code === 'ALLEGRO',
   )
@@ -1050,28 +867,10 @@ ${changes.join('\n')}`,
             </span>
           </div>
 
-          <div className="bulk-toolbar">
-            <label className="select-all-control">
-              <input
-                type="checkbox"
-                checked={allListingsSelected}
-                onChange={toggleAllListings}
-              />
-              <span>Összes kijelölése</span>
-            </label>
-
-            <div className="bulk-toolbar-right">
-              <span>
-                {selectedListingIds.length} kijelölve
-              </span>
-            </div>
-          </div>
-
           <div className="table-card">
             <table className="products-table allegro-table">
               <thead>
                 <tr>
-                  <th className="selection-column" />
                   <th>Cikkszám</th>
                   <th>Terméknév</th>
                   <th>Offer ID</th>
@@ -1080,27 +879,12 @@ ${changes.join('\n')}`,
                   <th>Eltérés</th>
                   <th>Státusz</th>
                   <th>Utolsó szinkron</th>
-                  <th>Szinkron</th>
                 </tr>
               </thead>
 
               <tbody>
                 {allegroListings.map((listing) => (
                   <tr key={listing.id}>
-                      <td className="selection-column">
-                        <input
-                          type="checkbox"
-                          checked={selectedListingIds.includes(
-                            listing.id,
-                          )}
-                          onChange={() =>
-                            toggleListingSelection(
-                              listing.id,
-                            )
-                          }
-                          aria-label={`${listing.sku} kijelölése`}
-                        />
-                      </td>
                     <td className="sku-cell">
                       {listing.sku}
                     </td>
@@ -1316,30 +1100,6 @@ ${changes.join('\n')}`,
                         listing.lastSyncedAt,
                       )}
                     </td>
-                    <td className="row-sync-cell">
-                      <button
-                        className="row-sync-button"
-                        type="button"
-                        disabled={
-                          (listing.priceMinor ===
-                            listing.desiredPriceMinor &&
-                            listing.stockAvailable ===
-                              listing.desiredStock) ||
-                          syncingWholeListingId ===
-                            listing.id
-                        }
-                        onClick={() =>
-                          void syncWholeListingToAllegro(
-                            listing,
-                          )
-                        }
-                      >
-                        {syncingWholeListingId ===
-                        listing.id
-                          ? 'Szinkron...'
-                          : 'Szinkronizálás'}
-                      </button>
-                    </td>
                   </tr>
                 ))}
 
@@ -1347,7 +1107,7 @@ ${changes.join('\n')}`,
                   allegroListings.length === 0 && (
                     <tr>
                       <td
-                        colSpan={10}
+                        colSpan={8}
                         className="empty-state"
                       >
                         Nincs szinkronizált Allegro
