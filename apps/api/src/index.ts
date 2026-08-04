@@ -315,6 +315,97 @@ app.get('/allegro/listings', async (context) => {
     )
   }
 })
+
+app.patch('/allegro/listings/:id/desired-price', async (context) => {
+  if (!db) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database is not configured',
+      },
+      500,
+    )
+  }
+
+  try {
+    const listingId = context.req.param('id')
+    const body = await context.req.json<{
+      desiredPrice: number
+    }>()
+
+    const desiredPrice = Number(body.desiredPrice)
+
+    if (
+      !Number.isFinite(desiredPrice) ||
+      desiredPrice < 0
+    ) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Invalid desired price',
+        },
+        400,
+      )
+    }
+
+    const desiredPriceMinor =
+      Math.round(desiredPrice * 100)
+
+    const [updated] = await db
+      .update(listingDesiredStates)
+      .set({
+        regularPriceMinor: desiredPriceMinor,
+        priceLocked: true,
+        updatedBy: 'COMMERCE_HUB_UI',
+        updatedAt: new Date(),
+      })
+      .where(
+        eq(
+          listingDesiredStates.listingId,
+          listingId,
+        ),
+      )
+      .returning({
+        listingId: listingDesiredStates.listingId,
+        desiredPriceMinor:
+          listingDesiredStates.regularPriceMinor,
+        priceLocked:
+          listingDesiredStates.priceLocked,
+        updatedBy:
+          listingDesiredStates.updatedBy,
+        updatedAt:
+          listingDesiredStates.updatedAt,
+      })
+
+    if (!updated) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Desired state was not found',
+        },
+        404,
+      )
+    }
+
+    return context.json({
+      status: 'ok',
+      data: updated,
+    })
+  } catch (error) {
+    console.error(
+      'Desired price update failed:',
+      error,
+    )
+
+    return context.json(
+      {
+        status: 'error',
+        message: 'Could not update desired price',
+      },
+      500,
+    )
+  }
+})
 const port = 3000
 
 serve(

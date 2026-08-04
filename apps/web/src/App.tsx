@@ -169,6 +169,12 @@ function App() {
   const [allegroListings, setAllegroListings] =
     useState<AllegroListing[]>([])
 
+  const [desiredPriceDrafts, setDesiredPriceDrafts] =
+    useState<Record<string, string>>({})
+
+  const [savingDesiredPrice, setSavingDesiredPrice] =
+    useState<string | null>(null)
+
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -211,6 +217,17 @@ function App() {
         setPlatforms(platformData.data)
         setProducts(productData.data)
         setAllegroListings(allegroData.data)
+
+        setDesiredPriceDrafts(
+          Object.fromEntries(
+            allegroData.data.map((listing) => [
+              listing.id,
+              listing.desiredPriceMinor !== null
+                ? String(listing.desiredPriceMinor / 100)
+                : '',
+            ]),
+          ),
+        )
       } catch (error) {
         console.error(
           'Commerce Hub data loading failed:',
@@ -229,6 +246,86 @@ function App() {
     void loadData()
   }, [])
 
+  const saveDesiredPrice = async (
+    listing: AllegroListing,
+  ) => {
+    const draft = desiredPriceDrafts[listing.id] ?? ''
+
+    const desiredPrice = Number(
+      draft.replace(',', '.'),
+    )
+
+    if (
+      !Number.isFinite(desiredPrice) ||
+      desiredPrice < 0
+    ) {
+      window.alert('Adj meg egy érvényes árat.')
+      return
+    }
+
+    setSavingDesiredPrice(listing.id)
+
+    try {
+      const response = await fetch(
+        `http://localhost:3000/allegro/listings/${listing.id}/desired-price`,
+        {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            desiredPrice,
+          }),
+        },
+      )
+
+      if (!response.ok) {
+        throw new Error(
+          'A kívánt ár mentése sikertelen.',
+        )
+      }
+
+      const result = (await response.json()) as {
+        status: string
+        data: {
+          desiredPriceMinor: number
+          priceLocked: boolean
+        }
+      }
+
+      setAllegroListings((current) =>
+        current.map((item) =>
+          item.id === listing.id
+            ? {
+                ...item,
+                desiredPriceMinor:
+                  result.data.desiredPriceMinor,
+                priceLocked:
+                  result.data.priceLocked,
+              }
+            : item,
+        ),
+      )
+
+      setDesiredPriceDrafts((current) => ({
+        ...current,
+        [listing.id]: String(
+          result.data.desiredPriceMinor / 100,
+        ),
+      }))
+    } catch (error) {
+      console.error(
+        'Desired price save failed:',
+        error,
+      )
+
+      window.alert(
+        'Nem sikerült elmenteni a kívánt árat.',
+      )
+    } finally {
+      setSavingDesiredPrice(null)
+    }
+  }
   const allegro = platforms.find(
     (platform) => platform.code === 'ALLEGRO',
   )
@@ -477,11 +574,52 @@ function App() {
                       )}
                     </td>
 
-                    <td className="price-cell">
-                      {formatMoney(
-                        listing.desiredPriceMinor,
-                        listing.currency,
-                      )}
+                    <td className="desired-price-cell">
+                      <div className="desired-price-editor">
+                        <div className="price-input-wrapper">
+                          <input
+                            className="price-input"
+                            type="number"
+                            min="0"
+                            step="1"
+                            value={
+                              desiredPriceDrafts[
+                                listing.id
+                              ] ?? ''
+                            }
+                            onChange={(event) =>
+                              setDesiredPriceDrafts(
+                                (current) => ({
+                                  ...current,
+                                  [listing.id]:
+                                    event.target.value,
+                                }),
+                              )
+                            }
+                          />
+
+                          <span>Ft</span>
+                        </div>
+
+                        <button
+                          className="save-price-button"
+                          type="button"
+                          disabled={
+                            savingDesiredPrice ===
+                            listing.id
+                          }
+                          onClick={() =>
+                            void saveDesiredPrice(
+                              listing,
+                            )
+                          }
+                        >
+                          {savingDesiredPrice ===
+                          listing.id
+                            ? 'Mentés...'
+                            : 'Mentés'}
+                        </button>
+                      </div>
                     </td>
 
                     <td>

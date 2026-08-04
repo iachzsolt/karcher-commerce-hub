@@ -427,3 +427,62 @@ textarea {
   color: #8a4b00;
   background: #fff1dc;
 }
+.desired-price-cell {
+  min-width: 180px;
+}
+
+.desired-price-editor {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.price-input-wrapper {
+  width: 100px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 9px;
+  background: #ffffff;
+  border: 1px solid #d6d6d6;
+  border-radius: 8px;
+}
+
+.price-input-wrapper:focus-within {
+  border-color: #202020;
+}
+
+.price-input {
+  width: 62px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-weight: 800;
+}
+
+.price-input-wrapper span {
+  color: #666666;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.save-price-button {
+  padding: 8px 11px;
+  border: 0;
+  border-radius: 8px;
+  color: #111111;
+  background: #ffed00;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.save-price-button:hover {
+  filter: brightness(0.97);
+}
+
+.save-price-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
