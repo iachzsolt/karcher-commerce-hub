@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Hono } from 'hono'
 import { eq } from 'drizzle-orm'
 import {
@@ -867,4 +867,251 @@ allegroAuth.post('/sync', async (context) => {
 
     syncedAt: now.toISOString(),
   })
+})
+
+allegroAuth.post('/push-price/:listingId', async (context) => {
+  if (!currentSession) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Allegro account is not connected',
+      },
+      401,
+    )
+  }
+
+  const databaseUrl = process.env.DATABASE_URL
+  const apiUrl = process.env.ALLEGRO_API_URL
+
+  if (!databaseUrl || !apiUrl) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database or Allegro API configuration is missing',
+      },
+      500,
+    )
+  }
+
+  const listingId = context.req.param('listingId')
+  const db = createDatabase(databaseUrl)
+
+  const [row] = await db
+    .select({
+      listingId: platformListings.id,
+      offerId: platformListings.externalListingId,
+      marketplace: platformListings.marketplace,
+
+      desiredPriceMinor:
+        listingDesiredStates.regularPriceMinor,
+
+      priceLocked:
+        listingDesiredStates.priceLocked,
+    })
+    .from(platformListings)
+    .innerJoin(
+      listingDesiredStates,
+      eq(
+        listingDesiredStates.listingId,
+        platformListings.id,
+      ),
+    )
+    .where(
+      eq(platformListings.id, listingId),
+    )
+    .limit(1)
+
+  if (!row) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Listing or desired state was not found',
+      },
+      404,
+    )
+  }
+
+  if (row.marketplace !== 'allegro-hu') {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Only allegro-hu listings are supported',
+      },
+      400,
+    )
+  }
+
+  if (row.desiredPriceMinor === null) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Desired price is missing',
+      },
+      400,
+    )
+  }
+
+  const desiredPrice =
+    row.desiredPriceMinor / 100
+
+  const commandId = randomUUID()
+
+  const commandResponse = await fetch(
+    `${apiUrl}/sale/offer-price-change-commands/${commandId}`,
+    {
+      method: 'PUT',
+      headers: {
+        Authorization:
+          `Bearer ${currentSession.accessToken}`,
+
+        Accept:
+          'application/vnd.allegro.public.v1+json',
+
+        'Content-Type':
+          'application/vnd.allegro.public.v1+json',
+      },
+
+      body: JSON.stringify({
+        modification: {
+          type: 'FIXED_PRICE',
+          marketplaceId: 'allegro-hu',
+
+          price: {
+            amount: desiredPrice.toFixed(2),
+            currency: 'HUF',
+          },
+        },
+
+        offerCriteria: [
+          {
+            type: 'CONTAINS_OFFERS',
+
+            offers: [
+              {
+                id: row.offerId,
+              },
+            ],
+          },
+        ],
+      }),
+    },
+  )
+
+  if (!commandResponse.ok) {
+    const errorBody =
+      await commandResponse.text()
+
+    console.error(
+      'Allegro price command failed:',
+      commandResponse.status,
+      errorBody,
+    )
+
+    return context.json(
+      {
+        status: 'error',
+        message: 'Allegro rejected the price change command',
+        httpStatus: commandResponse.status,
+        allegroResponse: errorBody,
+      },
+      502,
+    )
+  }
+
+  const sleep = (ms: number) =>
+    new Promise((resolve) =>
+      setTimeout(resolve, ms),
+    )
+
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await sleep(500)
+
+    const taskResponse = await fetch(
+      `${apiUrl}/sale/offer-price-change-commands/${commandId}/tasks`,
+      {
+        headers: {
+          Authorization:
+            `Bearer ${currentSession.accessToken}`,
+
+          Accept:
+            'application/vnd.allegro.public.v1+json',
+        },
+      },
+    )
+
+    if (!taskResponse.ok) {
+      continue
+    }
+
+    const taskData = (await taskResponse.json()) as {
+      tasks?: Array<{
+        offer?: {
+          id?: string
+        }
+
+        status?: string
+        message?: string
+        field?: string
+      }>
+    }
+
+    const task = taskData.tasks?.find(
+      (item) =>
+        item.offer?.id === row.offerId,
+    )
+
+    if (!task) {
+      continue
+    }
+
+    if (task.status === 'FAILED') {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Allegro price update failed',
+          commandId,
+          task,
+        },
+        502,
+      )
+    }
+
+    if (task.status === 'SUCCESS') {
+      return context.json({
+        status: 'ok',
+        message: 'Allegro HU price updated successfully',
+
+        commandId,
+
+        listingId: row.listingId,
+        offerId: row.offerId,
+
+        marketplace: 'allegro-hu',
+
+        desiredPriceMinor:
+          row.desiredPriceMinor,
+
+        desiredPrice,
+
+        allegroTaskStatus:
+          task.status,
+      })
+    }
+  }
+
+  return context.json(
+    {
+      status: 'pending',
+      message:
+        'Allegro accepted the command, but it is still processing',
+
+      commandId,
+      listingId: row.listingId,
+      offerId: row.offerId,
+
+      desiredPriceMinor:
+        row.desiredPriceMinor,
+    },
+    202,
+  )
 })
