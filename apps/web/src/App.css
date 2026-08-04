@@ -408,3 +408,22 @@ textarea {
   color: #666666;
   background: #eeeeee;
 }
+.sync-match,
+.sync-difference {
+  display: inline-block;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.sync-match {
+  color: #155e37;
+  background: #eaf8ef;
+}
+
+.sync-difference {
+  color: #8a4b00;
+  background: #fff1dc;
+}

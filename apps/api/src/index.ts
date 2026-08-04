@@ -2,6 +2,7 @@ import 'dotenv/config'
 import { serve } from '@hono/node-server'
 import {
   createDatabase,
+  listingDesiredStates,
   listingRemoteStates,
   platformAccounts,
   platformListings,
@@ -229,6 +230,27 @@ app.get('/allegro/listings', async (context) => {
 
         lastSyncedAt:
           listingRemoteStates.lastSyncedAt,
+
+        desiredPriceMinor:
+          listingDesiredStates.regularPriceMinor,
+
+        desiredStock:
+          listingDesiredStates.desiredStock,
+
+        desiredPublicationStatus:
+          listingDesiredStates.desiredPublicationStatus,
+
+        priceLocked:
+          listingDesiredStates.priceLocked,
+
+        stockLocked:
+          listingDesiredStates.stockLocked,
+
+        autoPriceSync:
+          listingDesiredStates.autoPriceSync,
+
+        autoStockSync:
+          listingDesiredStates.autoStockSync,
       })
       .from(platformListings)
       .innerJoin(
@@ -253,6 +275,13 @@ app.get('/allegro/listings', async (context) => {
         listingRemoteStates,
         eq(
           listingRemoteStates.listingId,
+          platformListings.id,
+        ),
+      )
+      .leftJoin(
+        listingDesiredStates,
+        eq(
+          listingDesiredStates.listingId,
           platformListings.id,
         ),
       )

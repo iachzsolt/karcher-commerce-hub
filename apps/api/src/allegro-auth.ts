@@ -3,6 +3,7 @@ import { Hono } from 'hono'
 import { eq } from 'drizzle-orm'
 import {
   createDatabase,
+  listingDesiredStates,
   listingRemoteStates,
   platformAccounts,
   platformListings,
@@ -808,6 +809,34 @@ allegroAuth.post('/sync', async (context) => {
           lastSyncedAt: now,
           updatedAt: now,
         },
+      })
+
+    await db
+      .insert(listingDesiredStates)
+      .values({
+        listingId: listing.id,
+
+        listPriceMinor: priceMinor,
+        regularPriceMinor: priceMinor,
+
+        desiredStock: stockAvailable,
+
+        desiredPublicationStatus:
+          publicationStatus,
+
+        priceLocked: false,
+        stockLocked: false,
+
+        autoPriceSync: false,
+        autoStockSync: false,
+
+        updatedBy: 'INITIAL_ALLEGRO_SYNC',
+
+        updatedAt: now,
+        createdAt: now,
+      })
+      .onConflictDoNothing({
+        target: listingDesiredStates.listingId,
       })
 
     imported++

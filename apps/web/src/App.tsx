@@ -54,6 +54,23 @@ type AllegroListing = {
     | 'ENDED'
     | 'UNKNOWN'
   lastSyncedAt: string | null
+
+  desiredPriceMinor: number | null
+  desiredStock: number | null
+
+  desiredPublicationStatus:
+    | 'ACTIVE'
+    | 'ACTIVATING'
+    | 'INACTIVE'
+    | 'ENDED'
+    | 'UNKNOWN'
+    | null
+
+  priceLocked: boolean | null
+  stockLocked: boolean | null
+
+  autoPriceSync: boolean | null
+  autoStockSync: boolean | null
 }
 
 type PlatformResponse = {
@@ -430,9 +447,11 @@ function App() {
                   <th>Cikkszám</th>
                   <th>Terméknév</th>
                   <th>Offer ID</th>
-                  <th>Ár</th>
-                  <th>Készlet</th>
-                  <th>Eladott</th>
+                  <th>Aktuális ár</th>
+                  <th>Kívánt ár</th>
+                  <th>Aktuális készlet</th>
+                  <th>Kívánt készlet</th>
+                  <th>Eltérés</th>
                   <th>Státusz</th>
                   <th>Utolsó szinkron</th>
                 </tr>
@@ -458,11 +477,35 @@ function App() {
                       )}
                     </td>
 
+                    <td className="price-cell">
+                      {formatMoney(
+                        listing.desiredPriceMinor,
+                        listing.currency,
+                      )}
+                    </td>
+
                     <td>
                       {listing.stockAvailable ?? '–'} db
                     </td>
 
-                    <td>{listing.stockSold ?? 0} db</td>
+                    <td>
+                      {listing.desiredStock ?? '–'} db
+                    </td>
+
+                    <td>
+                      {listing.priceMinor ===
+                        listing.desiredPriceMinor &&
+                      listing.stockAvailable ===
+                        listing.desiredStock ? (
+                        <span className="sync-match">
+                          Rendben
+                        </span>
+                      ) : (
+                        <span className="sync-difference">
+                          Eltérés
+                        </span>
+                      )}
+                    </td>
 
                     <td>
                       <span
@@ -486,7 +529,7 @@ function App() {
                   allegroListings.length === 0 && (
                     <tr>
                       <td
-                        colSpan={8}
+                        colSpan={10}
                         className="empty-state"
                       >
                         Nincs szinkronizált Allegro
