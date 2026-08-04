@@ -486,3 +486,32 @@ textarea {
   cursor: wait;
   opacity: 0.6;
 }
+.allegro-section .table-card {
+  overflow-x: auto;
+}
+
+.allegro-table {
+  min-width: 1250px;
+}
+
+.sync-price-button {
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 8px;
+  color: #ffffff;
+  background: #202020;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.sync-price-button:hover:not(:disabled) {
+  background: #000000;
+}
+
+.sync-price-button:disabled {
+  color: #888888;
+  background: #eeeeee;
+  cursor: default;
+}

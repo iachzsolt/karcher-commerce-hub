@@ -18,14 +18,14 @@ import { allegroAuth } from './allegro-auth.js'
 
 const app = new Hono()
 
-app.route('/auth/allegro', allegroAuth)
-
 app.use(
   '*',
   cors({
     origin: 'http://localhost:5173',
   }),
 )
+
+app.route('/auth/allegro', allegroAuth)
 
 const databaseUrl = process.env.DATABASE_URL
 

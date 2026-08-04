@@ -175,6 +175,9 @@ function App() {
   const [savingDesiredPrice, setSavingDesiredPrice] =
     useState<string | null>(null)
 
+  const [syncingListingId, setSyncingListingId] =
+    useState<string | null>(null)
+
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -324,6 +327,122 @@ function App() {
       )
     } finally {
       setSavingDesiredPrice(null)
+    }
+  }
+  const pushDesiredPriceToAllegro = async (
+    listing: AllegroListing,
+  ) => {
+    if (
+      listing.desiredPriceMinor === null ||
+      listing.priceMinor === listing.desiredPriceMinor
+    ) {
+      return
+    }
+
+    const confirmed = window.confirm(
+      `Biztosan módosítod az Allegro HU árat?\n\n` +
+        `${formatMoney(
+          listing.priceMinor,
+          listing.currency,
+        )} → ${formatMoney(
+          listing.desiredPriceMinor,
+          listing.currency,
+        )}`,
+    )
+
+    if (!confirmed) {
+      return
+    }
+
+    setSyncingListingId(listing.id)
+
+    try {
+      const pushResponse = await fetch(
+        `http://localhost:3000/auth/allegro/push-price/${listing.id}`,
+        {
+          method: 'POST',
+        },
+      )
+
+      const pushData = (await pushResponse.json()) as {
+        status: string
+        message?: string
+      }
+
+      if (!pushResponse.ok) {
+        if (pushResponse.status === 401) {
+          throw new Error(
+            'Az Allegro-fiók nincs csatlakoztatva.',
+          )
+        }
+
+        throw new Error(
+          pushData.message ??
+            'Az Allegro árfrissítés sikertelen.',
+        )
+      }
+
+      if (pushData.status !== 'ok') {
+        throw new Error(
+          'Az Allegro még feldolgozza az árváltozást.',
+        )
+      }
+
+      const syncResponse = await fetch(
+        'http://localhost:3000/auth/allegro/sync',
+        {
+          method: 'POST',
+        },
+      )
+
+      if (!syncResponse.ok) {
+        throw new Error(
+          'Az ár módosult, de az új állapot visszaolvasása sikertelen.',
+        )
+      }
+
+      const listingResponse = await fetch(
+        'http://localhost:3000/allegro/listings',
+      )
+
+      if (!listingResponse.ok) {
+        throw new Error(
+          'Nem sikerült frissíteni az ajánlatlistát.',
+        )
+      }
+
+      const listingData =
+        (await listingResponse.json()) as AllegroListingResponse
+
+      setAllegroListings(listingData.data)
+
+      setDesiredPriceDrafts(
+        Object.fromEntries(
+          listingData.data.map((item) => [
+            item.id,
+            item.desiredPriceMinor !== null
+              ? String(item.desiredPriceMinor / 100)
+              : '',
+          ]),
+        ),
+      )
+
+      window.alert(
+        'Az Allegro HU ár sikeresen frissült.',
+      )
+    } catch (error) {
+      console.error(
+        'Allegro price synchronization failed:',
+        error,
+      )
+
+      window.alert(
+        error instanceof Error
+          ? error.message
+          : 'Az Allegro szinkronizálás sikertelen.',
+      )
+    } finally {
+      setSyncingListingId(null)
     }
   }
   const allegro = platforms.find(
@@ -549,6 +668,7 @@ function App() {
                   <th>Aktuális készlet</th>
                   <th>Kívánt készlet</th>
                   <th>Eltérés</th>
+                  <th>Művelet</th>
                   <th>Státusz</th>
                   <th>Utolsó szinkron</th>
                 </tr>
@@ -646,6 +766,28 @@ function App() {
                     </td>
 
                     <td>
+                      <button
+                        className="sync-price-button"
+                        type="button"
+                        disabled={
+                          listing.desiredPriceMinor === null ||
+                          listing.priceMinor ===
+                            listing.desiredPriceMinor ||
+                          syncingListingId === listing.id
+                        }
+                        onClick={() =>
+                          void pushDesiredPriceToAllegro(
+                            listing,
+                          )
+                        }
+                      >
+                        {syncingListingId === listing.id
+                          ? 'Szinkron...'
+                          : 'Küldés az Allegróra'}
+                      </button>
+                    </td>
+
+                    <td>
                       <span
                         className={`listing-status listing-${listing.publicationStatus.toLowerCase()}`}
                       >
@@ -667,7 +809,7 @@ function App() {
                   allegroListings.length === 0 && (
                     <tr>
                       <td
-                        colSpan={10}
+                        colSpan={11}
                         className="empty-state"
                       >
                         Nincs szinkronizált Allegro
