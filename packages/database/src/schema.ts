@@ -174,6 +174,51 @@ export const platformAccounts = pgTable(
   ],
 )
 
+export const platformAccountCredentials = pgTable(
+  'platform_account_credentials',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+
+    accountId: uuid('account_id')
+      .notNull()
+      .references(() => platformAccounts.id),
+
+    accessTokenEncrypted: text(
+      'access_token_encrypted',
+    ).notNull(),
+
+    refreshTokenEncrypted: text(
+      'refresh_token_encrypted',
+    ).notNull(),
+
+    accessTokenExpiresAt: timestamp(
+      'access_token_expires_at',
+      {
+        withTimezone: true,
+      },
+    ).notNull(),
+
+    tokenType: text('token_type'),
+    scope: text('scope'),
+
+    createdAt: timestamp('created_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp('updated_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex(
+      'platform_account_credentials_account_unique',
+    ).on(table.accountId),
+  ],
+)
 export const platformListings = pgTable(
   'platform_listings',
   {
