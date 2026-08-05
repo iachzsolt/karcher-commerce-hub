@@ -743,9 +743,6 @@ textarea {
 
 /* Unified row synchronization */
 
-.compact-sync-button {
-  display: none !important;
-}
 
 .row-sync-cell {
   min-width: 145px;
