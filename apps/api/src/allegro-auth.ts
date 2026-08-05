@@ -654,6 +654,14 @@ allegroAuth.post('/sync', async (context) => {
   let imported = 0
   let skipped = 0
 
+  const skippedOffers: Array<{
+    offerId: string
+    name: string
+    reason:
+      | 'MISSING_HU_MARKETPLACE'
+      | 'MISSING_SKU'
+  }> = []
+
   const importedOffers: Array<{
     offerId: string
     sku: string
@@ -670,6 +678,13 @@ allegroAuth.post('/sync', async (context) => {
 
     if (!huState) {
       skipped++
+
+      skippedOffers.push({
+        offerId: offer.id,
+        name: offer.name,
+        reason: 'MISSING_HU_MARKETPLACE',
+      })
+
       continue
     }
 
@@ -677,6 +692,13 @@ allegroAuth.post('/sync', async (context) => {
 
     if (!sku) {
       skipped++
+
+      skippedOffers.push({
+        offerId: offer.id,
+        name: offer.name,
+        reason: 'MISSING_SKU',
+      })
+
       continue
     }
 
@@ -862,6 +884,7 @@ allegroAuth.post('/sync', async (context) => {
 
     imported,
     skipped,
+    skippedOffers,
 
     offers: importedOffers,
 
