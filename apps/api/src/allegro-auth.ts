@@ -965,6 +965,10 @@ type AllegroOfferForSync = {
     id?: string | null
   }
 
+  publication?: {
+    status?: string
+  }
+
   stock?: {
     available?: number
     sold?: number
@@ -1292,8 +1296,7 @@ allegroAuth.post('/sync', async (context) => {
 
     const publicationStatus =
       normalizeAllegroListingStatus(
-        huState.publication?.state ??
-          huState.publication?.status,
+        offer.publication?.status,
       )
 
     const stockAvailable =
@@ -1918,6 +1921,288 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
     202,
   )
 })
+allegroAuth.post('/push-status/:listingId', async (context) => {
+  if (!currentSession) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Allegro account is not connected',
+      },
+      401,
+    )
+  }
+
+  const databaseUrl = process.env.DATABASE_URL
+  const apiUrl = process.env.ALLEGRO_API_URL
+
+  if (!databaseUrl || !apiUrl) {
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Database or Allegro API configuration is missing',
+      },
+      500,
+    )
+  }
+
+  const listingId = context.req.param('listingId')
+  const db = createDatabase(databaseUrl)
+
+  const [row] = await db
+    .select({
+      listingId:
+        platformListings.id,
+
+      offerId:
+        platformListings.externalListingId,
+
+      publicationStatus:
+        listingRemoteStates.publicationStatus,
+
+      desiredPublicationStatus:
+        listingDesiredStates.desiredPublicationStatus,
+    })
+    .from(platformListings)
+    .leftJoin(
+      listingRemoteStates,
+      eq(
+        listingRemoteStates.listingId,
+        platformListings.id,
+      ),
+    )
+    .leftJoin(
+      listingDesiredStates,
+      eq(
+        listingDesiredStates.listingId,
+        platformListings.id,
+      ),
+    )
+    .where(
+      eq(
+        platformListings.id,
+        listingId,
+      ),
+    )
+    .limit(1)
+
+  if (!row) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Listing not found',
+      },
+      404,
+    )
+  }
+
+  if (!row.offerId) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Allegro offer ID is missing',
+      },
+      400,
+    )
+  }
+
+  if (
+    row.desiredPublicationStatus !== 'ACTIVE' &&
+    row.desiredPublicationStatus !== 'INACTIVE'
+  ) {
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Desired publication status must be ACTIVE or INACTIVE',
+      },
+      400,
+    )
+  }
+
+  const alreadyMatches =
+    row.desiredPublicationStatus === 'ACTIVE'
+      ? row.publicationStatus === 'ACTIVE' ||
+        row.publicationStatus === 'ACTIVATING'
+      : row.publicationStatus === 'INACTIVE' ||
+        row.publicationStatus === 'ENDED'
+
+  if (alreadyMatches) {
+    return context.json({
+      status: 'ok',
+      message:
+        'Publication status already matches the desired state',
+      skipped: true,
+      listingId: row.listingId,
+      offerId: row.offerId,
+      publicationStatus:
+        row.publicationStatus,
+      desiredPublicationStatus:
+        row.desiredPublicationStatus,
+    })
+  }
+
+  const action =
+    row.desiredPublicationStatus === 'ACTIVE'
+      ? 'ACTIVATE'
+      : 'END'
+
+  const commandId = randomUUID()
+
+  const commandResponse = await fetch(
+    `${apiUrl}/sale/offer-publication-commands/${commandId}`,
+    {
+      method: 'PUT',
+
+      headers: {
+        Authorization:
+          `Bearer ${currentSession.accessToken}`,
+
+        Accept:
+          'application/vnd.allegro.public.v1+json',
+
+        'Content-Type':
+          'application/vnd.allegro.public.v1+json',
+      },
+
+      body: JSON.stringify({
+        publication: {
+          action,
+        },
+
+        offerCriteria: [
+          {
+            type: 'CONTAINS_OFFERS',
+
+            offers: [
+              {
+                id: row.offerId,
+              },
+            ],
+          },
+        ],
+      }),
+    },
+  )
+
+  if (!commandResponse.ok) {
+    const errorBody =
+      await commandResponse.text()
+
+    console.error(
+      'Allegro publication command failed:',
+      commandResponse.status,
+      errorBody,
+    )
+
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Allegro publication command failed',
+        commandId,
+        details: errorBody,
+      },
+      502,
+    )
+  }
+
+  const sleep = (ms: number) =>
+    new Promise((resolve) =>
+      setTimeout(resolve, ms),
+    )
+
+  for (
+    let attempt = 0;
+    attempt < 10;
+    attempt += 1
+  ) {
+    await sleep(500)
+
+    const taskResponse = await fetch(
+      `${apiUrl}/sale/offer-publication-commands/${commandId}/tasks`,
+      {
+        headers: {
+          Authorization:
+            `Bearer ${currentSession.accessToken}`,
+
+          Accept:
+            'application/vnd.allegro.public.v1+json',
+        },
+      },
+    )
+
+    if (!taskResponse.ok) {
+      continue
+    }
+
+    const taskData =
+      (await taskResponse.json()) as {
+        tasks?: Array<{
+          offer?: {
+            id?: string
+          }
+
+          status?: string
+          message?: string
+          field?: string
+        }>
+      }
+
+    const task = taskData.tasks?.find(
+      (item) =>
+        item.offer?.id === row.offerId,
+    )
+
+    if (!task) {
+      continue
+    }
+
+    if (task.status === 'FAILED') {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Allegro publication status update failed',
+          commandId,
+          task,
+        },
+        502,
+      )
+    }
+
+    if (task.status === 'SUCCESS') {
+      return context.json({
+        status: 'ok',
+        message:
+          'Allegro publication status updated successfully',
+        commandId,
+        listingId: row.listingId,
+        offerId: row.offerId,
+        action,
+        desiredPublicationStatus:
+          row.desiredPublicationStatus,
+        allegroTaskStatus:
+          task.status,
+      })
+    }
+  }
+
+  return context.json(
+    {
+      status: 'pending',
+      message:
+        'Allegro accepted the publication command, but it is still processing',
+      commandId,
+      listingId: row.listingId,
+      offerId: row.offerId,
+      action,
+      desiredPublicationStatus:
+        row.desiredPublicationStatus,
+    },
+    202,
+  )
+})
 allegroAuth.post('/sync-selected', async (context) => {
   if (!currentSession) {
     return context.json(
@@ -2016,11 +2301,17 @@ allegroAuth.post('/sync-selected', async (context) => {
         stockAvailable:
           listingRemoteStates.stockAvailable,
 
+        publicationStatus:
+          listingRemoteStates.publicationStatus,
+
         desiredPriceMinor:
           listingDesiredStates.regularPriceMinor,
 
         desiredStock:
           listingDesiredStates.desiredStock,
+
+        desiredPublicationStatus:
+          listingDesiredStates.desiredPublicationStatus,
       })
       .from(platformListings)
       .leftJoin(
@@ -2065,7 +2356,20 @@ allegroAuth.post('/sync-selected', async (context) => {
       row.desiredStock !== null &&
       row.stockAvailable !== row.desiredStock
 
-    if (!priceChanged && !stockChanged) {
+    const publicationChanged =
+      row.desiredPublicationStatus === 'ACTIVE'
+        ? row.publicationStatus !== 'ACTIVE' &&
+          row.publicationStatus !== 'ACTIVATING'
+        : row.desiredPublicationStatus === 'INACTIVE'
+          ? row.publicationStatus !== 'INACTIVE' &&
+            row.publicationStatus !== 'ENDED'
+          : false
+
+    if (
+      !priceChanged &&
+      !stockChanged &&
+      !publicationChanged
+    ) {
       skipped += 1
 
       results.push({
@@ -2073,6 +2377,7 @@ allegroAuth.post('/sync-selected', async (context) => {
         status: 'skipped',
         price: 'not-needed',
         stock: 'not-needed',
+        publication: 'not-needed',
       })
 
       continue
@@ -2092,8 +2397,15 @@ allegroAuth.post('/sync-selected', async (context) => {
       | 'pending'
       | 'failed' = 'not-needed'
 
+    let publicationStatus:
+      | 'not-needed'
+      | 'success'
+      | 'pending'
+      | 'failed' = 'not-needed'
+
     let priceDetails: unknown = null
     let stockDetails: unknown = null
+    let publicationDetails: unknown = null
 
     if (priceChanged) {
       const response =
@@ -2143,13 +2455,39 @@ allegroAuth.post('/sync-selected', async (context) => {
       }
     }
 
+    if (publicationChanged) {
+      const response =
+        await allegroAuth.request(
+          `/push-status/${encodeURIComponent(
+            listingId,
+          )}`,
+          {
+            method: 'POST',
+          },
+        )
+
+      publicationDetails = await response
+        .json()
+        .catch(() => null)
+
+      if (!response.ok) {
+        publicationStatus = 'failed'
+      } else if (response.status === 202) {
+        publicationStatus = 'pending'
+      } else {
+        publicationStatus = 'success'
+      }
+    }
+
     const hasFailure =
       priceStatus === 'failed' ||
-      stockStatus === 'failed'
+      stockStatus === 'failed' ||
+      publicationStatus === 'failed'
 
     const hasPending =
       priceStatus === 'pending' ||
-      stockStatus === 'pending'
+      stockStatus === 'pending' ||
+      publicationStatus === 'pending'
 
     if (hasFailure) {
       failed += 1
@@ -2168,8 +2506,10 @@ allegroAuth.post('/sync-selected', async (context) => {
           : 'success',
       price: priceStatus,
       stock: stockStatus,
+      publication: publicationStatus,
       priceDetails,
       stockDetails,
+      publicationDetails,
     })
   }
 

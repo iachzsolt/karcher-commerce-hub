@@ -171,6 +171,30 @@ function formatDate(value: string | null) {
 }
 
 function App() {
+  const hasPublicationDifference = (
+    listing: AllegroListing,
+  ) => {
+    if (
+      listing.desiredPublicationStatus === 'ACTIVE'
+    ) {
+      return (
+        listing.publicationStatus !== 'ACTIVE' &&
+        listing.publicationStatus !== 'ACTIVATING'
+      )
+    }
+
+    if (
+      listing.desiredPublicationStatus === 'INACTIVE'
+    ) {
+      return (
+        listing.publicationStatus !== 'INACTIVE' &&
+        listing.publicationStatus !== 'ENDED'
+      )
+    }
+
+    return false
+  }
+
   const [apiHealth, setApiHealth] =
     useState<HealthResponse | null>(null)
 
@@ -707,7 +731,8 @@ function App() {
               listing.desiredPriceMinor) ||
           (listing.desiredStock !== null &&
             listing.stockAvailable !==
-              listing.desiredStock)
+              listing.desiredStock) ||
+          hasPublicationDifference(listing)
         ),
     )
 
@@ -797,7 +822,14 @@ Folyamatban: ${data.pending ?? 0}`,
       listing.desiredStock !== null &&
       listing.stockAvailable !== listing.desiredStock
 
-    if (!priceChanged && !stockChanged) {
+    const publicationChanged =
+      hasPublicationDifference(listing)
+
+    if (
+      !priceChanged &&
+      !stockChanged &&
+      !publicationChanged
+    ) {
       return
     }
 
@@ -818,6 +850,19 @@ Folyamatban: ${data.pending ?? 0}`,
     if (stockChanged) {
       changes.push(
         `Készlet: ${listing.stockAvailable ?? 0} db → ${listing.desiredStock} db`,
+      )
+    }
+
+    if (publicationChanged) {
+      const desiredStatusLabel =
+        listing.desiredPublicationStatus === 'ACTIVE'
+          ? 'Aktív'
+          : 'Inaktív'
+
+      changes.push(
+        `Státusz: ${formatListingStatus(
+          listing.publicationStatus,
+        )} → ${desiredStatusLabel}`,
       )
     }
 
@@ -866,6 +911,27 @@ ${changes.join('\n')}`,
         if (!response.ok) {
           throw new Error(
             data.message ?? 'A készlet szinkronizálása sikertelen.',
+          )
+        }
+      }
+
+      if (publicationChanged) {
+        const response = await fetch(
+          `http://localhost:3000/auth/allegro/push-status/${listing.id}`,
+          {
+            method: 'POST',
+          },
+        )
+
+        const data = (await response.json()) as {
+          status: string
+          message?: string
+        }
+
+        if (!response.ok) {
+          throw new Error(
+            data.message ??
+              'A státusz szinkronizálása sikertelen.',
           )
         }
       }
@@ -1409,7 +1475,10 @@ ${changes.join('\n')}`,
                       {listing.priceMinor ===
                         listing.desiredPriceMinor &&
                       listing.stockAvailable ===
-                        listing.desiredStock ? (
+                        listing.desiredStock &&
+                      !hasPublicationDifference(
+                        listing,
+                      ) ? (
                         <span className="sync-match">
                           Rendben
                         </span>
@@ -1519,7 +1588,10 @@ ${changes.join('\n')}`,
                           (listing.priceMinor ===
                             listing.desiredPriceMinor &&
                             listing.stockAvailable ===
-                              listing.desiredStock) ||
+                              listing.desiredStock &&
+                            !hasPublicationDifference(
+                              listing,
+                            )) ||
                           syncingWholeListingId ===
                             listing.id
                         }
