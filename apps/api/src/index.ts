@@ -14,7 +14,7 @@ import { neon } from '@neondatabase/serverless'
 import { and, eq } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
-import { allegroAuth } from './allegro-auth.js'
+import { allegroAuth, restoreAllegroSession } from './allegro-auth.js'
 
 const app = new Hono()
 
@@ -497,18 +497,32 @@ app.patch('/allegro/listings/:id/desired-stock', async (context) => {
 })
 const port = 3000
 
-serve(
-  {
-    fetch: app.fetch,
-    port,
-  },
-  (info) => {
-    console.log(`Commerce Hub API: http://localhost:${info.port}`)
-    console.log(`Health check: http://localhost:${info.port}/health`)
-    console.log(
-      `Database health: http://localhost:${info.port}/database/health`,
-    )
-    console.log(`Platforms: http://localhost:${info.port}/platforms`)
-    console.log(`Products: http://localhost:${info.port}/products`)
-  },
-)
+async function startServer() {
+  await restoreAllegroSession()
+
+  serve(
+    {
+      fetch: app.fetch,
+      port,
+    },
+    (info) => {
+      console.log(
+        `Commerce Hub API: http://localhost:${info.port}`,
+      )
+      console.log(
+        `Health check: http://localhost:${info.port}/health`,
+      )
+      console.log(
+        `Database health: http://localhost:${info.port}/database/health`,
+      )
+      console.log(
+        `Platforms: http://localhost:${info.port}/platforms`,
+      )
+      console.log(
+        `Products: http://localhost:${info.port}/products`,
+      )
+    },
+  )
+}
+
+void startServer()

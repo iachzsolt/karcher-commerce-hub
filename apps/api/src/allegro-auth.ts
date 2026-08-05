@@ -1,10 +1,12 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Hono } from 'hono'
-import { eq } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
+import { decryptSecret, encryptSecret } from './token-crypto.js'
 import {
   createDatabase,
   listingDesiredStates,
   listingRemoteStates,
+  platformAccountCredentials,
   platformAccounts,
   platformListings,
   platforms,
@@ -84,6 +86,131 @@ function removeExpiredAuthorizations() {
 }
 
 export const allegroAuth = new Hono()
+export async function restoreAllegroSession() {
+  const databaseUrl = process.env.DATABASE_URL
+
+  if (!databaseUrl) {
+    console.warn(
+      'Allegro session restore skipped: database is not configured',
+    )
+
+    return false
+  }
+
+  try {
+    const db = createDatabase(databaseUrl)
+
+    const [storedSession] = await db
+      .select({
+        accountName:
+          platformAccounts.name,
+
+        externalAccountId:
+          platformAccounts.externalAccountId,
+
+        marketplace:
+          platformAccounts.marketplace,
+
+        accessTokenEncrypted:
+          platformAccountCredentials.accessTokenEncrypted,
+
+        refreshTokenEncrypted:
+          platformAccountCredentials.refreshTokenEncrypted,
+
+        accessTokenExpiresAt:
+          platformAccountCredentials.accessTokenExpiresAt,
+      })
+      .from(platformAccountCredentials)
+      .innerJoin(
+        platformAccounts,
+        eq(
+          platformAccounts.id,
+          platformAccountCredentials.accountId,
+        ),
+      )
+      .innerJoin(
+        platforms,
+        eq(
+          platforms.id,
+          platformAccounts.platformId,
+        ),
+      )
+      .where(
+        and(
+          eq(platforms.code, 'ALLEGRO'),
+          eq(platformAccounts.active, true),
+        ),
+      )
+      .limit(1)
+
+    if (!storedSession) {
+      console.log(
+        'No stored Allegro session found',
+      )
+
+      return false
+    }
+
+    if (!storedSession.externalAccountId) {
+      console.warn(
+        'Stored Allegro account has no external account ID',
+      )
+
+      return false
+    }
+
+    const expiresAt =
+      storedSession.accessTokenExpiresAt.getTime()
+
+    if (expiresAt <= Date.now()) {
+      console.log(
+        'Stored Allegro access token has expired',
+      )
+
+      return false
+    }
+
+    currentSession = {
+      accessToken: decryptSecret(
+        storedSession.accessTokenEncrypted,
+      ),
+
+      refreshToken: decryptSecret(
+        storedSession.refreshTokenEncrypted,
+      ),
+
+      expiresAt,
+
+      account: {
+        id: storedSession.externalAccountId,
+        login: storedSession.accountName,
+
+        baseMarketplace:
+          storedSession.marketplace
+            ? {
+                id: storedSession.marketplace,
+              }
+            : undefined,
+      },
+    }
+
+    console.log(
+      `Allegro session restored for ${storedSession.accountName}`,
+    )
+
+    return true
+  } catch (error) {
+    console.error(
+      'Allegro session restore failed:',
+      error,
+    )
+
+    currentSession = null
+
+    return false
+  }
+}
+
 
 allegroAuth.get('/connect', (context) => {
   removeExpiredAuthorizations()
@@ -309,6 +436,123 @@ allegroAuth.get('/callback', async (context) => {
   const account =
     (await profileResponse.json()) as AllegroAccount
 
+  const databaseUrl = process.env.DATABASE_URL
+
+  if (!databaseUrl) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database configuration is missing',
+      },
+      500,
+    )
+  }
+
+  const db = createDatabase(databaseUrl)
+  const now = new Date()
+
+  const accessTokenExpiresAt = new Date(
+    Date.now() + tokenData.expires_in * 1000,
+  )
+
+  const [allegroPlatform] = await db
+    .select({
+      id: platforms.id,
+    })
+    .from(platforms)
+    .where(eq(platforms.code, 'ALLEGRO'))
+    .limit(1)
+
+  if (!allegroPlatform) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'ALLEGRO platform is missing from database',
+      },
+      500,
+    )
+  }
+
+  const environment =
+    (process.env.ALLEGRO_ENV ?? 'SANDBOX').toUpperCase()
+
+  const accountCode =
+    `${account.login.toUpperCase()}_${environment}`
+
+  const [platformAccount] = await db
+    .insert(platformAccounts)
+    .values({
+      platformId: allegroPlatform.id,
+      code: accountCode,
+      name: account.login,
+      externalAccountId: account.id,
+      marketplace:
+        account.baseMarketplace?.id ?? null,
+      environment,
+      active: true,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: [
+        platformAccounts.platformId,
+        platformAccounts.code,
+      ],
+      set: {
+        name: account.login,
+        externalAccountId: account.id,
+        marketplace:
+          account.baseMarketplace?.id ?? null,
+        environment,
+        active: true,
+        updatedAt: now,
+      },
+    })
+    .returning({
+      id: platformAccounts.id,
+    })
+
+  await db
+    .insert(platformAccountCredentials)
+    .values({
+      accountId: platformAccount.id,
+
+      accessTokenEncrypted:
+        encryptSecret(tokenData.access_token),
+
+      refreshTokenEncrypted:
+        encryptSecret(tokenData.refresh_token),
+
+      accessTokenExpiresAt,
+
+      tokenType:
+        tokenData.token_type ?? null,
+
+      scope:
+        tokenData.scope ?? null,
+
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target:
+        platformAccountCredentials.accountId,
+      set: {
+        accessTokenEncrypted:
+          encryptSecret(tokenData.access_token),
+
+        refreshTokenEncrypted:
+          encryptSecret(tokenData.refresh_token),
+
+        accessTokenExpiresAt,
+
+        tokenType:
+          tokenData.token_type ?? null,
+
+        scope:
+          tokenData.scope ?? null,
+
+        updatedAt: now,
+      },
+    })
   currentSession = {
     accessToken: tokenData.access_token,
     refreshToken: tokenData.refresh_token,
