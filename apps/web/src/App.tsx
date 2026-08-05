@@ -216,6 +216,9 @@ function App() {
 
   const [loading, setLoading] = useState(true)
 
+  const [refreshingAllegro, setRefreshingAllegro] =
+    useState(false)
+
   useEffect(() => {
     const loadData = async () => {
       try {
@@ -315,6 +318,112 @@ function App() {
     void loadData()
   }, [])
 
+  const refreshAllegroData = async () => {
+    setRefreshingAllegro(true)
+
+    try {
+      const syncResponse = await fetch(
+        'http://localhost:3000/auth/allegro/sync',
+        {
+          method: 'POST',
+        },
+      )
+
+      if (!syncResponse.ok) {
+        const errorData = (await syncResponse
+          .json()
+          .catch(() => null)) as
+          | {
+              message?: string
+            }
+          | null
+
+        throw new Error(
+          errorData?.message ??
+            'Nem sikerült frissíteni az Allegro-ajánlatokat.',
+        )
+      }
+
+      const [
+        listingsResponse,
+        issuesResponse,
+      ] = await Promise.all([
+        fetch(
+          'http://localhost:3000/allegro/listings',
+        ),
+        fetch(
+          'http://localhost:3000/auth/allegro/import-issues',
+        ),
+      ])
+
+      if (!listingsResponse.ok) {
+        throw new Error(
+          'Nem sikerült betölteni a frissített ajánlatokat.',
+        )
+      }
+
+      const listingsData =
+        (await listingsResponse.json()) as AllegroListingResponse
+
+      setAllegroListings(listingsData.data)
+
+      setDesiredPriceDrafts(
+        Object.fromEntries(
+          listingsData.data.map((listing) => [
+            listing.id,
+            listing.desiredPriceMinor !== null
+              ? String(
+                  listing.desiredPriceMinor / 100,
+                )
+              : '',
+          ]),
+        ),
+      )
+
+      setDesiredStockDrafts(
+        Object.fromEntries(
+          listingsData.data.map((listing) => [
+            listing.id,
+            listing.desiredStock !== null
+              ? String(listing.desiredStock)
+              : '',
+          ]),
+        ),
+      )
+
+      if (issuesResponse.ok) {
+        const issuesData =
+          (await issuesResponse.json()) as AllegroImportIssueResponse
+
+        setAllegroImportIssues(
+          issuesData.data,
+        )
+      } else {
+        setAllegroImportIssues([])
+      }
+
+      setSelectedListingIds((current) =>
+        current.filter((id) =>
+          listingsData.data.some(
+            (listing) => listing.id === id,
+          ),
+        ),
+      )
+    } catch (error) {
+      console.error(
+        'Allegro refresh failed:',
+        error,
+      )
+
+      window.alert(
+        error instanceof Error
+          ? error.message
+          : 'Nem sikerült frissíteni az Allegro-ajánlatokat.',
+      )
+    } finally {
+      setRefreshingAllegro(false)
+    }
+  }
   const saveDesiredPrice = async (
     listing: AllegroListing,
   ) => {
@@ -1176,11 +1285,29 @@ ${changes.join('\n')}`,
               <h3>Ajánlatok</h3>
             </div>
 
-            <span>
-              {loading
-                ? 'Betöltés...'
-                : `${allegroListings.length} ajánlat`}
-            </span>
+            <div className="allegro-heading-actions">
+              <span>
+                {loading
+                  ? 'Betöltés...'
+                  : `${allegroListings.length} ajánlat`}
+              </span>
+
+              <button
+                className="refresh-allegro-button"
+                type="button"
+                disabled={
+                  loading ||
+                  refreshingAllegro
+                }
+                onClick={() =>
+                  void refreshAllegroData()
+                }
+              >
+                {refreshingAllegro
+                  ? 'Frissítés...'
+                  : 'Ajánlatok frissítése'}
+              </button>
+            </div>
           </div>
 
           {allegroImportIssues.length > 0 && (
