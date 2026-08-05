@@ -1367,3 +1367,303 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
     202,
   )
 })
+allegroAuth.post('/sync-selected', async (context) => {
+  if (!currentSession) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Allegro account is not connected',
+      },
+      401,
+    )
+  }
+
+  const databaseUrl = process.env.DATABASE_URL
+
+  if (!databaseUrl) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database configuration is missing',
+      },
+      500,
+    )
+  }
+
+  const body = (await context.req
+    .json()
+    .catch(() => null)) as
+    | {
+        listingIds?: unknown[]
+      }
+    | null
+
+  if (
+    !body ||
+    !Array.isArray(body.listingIds)
+  ) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'listingIds must be an array',
+      },
+      400,
+    )
+  }
+
+  const listingIds = [
+    ...new Set(
+      body.listingIds
+        .filter(
+          (value: unknown): value is string =>
+            typeof value === 'string' &&
+            value.trim().length > 0,
+        )
+        .map((value: string) => value.trim()),
+    ),
+  ]
+
+  if (listingIds.length === 0) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'No listings selected',
+      },
+      400,
+    )
+  }
+
+  if (listingIds.length > 100) {
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Maximum 100 listings can be synchronized at once',
+      },
+      400,
+    )
+  }
+
+  const db = createDatabase(databaseUrl)
+
+  const results: Array<Record<string, unknown>> = []
+
+  let attempted = 0
+  let succeeded = 0
+  let skipped = 0
+  let failed = 0
+  let pending = 0
+
+  for (const listingId of listingIds) {
+    const [row] = await db
+      .select({
+        listingId: platformListings.id,
+
+        priceMinor:
+          listingRemoteStates.priceMinor,
+
+        stockAvailable:
+          listingRemoteStates.stockAvailable,
+
+        desiredPriceMinor:
+          listingDesiredStates.regularPriceMinor,
+
+        desiredStock:
+          listingDesiredStates.desiredStock,
+      })
+      .from(platformListings)
+      .leftJoin(
+        listingRemoteStates,
+        eq(
+          listingRemoteStates.listingId,
+          platformListings.id,
+        ),
+      )
+      .leftJoin(
+        listingDesiredStates,
+        eq(
+          listingDesiredStates.listingId,
+          platformListings.id,
+        ),
+      )
+      .where(
+        eq(
+          platformListings.id,
+          listingId,
+        ),
+      )
+      .limit(1)
+
+    if (!row) {
+      failed += 1
+
+      results.push({
+        listingId,
+        status: 'failed',
+        message: 'Listing not found',
+      })
+
+      continue
+    }
+
+    const priceChanged =
+      row.desiredPriceMinor !== null &&
+      row.priceMinor !== row.desiredPriceMinor
+
+    const stockChanged =
+      row.desiredStock !== null &&
+      row.stockAvailable !== row.desiredStock
+
+    if (!priceChanged && !stockChanged) {
+      skipped += 1
+
+      results.push({
+        listingId,
+        status: 'skipped',
+        price: 'not-needed',
+        stock: 'not-needed',
+      })
+
+      continue
+    }
+
+    attempted += 1
+
+    let priceStatus:
+      | 'not-needed'
+      | 'success'
+      | 'pending'
+      | 'failed' = 'not-needed'
+
+    let stockStatus:
+      | 'not-needed'
+      | 'success'
+      | 'pending'
+      | 'failed' = 'not-needed'
+
+    let priceDetails: unknown = null
+    let stockDetails: unknown = null
+
+    if (priceChanged) {
+      const response =
+        await allegroAuth.request(
+          `/push-price/${encodeURIComponent(
+            listingId,
+          )}`,
+          {
+            method: 'POST',
+          },
+        )
+
+      priceDetails = await response
+        .json()
+        .catch(() => null)
+
+      if (!response.ok) {
+        priceStatus = 'failed'
+      } else if (response.status === 202) {
+        priceStatus = 'pending'
+      } else {
+        priceStatus = 'success'
+      }
+    }
+
+    if (stockChanged) {
+      const response =
+        await allegroAuth.request(
+          `/push-stock/${encodeURIComponent(
+            listingId,
+          )}`,
+          {
+            method: 'POST',
+          },
+        )
+
+      stockDetails = await response
+        .json()
+        .catch(() => null)
+
+      if (!response.ok) {
+        stockStatus = 'failed'
+      } else if (response.status === 202) {
+        stockStatus = 'pending'
+      } else {
+        stockStatus = 'success'
+      }
+    }
+
+    const hasFailure =
+      priceStatus === 'failed' ||
+      stockStatus === 'failed'
+
+    const hasPending =
+      priceStatus === 'pending' ||
+      stockStatus === 'pending'
+
+    if (hasFailure) {
+      failed += 1
+    } else if (hasPending) {
+      pending += 1
+    } else {
+      succeeded += 1
+    }
+
+    results.push({
+      listingId,
+      status: hasFailure
+        ? 'failed'
+        : hasPending
+          ? 'pending'
+          : 'success',
+      price: priceStatus,
+      stock: stockStatus,
+      priceDetails,
+      stockDetails,
+    })
+  }
+
+  let refreshStatus:
+    | 'not-needed'
+    | 'success'
+    | 'failed' = 'not-needed'
+
+  let refreshDetails: unknown = null
+
+  if (attempted > 0) {
+    const refreshResponse =
+      await allegroAuth.request(
+        '/sync',
+        {
+          method: 'POST',
+        },
+      )
+
+    refreshDetails = await refreshResponse
+      .json()
+      .catch(() => null)
+
+    refreshStatus = refreshResponse.ok
+      ? 'success'
+      : 'failed'
+  }
+
+  return context.json({
+    status: failed > 0
+      ? 'partial'
+      : pending > 0
+        ? 'pending'
+        : 'ok',
+
+    selected: listingIds.length,
+    attempted,
+    succeeded,
+    skipped,
+    failed,
+    pending,
+
+    refreshStatus,
+    refreshDetails,
+
+    results,
+  })
+})

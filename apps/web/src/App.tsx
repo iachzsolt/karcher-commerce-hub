@@ -190,6 +190,9 @@ function App() {
   const [selectedListingIds, setSelectedListingIds] =
     useState<string[]>([])
 
+  const [bulkSyncing, setBulkSyncing] =
+    useState(false)
+
   const [syncingWholeListingId, setSyncingWholeListingId] =
     useState<string | null>(null)
 
@@ -694,6 +697,100 @@ function App() {
     allegroListings.every((listing) =>
       selectedListingIds.includes(listing.id),
     )
+
+  const syncSelectedListingsToAllegro = async () => {
+    if (selectedListingIds.length === 0) {
+      return
+    }
+
+    const changedListings = allegroListings.filter(
+      (listing) =>
+        selectedListingIds.includes(listing.id) &&
+        (
+          (listing.desiredPriceMinor !== null &&
+            listing.priceMinor !==
+              listing.desiredPriceMinor) ||
+          (listing.desiredStock !== null &&
+            listing.stockAvailable !==
+              listing.desiredStock)
+        ),
+    )
+
+    if (changedListings.length === 0) {
+      window.alert(
+        'A kijelölt ajánlatoknál nincs szinkronizálandó eltérés.',
+      )
+      return
+    }
+
+    const confirmed = window.confirm(
+      `${selectedListingIds.length} ajánlat van kijelölve.
+
+${changedListings.length} ajánlatnál találtunk eltérést.
+
+Biztosan szinkronizálod őket az Allegróval?`,
+    )
+
+    if (!confirmed) {
+      return
+    }
+
+    setBulkSyncing(true)
+
+    try {
+      const response = await fetch(
+        'http://localhost:3000/auth/allegro/sync-selected',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            listingIds: selectedListingIds,
+          }),
+        },
+      )
+
+      const data = (await response.json()) as {
+        status: string
+        selected?: number
+        attempted?: number
+        succeeded?: number
+        skipped?: number
+        failed?: number
+        pending?: number
+        message?: string
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          data.message ??
+            'A kijelölt ajánlatok szinkronizálása sikertelen.',
+        )
+      }
+
+      window.alert(
+        `Szinkronizálás kész.
+
+Sikeres: ${data.succeeded ?? 0}
+Kihagyva: ${data.skipped ?? 0}
+Hibás: ${data.failed ?? 0}
+Folyamatban: ${data.pending ?? 0}`,
+      )
+
+      window.location.reload()
+    } catch (error) {
+      console.error('Bulk Allegro sync failed:', error)
+
+      window.alert(
+        error instanceof Error
+          ? error.message
+          : 'A szinkronizálás sikertelen.',
+      )
+    } finally {
+      setBulkSyncing(false)
+    }
+  }
   const syncWholeListingToAllegro = async (
     listing: AllegroListing,
   ) => {
@@ -1064,6 +1161,23 @@ ${changes.join('\n')}`,
               <span>
                 {selectedListingIds.length} kijelölve
               </span>
+
+                <button
+                  className="bulk-sync-button"
+                  type="button"
+                  disabled={
+                    selectedListingIds.length === 0 ||
+                    bulkSyncing
+                  }
+                  onClick={() =>
+                    void syncSelectedListingsToAllegro()
+                  }
+                >
+                  {bulkSyncing
+                    ? 'Szinkronizálás...'
+                    : 'Kijelöltek szinkronizálása'}
+                </button>
+
             </div>
           </div>
 
