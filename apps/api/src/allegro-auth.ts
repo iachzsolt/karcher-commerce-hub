@@ -43,6 +43,7 @@ type AllegroSession = {
   accessToken: string
   refreshToken: string
   expiresAt: number
+  platformAccountId: string
   account: AllegroAccount
 }
 
@@ -54,6 +55,9 @@ const pendingAuthorizations = new Map<
 let currentSession: AllegroSession | null = null
 
 const SESSION_TTL_MS = 10 * 60 * 1000
+const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000
+
+let refreshInFlight: Promise<boolean> | null = null
 
 function toBase64Url(value: Buffer) {
   return value
@@ -86,6 +90,167 @@ function removeExpiredAuthorizations() {
 }
 
 export const allegroAuth = new Hono()
+export async function refreshAllegroSessionIfNeeded() {
+  if (!currentSession) {
+    return false
+  }
+
+  if (
+    currentSession.expiresAt - Date.now() >
+    TOKEN_REFRESH_BUFFER_MS
+  ) {
+    return true
+  }
+
+  if (refreshInFlight) {
+    return refreshInFlight
+  }
+
+  refreshInFlight = (async () => {
+    const tokenUrl = process.env.ALLEGRO_TOKEN_URL
+    const clientId = process.env.ALLEGRO_CLIENT_ID
+    const clientSecret =
+      process.env.ALLEGRO_CLIENT_SECRET
+    const databaseUrl = process.env.DATABASE_URL
+
+    if (
+      !tokenUrl ||
+      !clientId ||
+      !clientSecret ||
+      !databaseUrl
+    ) {
+      console.error(
+        'Allegro token refresh configuration is incomplete',
+      )
+
+      return false
+    }
+
+    const session = currentSession
+
+    if (!session) {
+      return false
+    }
+
+    const authorization = Buffer.from(
+      `${clientId}:${clientSecret}`,
+      'utf8',
+    ).toString('base64')
+
+    const body = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: session.refreshToken,
+    })
+
+    try {
+      const response = await fetch(tokenUrl, {
+        method: 'POST',
+        headers: {
+          Authorization:
+            `Basic ${authorization}`,
+          'Content-Type':
+            'application/x-www-form-urlencoded',
+        },
+        body,
+      })
+
+      if (!response.ok) {
+        const errorBody = await response.text()
+
+        console.error(
+          'Allegro token refresh failed:',
+          response.status,
+          errorBody,
+        )
+
+        if (
+          response.status >= 400 &&
+          response.status < 500
+        ) {
+          currentSession = null
+        }
+
+        return false
+      }
+
+      const tokenData =
+        (await response.json()) as TokenResponse
+
+      if (
+        !tokenData.access_token ||
+        !tokenData.refresh_token ||
+        !tokenData.expires_in
+      ) {
+        console.error(
+          'Allegro token refresh returned incomplete data',
+        )
+
+        return false
+      }
+
+      const expiresAt =
+        Date.now() + tokenData.expires_in * 1000
+
+      const refreshedSession: AllegroSession = {
+        ...session,
+        accessToken: tokenData.access_token,
+        refreshToken: tokenData.refresh_token,
+        expiresAt,
+      }
+
+      currentSession = refreshedSession
+
+      const db = createDatabase(databaseUrl)
+      const now = new Date()
+
+      await db
+        .update(platformAccountCredentials)
+        .set({
+          accessTokenEncrypted:
+            encryptSecret(tokenData.access_token),
+
+          refreshTokenEncrypted:
+            encryptSecret(tokenData.refresh_token),
+
+          accessTokenExpiresAt:
+            new Date(expiresAt),
+
+          tokenType:
+            tokenData.token_type ?? null,
+
+          scope:
+            tokenData.scope ?? null,
+
+          updatedAt: now,
+        })
+        .where(
+          eq(
+            platformAccountCredentials.accountId,
+            session.platformAccountId,
+          ),
+        )
+
+      console.log(
+        `Allegro access token refreshed for ${session.account.login}`,
+      )
+
+      return true
+    } catch (error) {
+      console.error(
+        'Allegro token refresh failed:',
+        error,
+      )
+
+      return false
+    }
+  })()
+
+  try {
+    return await refreshInFlight
+  } finally {
+    refreshInFlight = null
+  }
+}
 export async function restoreAllegroSession() {
   const databaseUrl = process.env.DATABASE_URL
 
@@ -102,6 +267,9 @@ export async function restoreAllegroSession() {
 
     const [storedSession] = await db
       .select({
+        accountId:
+          platformAccounts.id,
+
         accountName:
           platformAccounts.name,
 
@@ -162,13 +330,7 @@ export async function restoreAllegroSession() {
     const expiresAt =
       storedSession.accessTokenExpiresAt.getTime()
 
-    if (expiresAt <= Date.now()) {
-      console.log(
-        'Stored Allegro access token has expired',
-      )
 
-      return false
-    }
 
     currentSession = {
       accessToken: decryptSecret(
@@ -181,6 +343,8 @@ export async function restoreAllegroSession() {
 
       expiresAt,
 
+      platformAccountId: storedSession.accountId,
+
       account: {
         id: storedSession.externalAccountId,
         login: storedSession.accountName,
@@ -192,6 +356,17 @@ export async function restoreAllegroSession() {
               }
             : undefined,
       },
+    }
+
+    const sessionReady =
+      await refreshAllegroSessionIfNeeded()
+
+    if (!sessionReady) {
+      console.warn(
+        'Stored Allegro session could not be restored',
+      )
+
+      return false
     }
 
     console.log(
@@ -558,6 +733,7 @@ allegroAuth.get('/callback', async (context) => {
     refreshToken: tokenData.refresh_token,
     expiresAt:
       Date.now() + tokenData.expires_in * 1000,
+    platformAccountId: platformAccount.id,
     account,
   }
 
