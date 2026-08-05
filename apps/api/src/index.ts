@@ -495,6 +495,101 @@ app.patch('/allegro/listings/:id/desired-stock', async (context) => {
     )
   }
 })
+
+app.patch('/allegro/listings/:id/desired-status', async (context) => {
+  if (!db) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database is not configured',
+      },
+      500,
+    )
+  }
+
+  try {
+    const listingId = context.req.param('id')
+
+    const body = await context.req.json<{
+      desiredStatus?: string
+    }>()
+
+    const desiredStatus =
+      body.desiredStatus?.toUpperCase()
+
+    if (
+      desiredStatus !== 'ACTIVE' &&
+      desiredStatus !== 'INACTIVE'
+    ) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Desired status must be ACTIVE or INACTIVE',
+        },
+        400,
+      )
+    }
+
+    const [updated] = await db
+      .update(listingDesiredStates)
+      .set({
+        desiredPublicationStatus:
+          desiredStatus,
+
+        updatedBy: 'COMMERCE_HUB_UI',
+        updatedAt: new Date(),
+      })
+      .where(
+        eq(
+          listingDesiredStates.listingId,
+          listingId,
+        ),
+      )
+      .returning({
+        listingId:
+          listingDesiredStates.listingId,
+
+        desiredPublicationStatus:
+          listingDesiredStates.desiredPublicationStatus,
+
+        updatedBy:
+          listingDesiredStates.updatedBy,
+
+        updatedAt:
+          listingDesiredStates.updatedAt,
+      })
+
+    if (!updated) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Desired state was not found',
+        },
+        404,
+      )
+    }
+
+    return context.json({
+      status: 'ok',
+      data: updated,
+    })
+  } catch (error) {
+    console.error(
+      'Desired publication status update failed:',
+      error,
+    )
+
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Could not update desired publication status',
+      },
+      500,
+    )
+  }
+})
 const port = 3000
 
 async function startServer() {

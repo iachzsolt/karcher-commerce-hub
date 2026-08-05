@@ -198,6 +198,12 @@ function App() {
   const [savingDesiredStock, setSavingDesiredStock] =
     useState<string | null>(null)
 
+  const [desiredStatusDrafts, setDesiredStatusDrafts] =
+    useState<Record<string, 'ACTIVE' | 'INACTIVE'>>({})
+
+  const [savingDesiredStatus, setSavingDesiredStatus] =
+    useState<string | null>(null)
+
   const [selectedListingIds, setSelectedListingIds] =
     useState<string[]>([])
 
@@ -577,6 +583,82 @@ function App() {
       )
     } finally {
       setSavingDesiredStock(null)
+    }
+  }
+  const saveDesiredStatus = async (
+    listing: AllegroListing,
+  ) => {
+    const desiredStatus =
+      desiredStatusDrafts[listing.id] ??
+      (
+        listing.desiredPublicationStatus === 'ACTIVE' ||
+        listing.desiredPublicationStatus === 'INACTIVE'
+          ? listing.desiredPublicationStatus
+          : listing.publicationStatus === 'ACTIVE' ||
+              listing.publicationStatus === 'ACTIVATING'
+            ? 'ACTIVE'
+            : 'INACTIVE'
+      )
+
+    setSavingDesiredStatus(listing.id)
+
+    try {
+      const response = await fetch(
+        `http://localhost:3000/allegro/listings/${listing.id}/desired-status`,
+        {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            desiredStatus,
+          }),
+        },
+      )
+
+      if (!response.ok) {
+        throw new Error(
+          'A kívánt státusz mentése sikertelen.',
+        )
+      }
+
+      const result = (await response.json()) as {
+        status: string
+        data: {
+          desiredPublicationStatus:
+            | 'ACTIVE'
+            | 'INACTIVE'
+        }
+      }
+
+      setAllegroListings((current) =>
+        current.map((item) =>
+          item.id === listing.id
+            ? {
+                ...item,
+                desiredPublicationStatus:
+                  result.data.desiredPublicationStatus,
+              }
+            : item,
+        ),
+      )
+
+      setDesiredStatusDrafts((current) => ({
+        ...current,
+        [listing.id]:
+          result.data.desiredPublicationStatus,
+      }))
+    } catch (error) {
+      console.error(
+        'Desired publication status save failed:',
+        error,
+      )
+
+      window.alert(
+        'Nem sikerült elmenteni a kívánt státuszt.',
+      )
+    } finally {
+      setSavingDesiredStatus(null)
     }
   }
   const toggleListingSelection = (
@@ -1340,14 +1422,88 @@ ${changes.join('\n')}`,
 
 
 
-                    <td>
-                      <span
-                        className={`listing-status listing-${listing.publicationStatus.toLowerCase()}`}
-                      >
-                        {formatListingStatus(
-                          listing.publicationStatus,
-                        )}
-                      </span>
+                    <td className="management-cell">
+                      <div className="management-current">
+                        <span className="management-label">
+                          Aktuális
+                        </span>
+
+                        <span
+                          className={`listing-status listing-${listing.publicationStatus.toLowerCase()}`}
+                        >
+                          {formatListingStatus(
+                            listing.publicationStatus,
+                          )}
+                        </span>
+                      </div>
+
+                      <div className="management-desired">
+                        <span className="management-label">
+                          Kívánt
+                        </span>
+
+                        <div className="desired-price-editor">
+                          <select
+                            className="price-input status-select"
+                            value={
+                              desiredStatusDrafts[
+                                listing.id
+                              ] ??
+                              (
+                                listing.desiredPublicationStatus ===
+                                  'ACTIVE' ||
+                                listing.desiredPublicationStatus ===
+                                  'INACTIVE'
+                                  ? listing.desiredPublicationStatus
+                                  : listing.publicationStatus ===
+                                        'ACTIVE' ||
+                                      listing.publicationStatus ===
+                                        'ACTIVATING'
+                                    ? 'ACTIVE'
+                                    : 'INACTIVE'
+                              )
+                            }
+                            onChange={(event) =>
+                              setDesiredStatusDrafts(
+                                (current) => ({
+                                  ...current,
+                                  [listing.id]:
+                                    event.target.value as
+                                      | 'ACTIVE'
+                                      | 'INACTIVE',
+                                }),
+                              )
+                            }
+                          >
+                            <option value="ACTIVE">
+                              Aktív
+                            </option>
+
+                            <option value="INACTIVE">
+                              Inaktív
+                            </option>
+                          </select>
+
+                          <button
+                            className="save-price-button"
+                            type="button"
+                            disabled={
+                              savingDesiredStatus ===
+                              listing.id
+                            }
+                            onClick={() =>
+                              void saveDesiredStatus(
+                                listing,
+                              )
+                            }
+                          >
+                            {savingDesiredStatus ===
+                            listing.id
+                              ? 'Mentés...'
+                              : 'Mentés'}
+                          </button>
+                        </div>
+                      </div>
                     </td>
 
                     <td className="sync-cell">
