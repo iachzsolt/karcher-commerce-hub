@@ -91,6 +91,20 @@ type AllegroListingResponse = {
   data: AllegroListing[]
 }
 
+type AllegroImportIssue = {
+  offerId: string
+  name: string
+  issue:
+    | 'MISSING_HU_MARKETPLACE'
+    | 'MISSING_SKU'
+}
+
+type AllegroImportIssueResponse = {
+  status: string
+  count: number
+  data: AllegroImportIssue[]
+}
+
 type ServiceStatus = {
   name: string
   description: string
@@ -169,6 +183,9 @@ function App() {
   const [allegroListings, setAllegroListings] =
     useState<AllegroListing[]>([])
 
+  const [allegroImportIssues, setAllegroImportIssues] =
+    useState<AllegroImportIssue[]>([])
+
   const [desiredPriceDrafts, setDesiredPriceDrafts] =
     useState<Record<string, string>>({})
 
@@ -239,6 +256,25 @@ function App() {
         setPlatforms(platformData.data)
         setProducts(productData.data)
         setAllegroListings(allegroData.data)
+
+        try {
+          const importIssuesResponse = await fetch(
+            'http://localhost:3000/auth/allegro/import-issues',
+          )
+
+          if (importIssuesResponse.ok) {
+            const importIssuesData =
+              (await importIssuesResponse.json()) as AllegroImportIssueResponse
+
+            setAllegroImportIssues(
+              importIssuesData.data,
+            )
+          } else {
+            setAllegroImportIssues([])
+          }
+        } catch {
+          setAllegroImportIssues([])
+        }
 
         setDesiredPriceDrafts(
           Object.fromEntries(
@@ -1147,6 +1183,42 @@ ${changes.join('\n')}`,
             </span>
           </div>
 
+          {allegroImportIssues.length > 0 && (
+            <div className="import-issues-panel">
+              <div className="import-issues-heading">
+                <strong>
+                  Ellenőrzést igénylő ajánlatok
+                </strong>
+
+                <span>
+                  {allegroImportIssues.length} ajánlatot
+                  nem sikerült importálni.
+                </span>
+              </div>
+
+              <div className="import-issues-list">
+                {allegroImportIssues.map((issue) => (
+                  <div
+                    className="import-issue-row"
+                    key={issue.offerId}
+                  >
+                    <div className="import-issue-offer">
+                      <strong>{issue.name}</strong>
+                      <span>
+                        Offer ID: {issue.offerId}
+                      </span>
+                    </div>
+
+                    <span className="import-issue-message">
+                      {issue.issue === 'MISSING_SKU'
+                        ? 'Hiányzik a cikkszám (SKU).'
+                        : 'Az ajánlat nincs publikálva az Allegro.hu piactéren.'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="bulk-toolbar">
             <label className="select-all-control">
               <input

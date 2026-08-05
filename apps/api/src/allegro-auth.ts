@@ -397,6 +397,114 @@ allegroAuth.get('/offers', async (context) => {
   })
 })
 
+allegroAuth.get('/import-issues', async (context) => {
+  if (!currentSession) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Allegro account is not connected',
+      },
+      401,
+    )
+  }
+
+  const apiUrl = process.env.ALLEGRO_API_URL
+
+  if (!apiUrl) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'ALLEGRO_API_URL is missing',
+      },
+      500,
+    )
+  }
+
+  const response = await fetch(
+    `${apiUrl}/sale/offers?limit=100`,
+    {
+      headers: {
+        Authorization:
+          `Bearer ${currentSession.accessToken}`,
+        Accept:
+          'application/vnd.allegro.public.v1+json',
+      },
+    },
+  )
+
+  const body = await response.text()
+
+  if (!response.ok) {
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Failed to check Allegro offers',
+        httpStatus: response.status,
+      },
+      502,
+    )
+  }
+
+  const data = JSON.parse(body) as {
+    offers?: Array<{
+      id: string
+      name?: string
+      external?: {
+        id?: string | null
+      }
+      additionalMarketplaces?: Record<
+        string,
+        unknown
+      >
+    }>
+  }
+
+  const issues: Array<{
+    offerId: string
+    name: string
+    issue:
+      | 'MISSING_HU_MARKETPLACE'
+      | 'MISSING_SKU'
+  }> = []
+
+  for (const offer of data.offers ?? []) {
+    const huMarketplace =
+      offer.additionalMarketplaces?.[
+        'allegro-hu'
+      ]
+
+    if (!huMarketplace) {
+      issues.push({
+        offerId: offer.id,
+        name:
+          offer.name ??
+          'Névtelen Allegro-ajánlat',
+        issue: 'MISSING_HU_MARKETPLACE',
+      })
+
+      continue
+    }
+
+    const sku = offer.external?.id?.trim()
+
+    if (!sku) {
+      issues.push({
+        offerId: offer.id,
+        name:
+          offer.name ??
+          'Névtelen Allegro-ajánlat',
+        issue: 'MISSING_SKU',
+      })
+    }
+  }
+
+  return context.json({
+    status: 'ok',
+    count: issues.length,
+    data: issues,
+  })
+})
 allegroAuth.get('/status', (context) => {
   if (!currentSession) {
     return context.json({

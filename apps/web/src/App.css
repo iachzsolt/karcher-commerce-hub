@@ -772,3 +772,64 @@ textarea {
   background: #eeeeee;
   cursor: default;
 }
+
+/* Allegro import issues */
+
+.import-issues-panel {
+  margin: 0 0 16px;
+  padding: 16px 18px;
+  border-left: 4px solid #ffed00;
+  border-radius: 8px;
+  background: #fffdf0;
+}
+
+.import-issues-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.import-issues-heading strong {
+  font-size: 14px;
+}
+
+.import-issues-heading span {
+  font-size: 13px;
+}
+
+.import-issues-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.import-issue-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.import-issue-offer {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.import-issue-offer strong {
+  font-size: 13px;
+}
+
+.import-issue-offer span {
+  font-size: 12px;
+  opacity: 0.65;
+}
+
+.import-issue-message {
+  font-size: 13px;
+  font-weight: 700;
+}
