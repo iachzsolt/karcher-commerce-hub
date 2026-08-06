@@ -1,7 +1,9 @@
 import 'dotenv/config'
+import { randomUUID } from 'node:crypto'
 import { serve } from '@hono/node-server'
 import {
   createDatabase,
+  listingCampaigns,
   listingDesiredStates,
   listingRemoteStates,
   platformAccounts,
@@ -320,6 +322,284 @@ app.get('/allegro/listings', async (context) => {
   }
 })
 
+app.get('/allegro/listings/:id/campaigns', async (context) => {
+  if (!db) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database is not configured',
+      },
+      500,
+    )
+  }
+
+  try {
+    const listingId = context.req.param('id')
+
+    const campaigns = await db
+      .select({
+        id: listingCampaigns.id,
+        listingId: listingCampaigns.listingId,
+        externalCampaignId:
+          listingCampaigns.externalCampaignId,
+        campaignName:
+          listingCampaigns.campaignName,
+        campaignType:
+          listingCampaigns.campaignType,
+        marketplace:
+          listingCampaigns.marketplace,
+        desiredPriceMinor:
+          listingCampaigns.desiredPriceMinor,
+        remotePriceMinor:
+          listingCampaigns.remotePriceMinor,
+        referencePriceMinor:
+          listingCampaigns.referencePriceMinor,
+        dedicatedStock:
+          listingCampaigns.dedicatedStock,
+        priceLocked:
+          listingCampaigns.priceLocked,
+        autoSync:
+          listingCampaigns.autoSync,
+        applicationStatus:
+          listingCampaigns.applicationStatus,
+        campaignStatus:
+          listingCampaigns.campaignStatus,
+        validFrom:
+          listingCampaigns.validFrom,
+        validTo:
+          listingCampaigns.validTo,
+        lastSyncedAt:
+          listingCampaigns.lastSyncedAt,
+        createdAt:
+          listingCampaigns.createdAt,
+        updatedAt:
+          listingCampaigns.updatedAt,
+      })
+      .from(listingCampaigns)
+      .where(
+        eq(
+          listingCampaigns.listingId,
+          listingId,
+        ),
+      )
+
+    return context.json({
+      status: 'ok',
+      data: campaigns,
+    })
+  } catch (error) {
+    console.error(
+      'Campaign loading failed:',
+      error,
+    )
+
+    return context.json(
+      {
+        status: 'error',
+        message: 'Could not load campaigns',
+      },
+      500,
+    )
+  }
+})
+app.post('/allegro/listings/:id/campaigns', async (context) => {
+  if (!db) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database is not configured',
+      },
+      500,
+    )
+  }
+
+  try {
+    const listingId = context.req.param('id')
+
+    const body = await context.req.json<{
+      campaignName?: string
+      campaignType?: string
+      desiredPrice?: number
+      validFrom?: string
+      validTo?: string
+    }>()
+
+    const campaignName =
+      body.campaignName?.trim() || null
+
+    const campaignType =
+      body.campaignType?.toUpperCase() ?? 'DISCOUNT'
+
+    const allowedCampaignTypes = [
+      'STANDARD',
+      'DISCOUNT',
+      'SOURCING',
+      'OTHER',
+    ] as const
+
+    if (
+      !allowedCampaignTypes.includes(
+        campaignType as
+          (typeof allowedCampaignTypes)[number],
+      )
+    ) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Invalid campaign type',
+        },
+        400,
+      )
+    }
+
+    const desiredPrice = Number(body.desiredPrice)
+
+    if (
+      !Number.isFinite(desiredPrice) ||
+      desiredPrice < 0
+    ) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Invalid campaign price',
+        },
+        400,
+      )
+    }
+
+    const validFrom = body.validFrom
+      ? new Date(body.validFrom)
+      : null
+
+    const validTo = body.validTo
+      ? new Date(body.validTo)
+      : null
+
+    if (
+      validFrom &&
+      Number.isNaN(validFrom.getTime())
+    ) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Invalid campaign start date',
+        },
+        400,
+      )
+    }
+
+    if (
+      validTo &&
+      Number.isNaN(validTo.getTime())
+    ) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Invalid campaign end date',
+        },
+        400,
+      )
+    }
+
+    if (
+      validFrom &&
+      validTo &&
+      validTo <= validFrom
+    ) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Campaign end date must be after start date',
+        },
+        400,
+      )
+    }
+
+    const [listing] = await db
+      .select({
+        id: platformListings.id,
+        marketplace: platformListings.marketplace,
+      })
+      .from(platformListings)
+      .where(
+        eq(
+          platformListings.id,
+          listingId,
+        ),
+      )
+      .limit(1)
+
+    if (!listing) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Listing not found',
+        },
+        404,
+      )
+    }
+
+    const now = new Date()
+
+    const [created] = await db
+      .insert(listingCampaigns)
+      .values({
+        listingId,
+
+        externalCampaignId:
+          `LOCAL-${randomUUID()}`,
+
+        campaignName,
+
+        campaignType:
+          campaignType as
+            | 'STANDARD'
+            | 'DISCOUNT'
+            | 'SOURCING'
+            | 'OTHER',
+
+        marketplace:
+          listing.marketplace,
+
+        desiredPriceMinor:
+          Math.round(desiredPrice * 100),
+
+        priceLocked: true,
+        autoSync: false,
+
+        campaignStatus: 'DRAFT',
+
+        validFrom,
+        validTo,
+
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning()
+
+    return context.json(
+      {
+        status: 'ok',
+        data: created,
+      },
+      201,
+    )
+  } catch (error) {
+    console.error(
+      'Campaign creation failed:',
+      error,
+    )
+
+    return context.json(
+      {
+        status: 'error',
+        message: 'Could not create campaign',
+      },
+      500,
+    )
+  }
+})
 app.patch('/allegro/listings/:id/desired-price', async (context) => {
   if (!db) {
     return context.json(
