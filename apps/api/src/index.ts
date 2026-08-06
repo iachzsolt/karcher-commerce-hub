@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { serve } from '@hono/node-server'
 import {
   createDatabase,
+  campaigns,
   listingCampaigns,
   listingDesiredStates,
   listingRemoteStates,
@@ -322,6 +323,268 @@ app.get('/allegro/listings', async (context) => {
   }
 })
 
+app.get('/allegro/campaigns', async (context) => {
+  if (!db) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database is not configured',
+      },
+      500,
+    )
+  }
+
+  try {
+    const campaignRows = await db
+      .select({
+        id: campaigns.id,
+        externalCampaignId:
+          campaigns.externalCampaignId,
+        name: campaigns.name,
+        campaignType:
+          campaigns.campaignType,
+        marketplace:
+          campaigns.marketplace,
+        status: campaigns.status,
+        validFrom: campaigns.validFrom,
+        validTo: campaigns.validTo,
+        autoSync: campaigns.autoSync,
+        createdAt: campaigns.createdAt,
+        updatedAt: campaigns.updatedAt,
+      })
+      .from(campaigns)
+
+    const data = await Promise.all(
+      campaignRows.map(async (campaign) => {
+        const listings = await db
+          .select({
+            id: listingCampaigns.id,
+
+            listingId:
+              listingCampaigns.listingId,
+
+            externalListingId:
+              platformListings.externalListingId,
+
+            listingName:
+              platformListings.listingName,
+
+            sku: products.sku,
+
+            productName:
+              products.name,
+
+            desiredPriceMinor:
+              listingCampaigns.desiredPriceMinor,
+
+            remotePriceMinor:
+              listingCampaigns.remotePriceMinor,
+
+            referencePriceMinor:
+              listingCampaigns.referencePriceMinor,
+
+            dedicatedStock:
+              listingCampaigns.dedicatedStock,
+
+            priceLocked:
+              listingCampaigns.priceLocked,
+
+            applicationStatus:
+              listingCampaigns.applicationStatus,
+
+            campaignStatus:
+              listingCampaigns.campaignStatus,
+
+            lastSyncedAt:
+              listingCampaigns.lastSyncedAt,
+          })
+          .from(listingCampaigns)
+          .innerJoin(
+            platformListings,
+            eq(
+              platformListings.id,
+              listingCampaigns.listingId,
+            ),
+          )
+          .innerJoin(
+            products,
+            eq(
+              products.id,
+              platformListings.productId,
+            ),
+          )
+          .where(
+            eq(
+              listingCampaigns.campaignId,
+              campaign.id,
+            ),
+          )
+
+        return {
+          ...campaign,
+          listings,
+        }
+      }),
+    )
+
+    return context.json({
+      status: 'ok',
+      data,
+    })
+  } catch (error) {
+    console.error(
+      'Campaign list loading failed:',
+      error,
+    )
+
+    return context.json(
+      {
+        status: 'error',
+        message: 'Could not load campaigns',
+      },
+      500,
+    )
+  }
+})
+app.get('/allegro/campaigns/:id', async (context) => {
+  if (!db) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database is not configured',
+      },
+      500,
+    )
+  }
+
+  try {
+    const campaignId = context.req.param('id')
+
+    const [campaign] = await db
+      .select({
+        id: campaigns.id,
+        externalCampaignId:
+          campaigns.externalCampaignId,
+        name: campaigns.name,
+        campaignType:
+          campaigns.campaignType,
+        marketplace:
+          campaigns.marketplace,
+        status: campaigns.status,
+        validFrom: campaigns.validFrom,
+        validTo: campaigns.validTo,
+        autoSync: campaigns.autoSync,
+        createdAt: campaigns.createdAt,
+        updatedAt: campaigns.updatedAt,
+      })
+      .from(campaigns)
+      .where(
+        eq(
+          campaigns.id,
+          campaignId,
+        ),
+      )
+      .limit(1)
+
+    if (!campaign) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Campaign not found',
+        },
+        404,
+      )
+    }
+
+    const listings = await db
+      .select({
+        id: listingCampaigns.id,
+
+        listingId:
+          listingCampaigns.listingId,
+
+        externalListingId:
+          platformListings.externalListingId,
+
+        listingName:
+          platformListings.listingName,
+
+        sku: products.sku,
+
+        productName:
+          products.name,
+
+        desiredPriceMinor:
+          listingCampaigns.desiredPriceMinor,
+
+        remotePriceMinor:
+          listingCampaigns.remotePriceMinor,
+
+        referencePriceMinor:
+          listingCampaigns.referencePriceMinor,
+
+        dedicatedStock:
+          listingCampaigns.dedicatedStock,
+
+        priceLocked:
+          listingCampaigns.priceLocked,
+
+        autoSync:
+          listingCampaigns.autoSync,
+
+        applicationStatus:
+          listingCampaigns.applicationStatus,
+
+        campaignStatus:
+          listingCampaigns.campaignStatus,
+
+        lastSyncedAt:
+          listingCampaigns.lastSyncedAt,
+      })
+      .from(listingCampaigns)
+      .innerJoin(
+        platformListings,
+        eq(
+          platformListings.id,
+          listingCampaigns.listingId,
+        ),
+      )
+      .innerJoin(
+        products,
+        eq(
+          products.id,
+          platformListings.productId,
+        ),
+      )
+      .where(
+        eq(
+          listingCampaigns.campaignId,
+          campaignId,
+        ),
+      )
+
+    return context.json({
+      status: 'ok',
+      data: {
+        ...campaign,
+        listings,
+      },
+    })
+  } catch (error) {
+    console.error(
+      'Campaign detail loading failed:',
+      error,
+    )
+
+    return context.json(
+      {
+        status: 'error',
+        message: 'Could not load campaign',
+      },
+      500,
+    )
+  }
+})
 app.get('/allegro/listings/:id/campaigns', async (context) => {
   if (!db) {
     return context.json(
@@ -426,6 +689,16 @@ app.post('/allegro/listings/:id/campaigns', async (context) => {
 
     const campaignName =
       body.campaignName?.trim() || null
+
+    if (!campaignName) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Campaign name is required',
+        },
+        400,
+      )
+    }
 
     const campaignType =
       body.campaignType?.toUpperCase() ?? 'DISCOUNT'
@@ -542,13 +815,47 @@ app.post('/allegro/listings/:id/campaigns', async (context) => {
 
     const now = new Date()
 
-    const [created] = await db
+    const externalCampaignId =
+      `LOCAL-${randomUUID()}`
+
+    const [createdCampaign] = await db
+      .insert(campaigns)
+      .values({
+        externalCampaignId,
+
+        name: campaignName,
+
+        campaignType:
+          campaignType as
+            | 'STANDARD'
+            | 'DISCOUNT'
+            | 'SOURCING'
+            | 'OTHER',
+
+        marketplace:
+          listing.marketplace,
+
+        status: 'DRAFT',
+
+        validFrom,
+        validTo,
+
+        autoSync: false,
+
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning()
+
+    const [createdListingCampaign] = await db
       .insert(listingCampaigns)
       .values({
+        campaignId:
+          createdCampaign.id,
+
         listingId,
 
-        externalCampaignId:
-          `LOCAL-${randomUUID()}`,
+        externalCampaignId,
 
         campaignName,
 
@@ -581,7 +888,11 @@ app.post('/allegro/listings/:id/campaigns', async (context) => {
     return context.json(
       {
         status: 'ok',
-        data: created,
+        data: {
+          campaign: createdCampaign,
+          listingCampaign:
+            createdListingCampaign,
+        },
       },
       201,
     )
