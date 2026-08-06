@@ -489,6 +489,14 @@ export const listingCampaigns = pgTable(
 
     applicationStatus: text('application_status'),
 
+    externalApplicationId: text(
+      'external_application_id',
+    ),
+
+    applicationError: text(
+      'application_error',
+    ),
+
     campaignStatus: text('campaign_status'),
 
     validFrom: timestamp('valid_from', {
