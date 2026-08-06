@@ -918,3 +918,542 @@ textarea {
     overflow-x: auto;
   }
 }
+/* Allegro campaigns */
+
+.campaigns-page {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.campaigns-page-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.campaigns-page-header h2 {
+  margin: 4px 0 0;
+}
+
+.campaigns-page-description {
+  margin: 12px 0 0;
+  color: #555;
+  line-height: 1.5;
+}
+
+.secondary-button {
+  min-height: 42px;
+  padding: 0 18px;
+  border: 1px solid #d5d5d5;
+  border-radius: 9px;
+  background: #fff;
+  color: #111;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.secondary-button:hover:not(:disabled) {
+  background: #f3f3f3;
+}
+
+.secondary-button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.campaign-list {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.campaign-card {
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid #dedede;
+  border-radius: 14px;
+}
+
+.campaign-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 22px 24px;
+  border-bottom: 1px solid #e5e5e5;
+}
+
+.campaign-card-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.campaign-card-title-row h3 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.campaign-status-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: #f0f0f0;
+  color: #333;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.campaign-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  color: #666;
+  font-size: 14px;
+}
+
+.campaign-table-wrapper {
+  overflow-x: auto;
+}
+
+.campaign-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.campaign-table th,
+.campaign-table td {
+  padding: 15px 24px;
+  border-bottom: 1px solid #ededed;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.campaign-table th {
+  background: #fafafa;
+  color: #555;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.campaign-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.campaign-table tbody tr:hover {
+  background: #fffdf2;
+}
+
+.campaign-message,
+.campaign-empty-state {
+  padding: 24px;
+  background: #fff;
+  border: 1px solid #dedede;
+  border-radius: 14px;
+}
+
+.campaign-message-error {
+  border-color: #d79a9a;
+}
+
+.campaign-empty-state h3 {
+  margin: 0 0 8px;
+}
+
+.campaign-empty-state p {
+  margin: 0;
+  color: #666;
+}
+
+@media (max-width: 800px) {
+  .campaigns-page-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .campaign-card-header {
+    padding: 18px;
+  }
+
+  .campaign-table th,
+  .campaign-table td {
+    padding: 13px 18px;
+    white-space: nowrap;
+  }
+}
+
+/* Campaign creation */
+
+.campaign-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.campaign-primary-button {
+  min-height: 42px;
+  padding: 0 18px;
+  border: 1px solid #111;
+  border-radius: 9px;
+  background: #ffed00;
+  color: #111;
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.campaign-primary-button:hover:not(:disabled) {
+  background: #f4e300;
+}
+
+.campaign-primary-button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.campaign-create-panel {
+  padding: 24px;
+  background: #fff;
+  border: 1px solid #dedede;
+  border-radius: 14px;
+}
+
+.campaign-create-heading h3 {
+  margin: 4px 0 0;
+}
+
+.campaign-form-grid {
+  display: grid;
+  grid-template-columns:
+    minmax(220px, 2fr)
+    minmax(180px, 1fr)
+    minmax(160px, 1fr)
+    minmax(160px, 1fr);
+  gap: 18px;
+  margin-top: 24px;
+}
+
+.campaign-form-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.campaign-form-grid label > span {
+  color: #444;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.campaign-form-grid input,
+.campaign-form-grid select {
+  width: 100%;
+  min-height: 44px;
+  box-sizing: border-box;
+  padding: 0 12px;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  background: #fff;
+  color: #111;
+  font: inherit;
+}
+
+.campaign-form-grid input:focus,
+.campaign-form-grid select:focus {
+  outline: 2px solid #ffed00;
+  outline-offset: 1px;
+  border-color: #777;
+}
+
+.campaign-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 24px;
+}
+
+.campaign-no-listings {
+  padding: 20px 24px;
+  color: #666;
+}
+
+@media (max-width: 1000px) {
+  .campaign-form-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 650px) {
+  .campaign-header-actions {
+    width: 100%;
+  }
+
+  .campaign-header-actions button {
+    flex: 1;
+  }
+
+  .campaign-form-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Allegro remote campaigns */
+
+.campaign-card-selected {
+  border-color: #c7b900;
+  box-shadow: 0 0 0 2px rgba(255, 237, 0, 0.22);
+}
+
+.campaign-card-main {
+  min-width: 0;
+}
+
+.campaign-card-actions {
+  flex-shrink: 0;
+}
+
+.campaign-eligibility {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.campaign-eligible {
+  background: #e9f6ec;
+  color: #216b32;
+}
+
+.campaign-ineligible {
+  background: #f7eaea;
+  color: #9d2929;
+}
+
+.campaign-refusal {
+  padding: 18px 24px;
+  border-bottom: 1px solid #ededed;
+  background: #fff8f8;
+  color: #5a3030;
+}
+
+.campaign-refusal-reason p {
+  margin: 8px 0 0;
+}
+
+.campaign-refusal a {
+  font-weight: 700;
+}
+
+.campaign-detail-row {
+  display: grid;
+  grid-template-columns:
+    repeat(4, minmax(0, 1fr));
+  gap: 20px;
+  padding: 18px 24px;
+}
+
+.campaign-detail-row > div {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.campaign-detail-label {
+  color: #777;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.campaign-detail-row strong,
+.campaign-detail-row a {
+  overflow-wrap: anywhere;
+}
+
+.campaign-selected-panel {
+  padding: 22px 24px;
+  border-top: 1px solid #dedede;
+  background: #fffdf0;
+}
+
+.campaign-selected-panel h4 {
+  margin: 4px 0 8px;
+  font-size: 18px;
+}
+
+.campaign-selected-panel p:last-child {
+  margin: 0;
+  color: #555;
+}
+
+@media (max-width: 900px) {
+  .campaign-card-header {
+    flex-direction: column;
+  }
+
+  .campaign-card-actions {
+    width: 100%;
+  }
+
+  .campaign-card-actions button {
+    width: 100%;
+  }
+
+  .campaign-detail-row {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 600px) {
+  .campaign-detail-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Campaign offer selector */
+
+.campaign-offers-panel {
+  border-top: 1px solid #dedede;
+  background: #fff;
+}
+
+.campaign-offers-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 24px;
+}
+
+.campaign-offers-heading h4 {
+  margin: 4px 0 8px;
+  font-size: 20px;
+}
+
+.campaign-offers-heading p:last-child {
+  margin: 0;
+  color: #666;
+}
+
+.campaign-selection-count {
+  flex-shrink: 0;
+  color: #555;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.campaign-submit-warning {
+  margin: 0 24px 20px;
+  padding: 14px 16px;
+  border: 1px solid #eadb9b;
+  border-radius: 9px;
+  background: #fff9df;
+  color: #62520e;
+  line-height: 1.45;
+}
+
+.campaign-offers-table-wrapper {
+  overflow-x: auto;
+  border-top: 1px solid #ededed;
+}
+
+.campaign-offers-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.campaign-offers-table th,
+.campaign-offers-table td {
+  padding: 14px 16px;
+  border-bottom: 1px solid #ededed;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.campaign-offers-table th {
+  background: #fafafa;
+  color: #666;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.campaign-offers-table tbody tr:hover {
+  background: #fffdf2;
+}
+
+.campaign-offers-table input[type='checkbox'] {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+}
+
+.campaign-price-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 150px;
+}
+
+.campaign-price-input input {
+  width: 110px;
+  min-height: 38px;
+  box-sizing: border-box;
+  padding: 0 10px;
+  border: 1px solid #ccc;
+  border-radius: 7px;
+  font: inherit;
+}
+
+.campaign-price-input input:focus {
+  outline: 2px solid #ffed00;
+  outline-offset: 1px;
+  border-color: #777;
+}
+
+.campaign-price-input input:disabled {
+  background: #f4f4f4;
+  color: #999;
+}
+
+.campaign-submit-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 18px 24px;
+  background: #fafafa;
+}
+
+.campaign-submit-bar > span {
+  color: #555;
+  font-weight: 700;
+}
+
+@media (max-width: 800px) {
+  .campaign-offers-heading,
+  .campaign-submit-bar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .campaign-offers-table th,
+  .campaign-offers-table td {
+    white-space: nowrap;
+  }
+}

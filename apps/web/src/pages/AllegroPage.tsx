@@ -1,4 +1,5 @@
 import HomePage from './HomePage'
+import AllegroCampaignsPage from './AllegroCampaignsPage'
 
 import {
   NavLink,
@@ -25,15 +26,7 @@ function AllegroOffers() {
 }
 
 function AllegroCampaigns() {
-  return (
-    <section>
-      <p className="section-label">ALLEGRO</p>
-      <h2>Kampányok</h2>
-      <p>
-        Itt kezeljük majd a kampányokat és kampányárakat.
-      </p>
-    </section>
-  )
+  return <AllegroCampaignsPage />
 }
 
 function AllegroSettings() {
