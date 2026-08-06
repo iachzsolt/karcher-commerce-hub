@@ -280,6 +280,7 @@ export const listingRemoteStates = pgTable(
   {
     id: uuid('id').defaultRandom().primaryKey(),
 
+
     listingId: uuid('listing_id')
       .notNull()
       .references(() => platformListings.id),
@@ -342,6 +343,7 @@ export const listingDesiredStates = pgTable(
   {
     id: uuid('id').defaultRandom().primaryKey(),
 
+
     listingId: uuid('listing_id')
       .notNull()
       .references(() => platformListings.id),
@@ -394,10 +396,66 @@ export const listingDesiredStates = pgTable(
   ],
 )
 
+export const campaigns = pgTable(
+  'campaigns',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+
+    externalCampaignId: text('external_campaign_id'),
+
+    name: text('name').notNull(),
+
+    campaignType: campaignTypeEnum('campaign_type')
+      .notNull()
+      .default('OTHER'),
+
+    marketplace: text('marketplace'),
+
+    status: text('status')
+      .notNull()
+      .default('DRAFT'),
+
+    validFrom: timestamp('valid_from', {
+      withTimezone: true,
+    }),
+
+    validTo: timestamp('valid_to', {
+      withTimezone: true,
+    }),
+
+    autoSync: boolean('auto_sync')
+      .notNull()
+      .default(false),
+
+    createdAt: timestamp('created_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp('updated_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index('campaigns_marketplace_index').on(
+      table.marketplace,
+    ),
+
+    index('campaigns_status_index').on(
+      table.status,
+    ),
+  ],
+)
 export const listingCampaigns = pgTable(
   'listing_campaigns',
   {
     id: uuid('id').defaultRandom().primaryKey(),
+
+    campaignId: uuid('campaign_id')
+      .references(() => campaigns.id),
 
     listingId: uuid('listing_id')
       .notNull()
