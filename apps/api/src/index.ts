@@ -3654,6 +3654,61 @@ async function processDueCampaignSubmissions() {
 }
 const port = 3000
 
+let automaticAllegroSyncRunning = false
+
+async function runAutomaticAllegroSync() {
+  if (automaticAllegroSyncRunning) {
+    return
+  }
+
+  automaticAllegroSyncRunning = true
+
+  try {
+    const response = await app.request(
+      '/auth/allegro/sync',
+      {
+        method: 'POST',
+      },
+    )
+
+    if (!response.ok) {
+      const errorBody =
+        await response.text()
+
+      console.error(
+        'Automatic Allegro listing sync failed:',
+        response.status,
+        errorBody,
+      )
+
+      return
+    }
+
+    const result =
+      (await response.json()) as {
+        imported?: number
+        skipped?: number
+        syncedAt?: string
+      }
+
+    console.log(
+      'Automatic Allegro listing sync completed:',
+      {
+        imported: result.imported ?? 0,
+        skipped: result.skipped ?? 0,
+        syncedAt: result.syncedAt ?? null,
+      },
+    )
+  } catch (error) {
+    console.error(
+      'Automatic Allegro listing sync failed:',
+      error,
+    )
+  } finally {
+    automaticAllegroSyncRunning = false
+  }
+}
+
 async function startServer() {
   await restoreAllegroSession()
 
@@ -3669,6 +3724,15 @@ async function startServer() {
   }, 60 * 1000)
 
   tokenRefreshTimer.unref()
+
+  const allegroListingSyncTimer =
+    setInterval(() => {
+      void runAutomaticAllegroSync()
+    }, 6 * 60 * 60 * 1000)
+
+  allegroListingSyncTimer.unref()
+
+  void runAutomaticAllegroSync()
 
   const campaignSubmissionTimer =
     setInterval(() => {
