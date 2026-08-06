@@ -354,6 +354,16 @@ app.get(
           validTo: listingCampaigns.validTo,
           applicationStatus:
             listingCampaigns.applicationStatus,
+
+          applicationError:
+            listingCampaigns.applicationError,
+
+          retryAfter:
+            listingCampaigns.retryAfter,
+
+          retryCount:
+            listingCampaigns.retryCount,
+
           campaignStatus:
             listingCampaigns.campaignStatus,
           updatedAt:
@@ -841,6 +851,12 @@ app.post(
           .set({
             applicationStatus:
               'SCHEDULED',
+
+            applicationError: null,
+
+            retryAfter: null,
+            retryCount: 0,
+
             updatedAt: now,
           })
           .where(
@@ -2271,6 +2287,9 @@ async function processDueCampaignSubmissions() {
 
     const scheduledRows = await db
       .select({
+        id:
+          listingCampaigns.id,
+
         listingId:
           listingCampaigns.listingId,
 
@@ -2279,6 +2298,12 @@ async function processDueCampaignSubmissions() {
 
         validFrom:
           listingCampaigns.validFrom,
+
+        retryAfter:
+          listingCampaigns.retryAfter,
+
+        retryCount:
+          listingCampaigns.retryCount,
       })
       .from(listingCampaigns)
       .where(
@@ -2292,7 +2317,11 @@ async function processDueCampaignSubmissions() {
       scheduledRows.filter(
         (row) =>
           row.validFrom !== null &&
-          row.validFrom <= now,
+          row.validFrom <= now &&
+          (
+            row.retryAfter === null ||
+            row.retryAfter <= now
+          ),
       )
 
     if (dueRows.length === 0) {
@@ -2350,11 +2379,86 @@ async function processDueCampaignSubmissions() {
       }
 
       if (!response.ok) {
+        const responseMessage =
+          responseBody &&
+          typeof responseBody === 'object' &&
+          'message' in responseBody &&
+          typeof responseBody.message === 'string'
+            ? responseBody.message
+            : `HTTP ${response.status}`
+
+        let retryDelayMs =
+          60 * 60 * 1000
+
+        if (response.status === 429) {
+          retryDelayMs =
+            15 * 60 * 1000
+        } else if (
+          response.status >= 500
+        ) {
+          retryDelayMs =
+            5 * 60 * 1000
+        } else if (
+          response.status === 409 &&
+          responseMessage.includes(
+            'not eligible',
+          )
+        ) {
+          retryDelayMs =
+            6 * 60 * 60 * 1000
+        } else if (
+          response.status === 409
+        ) {
+          retryDelayMs =
+            30 * 60 * 1000
+        } else if (
+          response.status === 404
+        ) {
+          retryDelayMs =
+            24 * 60 * 60 * 1000
+        }
+
+        const retryAfter =
+          new Date(
+            Date.now() + retryDelayMs,
+          )
+
+        const affectedRows =
+          dueRows.filter(
+            (row) =>
+              row.externalCampaignId ===
+              campaignId,
+          )
+
+        for (const row of affectedRows) {
+          await db
+            .update(listingCampaigns)
+            .set({
+              retryAfter,
+
+              retryCount:
+                row.retryCount + 1,
+
+              applicationError:
+                responseMessage,
+
+              updatedAt: new Date(),
+            })
+            .where(
+              eq(
+                listingCampaigns.id,
+                row.id,
+              ),
+            )
+        }
+
         console.warn(
           'Automatic campaign submission skipped or failed:',
           {
             campaignId,
             status: response.status,
+            retryAfter:
+              retryAfter.toISOString(),
             response: responseBody,
           },
         )

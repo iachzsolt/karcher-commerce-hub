@@ -43,6 +43,13 @@
       "when": 1786016925553,
       "tag": "0005_square_pride",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786020864528,
+      "tag": "0006_cloudy_alice",
+      "breakpoints": true
     }
   ]
 }
