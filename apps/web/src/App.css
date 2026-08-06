@@ -855,3 +855,66 @@ textarea {
   opacity: 0.55;
   cursor: default;
 }
+
+/* Allegro module */
+
+.allegro-module-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 32px;
+  margin-bottom: 32px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid #dcdcdc;
+}
+
+.allegro-module-header h2 {
+  margin: 4px 0 0;
+}
+
+.allegro-navigation {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px;
+  background: #ffffff;
+  border: 1px solid #dddddd;
+  border-radius: 12px;
+}
+
+.allegro-navigation a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 0 16px;
+  border-radius: 9px;
+  color: #555555;
+  font-weight: 700;
+  text-decoration: none;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.allegro-navigation a:hover {
+  background: #f3f3f3;
+  color: #111111;
+}
+
+.allegro-navigation a[aria-current='page'] {
+  background: #ffed00;
+  color: #111111;
+}
+
+@media (max-width: 800px) {
+  .allegro-module-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .allegro-navigation {
+    width: 100%;
+    overflow-x: auto;
+  }
+}
