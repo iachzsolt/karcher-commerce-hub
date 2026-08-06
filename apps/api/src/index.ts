@@ -361,6 +361,9 @@ app.get(
           applicationError:
             listingCampaigns.applicationError,
 
+          finishError:
+            listingCampaigns.finishError,
+
           retryAfter:
             listingCampaigns.retryAfter,
 

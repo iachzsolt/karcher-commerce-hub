@@ -1589,3 +1589,29 @@ textarea {
   width: 100%;
   box-sizing: border-box;
 }
+
+/* Campaign lifecycle status */
+
+.campaign-preparation-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.campaign-status-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  font-size: 15px;
+  line-height: 1;
+  cursor: help;
+  opacity: 0.65;
+}
+
+.campaign-status-info:hover {
+  opacity: 1;
+}

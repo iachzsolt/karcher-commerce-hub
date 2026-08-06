@@ -142,16 +142,79 @@ function getApplicationLabel(type: string) {
   }
 }
 
+type CampaignPreparationState = {
+  applicationStatus: string | null
+  campaignStatus: string | null
+  applicationError: string | null
+  finishError: string | null
+}
 function formatPreparationStatus(
-  status: string | null | undefined,
+  state: CampaignPreparationState | undefined,
 ) {
-  if (status === 'PREPARED') return 'Előkészítve'
-  if (status === 'SCHEDULED') return 'Ütemezve'
-  if (status === 'SUBMITTING') return 'Beküldés alatt'
-  if (status === 'SUBMITTED') return 'Beküldve'
-  if (status === 'FAILED') return 'Hiba'
-  if (status === 'FINISHED') return 'Lezárva'
-  return '–'
+  if (!state) return '–'
+
+  if (state.campaignStatus === 'FINISHED') {
+    return 'Lezárva'
+  }
+
+  if (state.campaignStatus === 'FINISHING') {
+    return 'Lezárás...'
+  }
+
+  if (state.campaignStatus === 'FINISH_FAILED') {
+    return 'Lezárási hiba'
+  }
+
+  if (
+    state.campaignStatus === 'ACTIVE' ||
+    state.applicationStatus === 'PROCESSED'
+  ) {
+    return 'Aktív'
+  }
+
+  if (state.applicationStatus === 'DECLINED') {
+    return 'Elutasítva'
+  }
+
+  if (state.applicationStatus === 'REQUESTED') {
+    return 'Feldolgozásra vár'
+  }
+
+  if (state.applicationStatus === 'SUBMITTING') {
+    return 'Beküldés...'
+  }
+
+  if (state.applicationStatus === 'SUBMITTED') {
+    return 'Beküldve'
+  }
+
+  if (state.applicationStatus === 'SCHEDULED') {
+    return 'Ütemezve'
+  }
+
+  if (state.applicationStatus === 'PREPARED') {
+    return 'Előkészítve'
+  }
+
+  if (state.applicationStatus === 'FAILED') {
+    return 'Hiba'
+  }
+
+  return state.applicationStatus ?? '–'
+}
+
+function getPreparationError(
+  state: CampaignPreparationState | undefined,
+) {
+  if (!state) {
+    return null
+  }
+
+  return (
+    state.finishError ??
+    state.applicationError ??
+    null
+  )
 }
 function formatListingStatus(
   status: AllegroListing['publicationStatus'],
@@ -357,7 +420,9 @@ function AllegroCampaignsPage() {
   const [
     preparationStatuses,
     setPreparationStatuses,
-  ] = useState<Record<string, string | null>>({})
+  ] = useState<
+    Record<string, CampaignPreparationState>
+  >({})
 
   const [
     schedulingPreparations,
@@ -455,7 +520,10 @@ function AllegroCampaignsPage() {
     const ends: Record<string, string> = {}
     const startTimes: Record<string, string> = {}
     const endTimes: Record<string, string> = {}
-    const statuses: Record<string, string | null> = {}
+    const statuses: Record<
+      string,
+      CampaignPreparationState
+    > = {}
 
     preparedListings.forEach(
       (item: {
@@ -464,6 +532,9 @@ function AllegroCampaignsPage() {
         validFrom: string | null
         validTo: string | null
         applicationStatus: string | null
+        campaignStatus: string | null
+        applicationError: string | null
+        finishError: string | null
       }) => {
         selectedIds.push(item.listingId)
 
@@ -499,8 +570,19 @@ function AllegroCampaignsPage() {
             parts.time
         }
 
-        statuses[item.listingId] =
-          item.applicationStatus
+        statuses[item.listingId] = {
+          applicationStatus:
+            item.applicationStatus,
+
+          campaignStatus:
+            item.campaignStatus,
+
+          applicationError:
+            item.applicationError,
+
+          finishError:
+            item.finishError,
+        }
       },
     )
 
@@ -1473,13 +1555,35 @@ function AllegroCampaignsPage() {
                               </td>
 
                               <td>
-                                <span className="campaign-preparation-status">
-                                  {formatPreparationStatus(
+                                <div className="campaign-preparation-state">
+                                  <span className="campaign-preparation-status">
+                                    {formatPreparationStatus(
+                                      preparationStatuses[
+                                        listing.id
+                                      ],
+                                    )}
+                                  </span>
+
+                                  {getPreparationError(
                                     preparationStatuses[
                                       listing.id
                                     ],
+                                  ) && (
+                                    <span
+                                      className="campaign-status-info"
+                                      title={
+                                        getPreparationError(
+                                          preparationStatuses[
+                                            listing.id
+                                          ],
+                                        ) ?? undefined
+                                      }
+                                      aria-label="Részletek"
+                                    >
+                                      ⓘ
+                                    </span>
                                   )}
-                                </span>
+                                </div>
                               </td>
 
                               <td>
