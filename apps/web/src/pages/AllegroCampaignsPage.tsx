@@ -1263,6 +1263,9 @@ function AllegroCampaignsPage() {
                           <div className="campaign-date-time-inputs">
                             <input
                               type="date"
+                                    onClick={(event) =>
+                                      event.currentTarget.showPicker()
+                                    }
                               value={bulkValidFrom}
                               min={
                                 campaign.publication.from
@@ -1283,6 +1286,9 @@ function AllegroCampaignsPage() {
 
                             <input
                               type="time"
+                                    onClick={(event) =>
+                                      event.currentTarget.showPicker()
+                                    }
                               step="60"
                               value={bulkValidFromTime}
                               onChange={(event) =>
@@ -1300,6 +1306,9 @@ function AllegroCampaignsPage() {
                           <div className="campaign-date-time-inputs">
                             <input
                               type="date"
+                                    onClick={(event) =>
+                                      event.currentTarget.showPicker()
+                                    }
                               value={bulkValidTo}
                               min={
                                 bulkValidFrom ||
@@ -1321,6 +1330,9 @@ function AllegroCampaignsPage() {
 
                             <input
                               type="time"
+                                    onClick={(event) =>
+                                      event.currentTarget.showPicker()
+                                    }
                               step="60"
                               value={bulkValidToTime}
                               onChange={(event) =>
@@ -1446,6 +1458,9 @@ function AllegroCampaignsPage() {
                                   <input
                                     className="campaign-date-input"
                                     type="date"
+                                    onClick={(event) =>
+                                      event.currentTarget.showPicker()
+                                    }
                                     value={
                                       validFromDrafts[
                                         listing.id
@@ -1476,6 +1491,9 @@ function AllegroCampaignsPage() {
                                   <input
                                     className="campaign-time-input"
                                     type="time"
+                                    onClick={(event) =>
+                                      event.currentTarget.showPicker()
+                                    }
                                     step="60"
                                     value={
                                       validFromTimeDrafts[
@@ -1501,6 +1519,9 @@ function AllegroCampaignsPage() {
                                   <input
                                     className="campaign-date-input"
                                     type="date"
+                                    onClick={(event) =>
+                                      event.currentTarget.showPicker()
+                                    }
                                     value={
                                       validToDrafts[
                                         listing.id
@@ -1534,6 +1555,9 @@ function AllegroCampaignsPage() {
                                   <input
                                     className="campaign-time-input"
                                     type="time"
+                                    onClick={(event) =>
+                                      event.currentTarget.showPicker()
+                                    }
                                     step="60"
                                     value={
                                       validToTimeDrafts[
@@ -1571,7 +1595,7 @@ function AllegroCampaignsPage() {
                                   ) && (
                                     <span
                                       className="campaign-status-info"
-                                      title={
+                                      data-tooltip={
                                         getPreparationError(
                                           preparationStatuses[
                                             listing.id
@@ -1579,6 +1603,7 @@ function AllegroCampaignsPage() {
                                         ) ?? undefined
                                       }
                                       aria-label="Részletek"
+                                      tabIndex={0}
                                     >
                                       ⓘ
                                     </span>
