@@ -350,6 +350,16 @@ export const listingPriceHistory = pgTable(
     priceMinor: integer('price_minor')
       .notNull(),
 
+    basePriceMinor: integer('base_price_minor'),
+
+    priceType: text('price_type')
+      .notNull()
+      .default('REGULAR'),
+
+    externalCampaignId: text(
+      'external_campaign_id',
+    ),
+
     currency: text('currency')
       .notNull()
       .default('HUF'),

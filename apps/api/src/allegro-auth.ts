@@ -4,6 +4,7 @@ import { and, desc, eq } from 'drizzle-orm'
 import { decryptSecret, encryptSecret } from './token-crypto.js'
 import {
   createDatabase,
+  listingCampaigns,
   listingDesiredStates,
   listingPriceHistory,
   listingRemoteStates,
@@ -1858,10 +1859,78 @@ allegroAuth.post('/sync', async (context) => {
       priceAutomation?.type ??
       null
 
+    const activeCampaignRows = await db
+      .select({
+        desiredPriceMinor:
+          listingCampaigns.desiredPriceMinor,
+        externalCampaignId:
+          listingCampaigns.externalCampaignId,
+        validFrom:
+          listingCampaigns.validFrom,
+        validTo:
+          listingCampaigns.validTo,
+      })
+      .from(listingCampaigns)
+      .where(
+        and(
+          eq(
+            listingCampaigns.listingId,
+            listing.id,
+          ),
+          eq(
+            listingCampaigns.campaignType,
+            'DISCOUNT',
+          ),
+          eq(
+            listingCampaigns.campaignStatus,
+            'ACTIVE',
+          ),
+        ),
+      )
+
+    const activePromotion =
+      activeCampaignRows
+        .filter(
+          (campaign) =>
+            campaign.desiredPriceMinor !== null &&
+            (
+              !campaign.validFrom ||
+              campaign.validFrom <= now
+            ) &&
+            (
+              !campaign.validTo ||
+              campaign.validTo >= now
+            ),
+        )
+        .sort(
+          (a, b) =>
+            (a.desiredPriceMinor ?? Infinity) -
+            (b.desiredPriceMinor ?? Infinity),
+        )[0] ?? null
+
+    const effectivePriceMinor =
+      activePromotion?.desiredPriceMinor ??
+      priceMinor
+
+    const effectivePriceType =
+      activePromotion
+        ? 'PROMOTION'
+        : 'REGULAR'
+
+    const effectiveCampaignId =
+      activePromotion?.externalCampaignId ??
+      null
+
     const [lastPriceHistory] = await db
       .select({
         priceMinor:
           listingPriceHistory.priceMinor,
+        basePriceMinor:
+          listingPriceHistory.basePriceMinor,
+        priceType:
+          listingPriceHistory.priceType,
+        externalCampaignId:
+          listingPriceHistory.externalCampaignId,
         observedAt:
           listingPriceHistory.observedAt,
       })
@@ -1881,7 +1950,13 @@ allegroAuth.post('/sync', async (context) => {
 
     const priceChangedSinceLastSnapshot =
       lastPriceHistory?.priceMinor !==
-      priceMinor
+        effectivePriceMinor ||
+      lastPriceHistory?.basePriceMinor !==
+        priceMinor ||
+      lastPriceHistory?.priceType !==
+        effectivePriceType ||
+      lastPriceHistory?.externalCampaignId !==
+        effectiveCampaignId
 
     const dailyPriceSnapshotDue =
       !lastPriceHistory ||
@@ -1934,7 +2009,7 @@ allegroAuth.post('/sync', async (context) => {
       })
 
     if (
-      priceMinor !== null &&
+      effectivePriceMinor !== null &&
       (
         priceChangedSinceLastSnapshot ||
         dailyPriceSnapshotDue
@@ -1944,7 +2019,14 @@ allegroAuth.post('/sync', async (context) => {
         .insert(listingPriceHistory)
         .values({
           listingId: listing.id,
-          priceMinor,
+          priceMinor:
+            effectivePriceMinor,
+          basePriceMinor:
+            priceMinor,
+          priceType:
+            effectivePriceType,
+          externalCampaignId:
+            effectiveCampaignId,
           currency,
           source: 'ALLEGRO_SYNC',
           observedAt: now,
