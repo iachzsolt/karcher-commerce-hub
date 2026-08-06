@@ -37,6 +37,13 @@ type AllegroCampaign = {
   stockReservationIsRequired: boolean
 }
 
+type PriceHistorySummary = {
+  listingId: string
+  min30PriceMinor: number | null
+  observationCount: number
+  historyStartedAt: string | null
+  hasFull30DayWindow: boolean
+}
 type AllegroListing = {
   id: string
   offerId: string
@@ -138,6 +145,71 @@ function formatCampaignDiscount(
       maximumFractionDigits: 1,
     },
   ).format(discount)}%`
+}
+function getPriceHistoryControl(
+  currentPriceMinor: number | null,
+  min30PriceMinor: number | null | undefined,
+  hasFull30DayWindow: boolean | undefined,
+  campaignPriceValue: string | undefined,
+) {
+  if (!campaignPriceValue) {
+    return null
+  }
+
+  const campaignPrice =
+    Number(campaignPriceValue)
+
+  if (
+    !Number.isFinite(campaignPrice) ||
+    campaignPrice <= 0
+  ) {
+    return null
+  }
+
+  const campaignPriceMinor =
+    Math.round(campaignPrice * 100)
+
+  if (
+    currentPriceMinor !== null &&
+    campaignPriceMinor >= currentPriceMinor
+  ) {
+    return {
+      tone: 'error',
+      label: '✕ Nem kedvezmény',
+    }
+  }
+
+  if (
+    min30PriceMinor === null ||
+    min30PriceMinor === undefined
+  ) {
+    return null
+  }
+
+  if (campaignPriceMinor < min30PriceMinor) {
+    return {
+      tone: 'good',
+      label: hasFull30DayWindow
+        ? '✓ 30 napos minimum alatt'
+        : '✓ Eddigi minimum alatt',
+    }
+  }
+
+  if (campaignPriceMinor === min30PriceMinor) {
+    return {
+      tone: 'neutral',
+      label: hasFull30DayWindow
+        ? '= 30 napos minimummal'
+        : '= Eddigi minimummal',
+    }
+  }
+
+  return {
+    tone: 'warning',
+    label: hasFull30DayWindow
+      ? '⚠ Volt már olcsóbb 30 napon belül'
+      : '⚠ Eddig már volt olcsóbb',
+  }
 }
 function getCampaignPeriod(
   campaign: AllegroCampaign,
@@ -400,6 +472,13 @@ function AllegroCampaignsPage() {
     useState<AllegroListing[]>([])
 
   const [
+    priceHistoryByListing,
+    setPriceHistoryByListing,
+  ] = useState<
+    Record<string, PriceHistorySummary>
+  >({})
+
+  const [
     selectedCampaignId,
     setSelectedCampaignId,
   ] = useState<string | null>(null)
@@ -584,12 +663,16 @@ function AllegroCampaignsPage() {
       const [
         campaignsResponse,
         listingsResponse,
+        priceHistoryResponse,
       ] = await Promise.all([
         fetch(
           'http://localhost:3000/auth/allegro/campaigns',
         ),
         fetch(
           'http://localhost:3000/allegro/listings',
+        ),
+        fetch(
+          'http://localhost:3000/allegro/listing-price-history-summary',
         ),
       ])
 
@@ -598,6 +681,9 @@ function AllegroCampaignsPage() {
 
       const listingResult =
         await listingsResponse.json()
+
+      const priceHistoryResult =
+        await priceHistoryResponse.json()
 
       if (!campaignsResponse.ok) {
         throw new Error(
@@ -613,12 +699,33 @@ function AllegroCampaignsPage() {
         )
       }
 
+      if (!priceHistoryResponse.ok) {
+        throw new Error(
+          priceHistoryResult.message ??
+            'Nem sikerült betölteni a 30 napos árhistorikát.',
+        )
+      }
+
       setCampaigns(
         campaignResult.data?.badgeCampaigns ?? [],
       )
 
       setListings(
         listingResult.data ?? [],
+      )
+
+      const historyRows =
+        (
+          priceHistoryResult.data ?? []
+        ) as PriceHistorySummary[]
+
+      setPriceHistoryByListing(
+        Object.fromEntries(
+          historyRows.map((row) => [
+            row.listingId,
+            row,
+          ]),
+        ),
       )
     } catch (loadError) {
       console.error(
@@ -1117,6 +1224,13 @@ function AllegroCampaignsPage() {
   ) {
     setPreparationMessage(null)
 
+    if (hasInvalidSelectedCampaignPrice) {
+      setPreparationMessage(
+        'A kampányárnak minden kijelölt ajánlatnál alacsonyabbnak kell lennie az aktuális árnál.',
+      )
+      return
+    }
+
     const saved =
       await savePreparations(campaign)
 
@@ -1189,6 +1303,36 @@ function AllegroCampaignsPage() {
   useEffect(() => {
     void loadData()
   }, [])
+
+  const hasInvalidSelectedCampaignPrice =
+    selectedListingIds.some((listingId) => {
+      const listing = listings.find(
+        (item) => item.id === listingId,
+      )
+
+      const priceValue =
+        campaignPriceDrafts[listingId]
+
+      if (
+        !listing ||
+        listing.priceMinor === null ||
+        !priceValue
+      ) {
+        return false
+      }
+
+      const campaignPrice =
+        Number(priceValue)
+
+      if (!Number.isFinite(campaignPrice)) {
+        return false
+      }
+
+      return (
+        Math.round(campaignPrice * 100) >=
+        listing.priceMinor
+      )
+    })
 
   return (
     <section className="campaigns-page">
@@ -1726,6 +1870,7 @@ function AllegroCampaignsPage() {
                           <th>Termék</th>
                           <th>Allegro ID</th>
                           <th>Aktuális ár</th>
+                          <th>30 napos min.</th>
                           <th>Kampányár</th>
                           <th>Kedvezmény</th>
                           <th>Mettől</th>
@@ -1740,6 +1885,21 @@ function AllegroCampaignsPage() {
                           const checked =
                             selectedListingIds.includes(
                               listing.id,
+                            )
+
+                          const priceHistory =
+                            priceHistoryByListing[
+                              listing.id
+                            ]
+
+                          const priceHistoryControl =
+                            getPriceHistoryControl(
+                              listing.priceMinor,
+                              priceHistory?.min30PriceMinor,
+                              priceHistory?.hasFull30DayWindow,
+                              campaignPriceDrafts[
+                                listing.id
+                              ],
                             )
 
                           return (
@@ -1779,6 +1939,40 @@ function AllegroCampaignsPage() {
                                   listing.priceMinor,
                                   listing.currency,
                                 )}
+                              </td>
+
+                              <td>
+                                <div className="campaign-history-price">
+                                  <strong>
+                                    {formatPrice(
+                                      priceHistory?.min30PriceMinor ??
+                                        null,
+                                      listing.currency,
+                                    )}
+                                  </strong>
+
+                                  {priceHistory && (
+                                    <span
+                                      className={
+                                        priceHistory.hasFull30DayWindow
+                                          ? 'campaign-history-complete'
+                                          : 'campaign-history-partial'
+                                      }
+                                    >
+                                      {priceHistory.hasFull30DayWindow
+                                        ? '30 nap teljes'
+                                        : 'Részleges historika'}
+                                    </span>
+                                  )}
+
+                                  {priceHistoryControl && (
+                                    <span
+                                      className={`campaign-history-control campaign-history-control-${priceHistoryControl.tone}`}
+                                    >
+                                      {priceHistoryControl.label}
+                                    </span>
+                                  )}
+                                </div>
                               </td>
 
                               <td>
@@ -2116,7 +2310,8 @@ function AllegroCampaignsPage() {
                         className="campaign-primary-button"
                         disabled={
                           schedulingPreparations ||
-                          selectedListingIds.length === 0
+                          selectedListingIds.length === 0 ||
+                          hasInvalidSelectedCampaignPrice
                         }
                         onClick={() =>
                           void finalizeSchedule(

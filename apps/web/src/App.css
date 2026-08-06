@@ -2012,3 +2012,53 @@ textarea {
     margin-left: 0;
   }
 }
+
+/* Campaign 30 day price history */
+
+.campaign-history-price {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 105px;
+  white-space: nowrap;
+}
+
+.campaign-history-price strong {
+  font-size: 13px;
+}
+
+.campaign-history-price span {
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.campaign-history-complete {
+  color: #287a3e;
+}
+
+.campaign-history-partial {
+  color: #777777;
+}
+
+/* Campaign price history control */
+
+.campaign-history-control {
+  margin-top: 2px;
+  font-weight: 700 !important;
+}
+
+.campaign-history-control-good {
+  color: #287a3e !important;
+}
+
+.campaign-history-control-warning {
+  color: #9a6700 !important;
+}
+
+.campaign-history-control-neutral {
+  color: #666666 !important;
+}
+
+.campaign-history-control-error {
+  color: #b42318 !important;
+}
