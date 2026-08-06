@@ -100,6 +100,45 @@ function formatPrice(
   }).format(value / 100)
 }
 
+function formatCampaignDiscount(
+  currentPriceMinor: number | null,
+  campaignPriceValue: string | undefined,
+) {
+  if (
+    currentPriceMinor === null ||
+    currentPriceMinor <= 0 ||
+    !campaignPriceValue
+  ) {
+    return '–'
+  }
+
+  const currentPrice =
+    currentPriceMinor / 100
+
+  const campaignPrice =
+    Number(campaignPriceValue)
+
+  if (
+    !Number.isFinite(campaignPrice) ||
+    campaignPrice < 0 ||
+    campaignPrice > currentPrice
+  ) {
+    return '–'
+  }
+
+  const discount =
+    ((currentPrice - campaignPrice) /
+      currentPrice) *
+    100
+
+  return `${new Intl.NumberFormat(
+    'hu-HU',
+    {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 1,
+    },
+  ).format(discount)}%`
+}
 function getCampaignPeriod(
   campaign: AllegroCampaign,
 ) {
@@ -473,6 +512,11 @@ function AllegroCampaignsPage() {
   ] = useState<Record<string, string>>({})
 
   const [
+    bulkDiscountPercent,
+    setBulkDiscountPercent,
+  ] = useState('')
+
+  const [
     validFromDrafts,
     setValidFromDrafts,
   ] = useState<Record<string, string>>({})
@@ -699,6 +743,8 @@ function AllegroCampaignsPage() {
       setSelectedCampaignId(null)
       setSelectedListingIds([])
       setCampaignPriceDrafts({})
+    setBulkDiscountPercent('')
+      setBulkDiscountPercent('')
       setValidFromDrafts({})
       setValidToDrafts({})
       setValidFromTimeDrafts({})
@@ -715,6 +761,7 @@ function AllegroCampaignsPage() {
     setSelectedCampaignId(campaignId)
     setSelectedListingIds([])
     setCampaignPriceDrafts({})
+    setBulkDiscountPercent('')
     setValidFromDrafts({})
     setValidToDrafts({})
     setValidFromTimeDrafts({})
@@ -754,6 +801,53 @@ function AllegroCampaignsPage() {
 
   function clearListingSelection() {
     setSelectedListingIds([])
+  }
+  function applyBulkDiscount() {
+    const discount =
+      Number(bulkDiscountPercent)
+
+    if (
+      selectedListingIds.length === 0 ||
+      !Number.isFinite(discount) ||
+      discount <= 0 ||
+      discount >= 100
+    ) {
+      return
+    }
+
+    const selectedIds =
+      new Set(selectedListingIds)
+
+    setCampaignPriceDrafts(
+      (current) => {
+        const next = { ...current }
+
+        listings.forEach((listing) => {
+          if (
+            !selectedIds.has(listing.id) ||
+            listing.publicationStatus !==
+              'ACTIVE' ||
+            listing.priceMinor === null
+          ) {
+            return
+          }
+
+          const currentPrice =
+            listing.priceMinor / 100
+
+          const campaignPrice =
+            Math.round(
+              currentPrice *
+                (1 - discount / 100),
+            )
+
+          next[listing.id] =
+            String(campaignPrice)
+        })
+
+        return next
+      },
+    )
   }
   function applyBulkPeriod() {
     if (
@@ -1465,6 +1559,52 @@ function AllegroCampaignsPage() {
                     </div>
                   </div>
 
+                  <div className="campaign-bulk-discount">
+                    <div>
+                      <span className="campaign-detail-label">
+                        Kedvezmény a kijelölt ajánlatokra
+                      </span>
+
+                      <div className="campaign-bulk-discount-fields">
+                        <div className="campaign-discount-input">
+                          <input
+                            type="number"
+                            min="0.1"
+                            max="99.9"
+                            step="0.1"
+                            placeholder="Pl. 15"
+                            value={bulkDiscountPercent}
+                            onChange={(event) =>
+                              setBulkDiscountPercent(
+                                event.target.value,
+                              )
+                            }
+                          />
+
+                          <span>%</span>
+                        </div>
+
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={applyBulkDiscount}
+                          disabled={
+                            selectedListingIds.length === 0 ||
+                            !bulkDiscountPercent ||
+                            Number(
+                              bulkDiscountPercent,
+                            ) <= 0 ||
+                            Number(
+                              bulkDiscountPercent,
+                            ) >= 100
+                          }
+                        >
+                          Kedvezmény alkalmazása
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
                   <div className="campaign-bulk-period">
                     <div>
                       <span className="campaign-detail-label">
@@ -1587,6 +1727,7 @@ function AllegroCampaignsPage() {
                           <th>Allegro ID</th>
                           <th>Aktuális ár</th>
                           <th>Kampányár</th>
+                          <th>Kedvezmény</th>
                           <th>Mettől</th>
                           <th>Meddig</th>
                           <th>Kampány státusz</th>
@@ -1666,6 +1807,15 @@ function AllegroCampaignsPage() {
 
                                   <span>Ft</span>
                                 </div>
+                              </td>
+
+                              <td className="campaign-row-discount">
+                                {formatCampaignDiscount(
+                                  listing.priceMinor,
+                                  campaignPriceDrafts[
+                                    listing.id
+                                  ],
+                                )}
                               </td>
 
                               <td>
