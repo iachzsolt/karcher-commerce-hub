@@ -6,6 +6,7 @@ import {
   campaigns,
   listingCampaigns,
   listingDesiredStates,
+  listingPriceHistory,
   listingRemoteStates,
   platformAccounts,
   platformListings,
@@ -14,7 +15,7 @@ import {
   products,
 } from '@karcher-commerce-hub/database'
 import { neon } from '@neondatabase/serverless'
-import { and, eq } from 'drizzle-orm'
+import { and, count, eq, gte, min } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import {
@@ -328,6 +329,139 @@ app.get('/allegro/listings', async (context) => {
   }
 })
 
+app.get('/allegro/listing-price-history-summary', async (context) => {
+  if (!db) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database is not configured',
+      },
+      500,
+    )
+  }
+
+  try {
+    const now = new Date()
+
+    const thirtyDaysAgo = new Date(
+      now.getTime() -
+        30 * 24 * 60 * 60 * 1000,
+    )
+
+    const [
+      thirtyDayRows,
+      historyStartRows,
+    ] = await Promise.all([
+      db
+        .select({
+          listingId:
+            listingPriceHistory.listingId,
+
+          min30PriceMinor:
+            min(
+              listingPriceHistory.priceMinor,
+            ),
+
+          observationCount:
+            count(),
+        })
+        .from(listingPriceHistory)
+        .where(
+          gte(
+            listingPriceHistory.observedAt,
+            thirtyDaysAgo,
+          ),
+        )
+        .groupBy(
+          listingPriceHistory.listingId,
+        ),
+
+      db
+        .select({
+          listingId:
+            listingPriceHistory.listingId,
+
+          historyStartedAt:
+            min(
+              listingPriceHistory.observedAt,
+            ),
+        })
+        .from(listingPriceHistory)
+        .groupBy(
+          listingPriceHistory.listingId,
+        ),
+    ])
+
+    const historyStartByListing =
+      new Map(
+        historyStartRows.map((row) => [
+          row.listingId,
+          row.historyStartedAt,
+        ]),
+      )
+
+    const data = thirtyDayRows.map((row) => {
+      const historyStartedValue =
+        historyStartByListing.get(
+          row.listingId,
+        )
+
+      const historyStartedAt =
+        historyStartedValue
+          ? new Date(historyStartedValue)
+          : null
+
+      return {
+        listingId: row.listingId,
+
+        min30PriceMinor:
+          row.min30PriceMinor === null
+            ? null
+            : Number(
+                row.min30PriceMinor,
+              ),
+
+        observationCount:
+          Number(
+            row.observationCount,
+          ),
+
+        historyStartedAt:
+          historyStartedAt
+            ? historyStartedAt.toISOString()
+            : null,
+
+        hasFull30DayWindow:
+          historyStartedAt
+            ? historyStartedAt <=
+              thirtyDaysAgo
+            : false,
+      }
+    })
+
+    return context.json({
+      status: 'ok',
+      windowDays: 30,
+      calculatedAt: now.toISOString(),
+      count: data.length,
+      data,
+    })
+  } catch (error) {
+    console.error(
+      'Price history summary failed:',
+      error,
+    )
+
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Could not calculate price history summary',
+      },
+      500,
+    )
+  }
+})
 app.get(
   '/allegro/remote-campaigns/:campaignId/preparations',
   async (context) => {
