@@ -1566,3 +1566,26 @@ textarea {
   font-weight: 800;
   white-space: nowrap;
 }
+
+/* Campaign date + time inputs */
+
+.campaign-date-time-inputs {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.campaign-date-time-inputs input[type="time"] {
+  min-width: 90px;
+}
+
+.campaign-row-date-time {
+  flex-direction: column;
+  align-items: stretch;
+  min-width: 145px;
+}
+
+.campaign-row-date-time .campaign-time-input {
+  width: 100%;
+  box-sizing: border-box;
+}

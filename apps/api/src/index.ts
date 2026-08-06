@@ -2257,6 +2257,130 @@ app.patch('/allegro/listings/:id/desired-status', async (context) => {
     )
   }
 })
+let campaignSchedulerRunning = false
+
+async function processDueCampaignSubmissions() {
+  if (!db || campaignSchedulerRunning) {
+    return
+  }
+
+  campaignSchedulerRunning = true
+
+  try {
+    const now = new Date()
+
+    const scheduledRows = await db
+      .select({
+        listingId:
+          listingCampaigns.listingId,
+
+        externalCampaignId:
+          listingCampaigns.externalCampaignId,
+
+        validFrom:
+          listingCampaigns.validFrom,
+      })
+      .from(listingCampaigns)
+      .where(
+        eq(
+          listingCampaigns.applicationStatus,
+          'SCHEDULED',
+        ),
+      )
+
+    const dueRows =
+      scheduledRows.filter(
+        (row) =>
+          row.validFrom !== null &&
+          row.validFrom <= now,
+      )
+
+    if (dueRows.length === 0) {
+      return
+    }
+
+    const campaignsToSubmit =
+      new Map<string, string[]>()
+
+    for (const row of dueRows) {
+      const listingIds =
+        campaignsToSubmit.get(
+          row.externalCampaignId,
+        ) ?? []
+
+      listingIds.push(row.listingId)
+
+      campaignsToSubmit.set(
+        row.externalCampaignId,
+        listingIds,
+      )
+    }
+
+    for (
+      const [
+        campaignId,
+        listingIds,
+      ] of campaignsToSubmit
+    ) {
+      const response = await app.request(
+        `/allegro/remote-campaigns/${encodeURIComponent(
+          campaignId,
+        )}/submit`,
+        {
+          method: 'POST',
+
+          headers: {
+            'Content-Type':
+              'application/json',
+          },
+
+          body: JSON.stringify({
+            listingIds,
+          }),
+        },
+      )
+
+      let responseBody: unknown = null
+
+      try {
+        responseBody =
+          await response.json()
+      } catch {
+        responseBody = null
+      }
+
+      if (!response.ok) {
+        console.warn(
+          'Automatic campaign submission skipped or failed:',
+          {
+            campaignId,
+            status: response.status,
+            response: responseBody,
+          },
+        )
+
+        continue
+      }
+
+      console.log(
+        'Automatic campaign submission processed:',
+        {
+          campaignId,
+          listingCount:
+            listingIds.length,
+          response: responseBody,
+        },
+      )
+    }
+  } catch (error) {
+    console.error(
+      'Automatic Allegro campaign processing failed:',
+      error,
+    )
+  } finally {
+    campaignSchedulerRunning = false
+  }
+}
 const port = 3000
 
 async function startServer() {
@@ -2274,6 +2398,13 @@ async function startServer() {
   }, 60 * 1000)
 
   tokenRefreshTimer.unref()
+
+  const campaignSubmissionTimer =
+    setInterval(() => {
+      void processDueCampaignSubmissions()
+    }, 60 * 1000)
+
+  campaignSubmissionTimer.unref()
 
   serve(
     {

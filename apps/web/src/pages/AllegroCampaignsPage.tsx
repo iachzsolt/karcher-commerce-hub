@@ -162,6 +162,134 @@ function formatListingStatus(
   if (status === 'ENDED') return 'Lejárt'
   return 'Ismeretlen'
 }
+const CAMPAIGN_TIME_ZONE =
+  'Europe/Budapest'
+
+function getBudapestDateTimeParts(
+  value: string,
+) {
+  const formatter =
+    new Intl.DateTimeFormat(
+      'en-GB',
+      {
+        timeZone: CAMPAIGN_TIME_ZONE,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      },
+    )
+
+  const parts =
+    formatter.formatToParts(
+      new Date(value),
+    )
+
+  const getPart = (type: string) =>
+    parts.find(
+      (part) => part.type === type,
+    )?.value ?? ''
+
+  return {
+    date:
+      `${getPart('year')}-${getPart('month')}-${getPart('day')}`,
+
+    time:
+      `${getPart('hour')}:${getPart('minute')}`,
+  }
+}
+
+function getBudapestOffsetMilliseconds(
+  date: Date,
+) {
+  const formatter =
+    new Intl.DateTimeFormat(
+      'en-GB',
+      {
+        timeZone: CAMPAIGN_TIME_ZONE,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hourCycle: 'h23',
+      },
+    )
+
+  const parts =
+    formatter.formatToParts(date)
+
+  const getNumber = (type: string) =>
+    Number(
+      parts.find(
+        (part) => part.type === type,
+      )?.value ?? 0,
+    )
+
+  const asUtc = Date.UTC(
+    getNumber('year'),
+    getNumber('month') - 1,
+    getNumber('day'),
+    getNumber('hour'),
+    getNumber('minute'),
+    getNumber('second'),
+  )
+
+  return asUtc - date.getTime()
+}
+
+function budapestLocalToIso(
+  dateValue: string,
+  timeValue: string,
+) {
+  const [year, month, day] =
+    dateValue.split('-').map(Number)
+
+  const [hour, minute] =
+    timeValue.split(':').map(Number)
+
+  const tentativeUtc =
+    new Date(
+      Date.UTC(
+        year,
+        month - 1,
+        day,
+        hour,
+        minute,
+        0,
+        0,
+      ),
+    )
+
+  let offset =
+    getBudapestOffsetMilliseconds(
+      tentativeUtc,
+    )
+
+  let utcDate =
+    new Date(
+      tentativeUtc.getTime() -
+        offset,
+    )
+
+  const correctedOffset =
+    getBudapestOffsetMilliseconds(
+      utcDate,
+    )
+
+  if (correctedOffset !== offset) {
+    utcDate =
+      new Date(
+        tentativeUtc.getTime() -
+          correctedOffset,
+      )
+  }
+
+  return utcDate.toISOString()
+}
 function AllegroCampaignsPage() {
   const [campaigns, setCampaigns] =
     useState<AllegroCampaign[]>([])
@@ -194,11 +322,27 @@ function AllegroCampaignsPage() {
     setValidToDrafts,
   ] = useState<Record<string, string>>({})
 
+  const [
+    validFromTimeDrafts,
+    setValidFromTimeDrafts,
+  ] = useState<Record<string, string>>({})
+
+  const [
+    validToTimeDrafts,
+    setValidToTimeDrafts,
+  ] = useState<Record<string, string>>({})
+
   const [bulkValidFrom, setBulkValidFrom] =
     useState('')
 
+  const [bulkValidFromTime, setBulkValidFromTime] =
+    useState('00:00')
+
   const [bulkValidTo, setBulkValidTo] =
     useState('')
+
+  const [bulkValidToTime, setBulkValidToTime] =
+    useState('23:59')
 
   const [
     savingPreparations,
@@ -309,6 +453,8 @@ function AllegroCampaignsPage() {
     const prices: Record<string, string> = {}
     const starts: Record<string, string> = {}
     const ends: Record<string, string> = {}
+    const startTimes: Record<string, string> = {}
+    const endTimes: Record<string, string> = {}
     const statuses: Record<string, string | null> = {}
 
     preparedListings.forEach(
@@ -328,13 +474,29 @@ function AllegroCampaignsPage() {
         }
 
         if (item.validFrom) {
+          const parts =
+            getBudapestDateTimeParts(
+              item.validFrom,
+            )
+
           starts[item.listingId] =
-            item.validFrom.slice(0, 10)
+            parts.date
+
+          startTimes[item.listingId] =
+            parts.time
         }
 
         if (item.validTo) {
+          const parts =
+            getBudapestDateTimeParts(
+              item.validTo,
+            )
+
           ends[item.listingId] =
-            item.validTo.slice(0, 10)
+            parts.date
+
+          endTimes[item.listingId] =
+            parts.time
         }
 
         statuses[item.listingId] =
@@ -346,6 +508,8 @@ function AllegroCampaignsPage() {
     setCampaignPriceDrafts(prices)
     setValidFromDrafts(starts)
     setValidToDrafts(ends)
+    setValidFromTimeDrafts(startTimes)
+    setValidToTimeDrafts(endTimes)
     setPreparationStatuses(statuses)
   }
 
@@ -358,8 +522,12 @@ function AllegroCampaignsPage() {
       setCampaignPriceDrafts({})
       setValidFromDrafts({})
       setValidToDrafts({})
+      setValidFromTimeDrafts({})
+      setValidToTimeDrafts({})
       setBulkValidFrom('')
+      setBulkValidFromTime('00:00')
       setBulkValidTo('')
+      setBulkValidToTime('23:59')
       setPreparationMessage(null)
       setPreparationStatuses({})
       return
@@ -370,8 +538,12 @@ function AllegroCampaignsPage() {
     setCampaignPriceDrafts({})
     setValidFromDrafts({})
     setValidToDrafts({})
+    setValidFromTimeDrafts({})
+    setValidToTimeDrafts({})
     setBulkValidFrom('')
+    setBulkValidFromTime('00:00')
     setBulkValidTo('')
+    setBulkValidToTime('23:59')
     setPreparationMessage(null)
     setPreparationStatuses({})
 
@@ -392,7 +564,9 @@ function AllegroCampaignsPage() {
   function applyBulkPeriod() {
     if (
       !bulkValidFrom ||
+      !bulkValidFromTime ||
       !bulkValidTo ||
+      !bulkValidToTime ||
       selectedListingIds.length === 0
     ) {
       return
@@ -408,11 +582,33 @@ function AllegroCampaignsPage() {
       return next
     })
 
+    setValidFromTimeDrafts((current) => {
+      const next = { ...current }
+
+      selectedListingIds.forEach((listingId) => {
+        next[listingId] =
+          bulkValidFromTime
+      })
+
+      return next
+    })
+
     setValidToDrafts((current) => {
       const next = { ...current }
 
       selectedListingIds.forEach((listingId) => {
         next[listingId] = bulkValidTo
+      })
+
+      return next
+    })
+
+    setValidToTimeDrafts((current) => {
+      const next = { ...current }
+
+      selectedListingIds.forEach((listingId) => {
+        next[listingId] =
+          bulkValidToTime
       })
 
       return next
@@ -456,6 +652,14 @@ function AllegroCampaignsPage() {
       const validTo =
         validToDrafts[listingId]
 
+      const validFromTime =
+        validFromTimeDrafts[listingId] ??
+        '00:00'
+
+      const validToTime =
+        validToTimeDrafts[listingId] ??
+        '23:59'
+
       if (
         !Number.isFinite(price) ||
         price <= 0
@@ -466,29 +670,46 @@ function AllegroCampaignsPage() {
         return false
       }
 
-      if (!validFrom || !validTo) {
+      if (
+        !validFrom ||
+        !validFromTime ||
+        !validTo ||
+        !validToTime
+      ) {
         setPreparationMessage(
           `Hiányzó időszak: ${listing.sku}`,
         )
         return false
       }
 
-      if (validTo < validFrom) {
+      const validFromIso =
+        budapestLocalToIso(
+          validFrom,
+          validFromTime,
+        )
+
+      const validToIso =
+        budapestLocalToIso(
+          validTo,
+          validToTime,
+        )
+
+      if (
+        new Date(validToIso) <
+        new Date(validFromIso)
+      ) {
         setPreparationMessage(
-          `A záródátum nem lehet korábbi a kezdésnél: ${listing.sku}`,
+          `A zárási időpont nem lehet korábbi a kezdésnél: ${listing.sku}`,
         )
         return false
       }
 
-      const campaignFrom =
-        campaign.publication.from?.slice(0, 10)
-
-      const campaignTo =
-        campaign.publication.to?.slice(0, 10)
-
       if (
-        campaignFrom &&
-        validFrom < campaignFrom
+        campaign.publication.from &&
+        new Date(validFromIso) <
+          new Date(
+            campaign.publication.from,
+          )
       ) {
         setPreparationMessage(
           `Az ajánlat kezdete a kampány időszaka elé esik: ${listing.sku}`,
@@ -497,8 +718,11 @@ function AllegroCampaignsPage() {
       }
 
       if (
-        campaignTo &&
-        validTo > campaignTo
+        campaign.publication.to &&
+        new Date(validToIso) >
+          new Date(
+            campaign.publication.to,
+          )
       ) {
         setPreparationMessage(
           `Az ajánlat vége a kampány időszaka utánra esik: ${listing.sku}`,
@@ -541,10 +765,24 @@ function AllegroCampaignsPage() {
                   ),
 
                   validFrom:
-                    `${validFromDrafts[listingId]}T00:00:00.000Z`,
+                    budapestLocalToIso(
+                      validFromDrafts[
+                        listingId
+                      ],
+                      validFromTimeDrafts[
+                        listingId
+                      ] ?? '00:00',
+                    ),
 
                   validTo:
-                    `${validToDrafts[listingId]}T23:59:59.999Z`,
+                    budapestLocalToIso(
+                      validToDrafts[
+                        listingId
+                      ],
+                      validToTimeDrafts[
+                        listingId
+                      ] ?? '23:59',
+                    ),
                 }),
               ),
           }),
@@ -940,50 +1178,76 @@ function AllegroCampaignsPage() {
                         <label>
                           <span>Mettől</span>
 
-                          <input
-                            type="date"
-                            value={bulkValidFrom}
-                            min={
-                              campaign.publication.from
-                                ? campaign.publication.from.slice(0, 10)
-                                : undefined
-                            }
-                            max={
-                              campaign.publication.to
-                                ? campaign.publication.to.slice(0, 10)
-                                : undefined
-                            }
-                            onChange={(event) =>
-                              setBulkValidFrom(
-                                event.target.value,
-                              )
-                            }
-                          />
+                          <div className="campaign-date-time-inputs">
+                            <input
+                              type="date"
+                              value={bulkValidFrom}
+                              min={
+                                campaign.publication.from
+                                  ? campaign.publication.from.slice(0, 10)
+                                  : undefined
+                              }
+                              max={
+                                campaign.publication.to
+                                  ? campaign.publication.to.slice(0, 10)
+                                  : undefined
+                              }
+                              onChange={(event) =>
+                                setBulkValidFrom(
+                                  event.target.value,
+                                )
+                              }
+                            />
+
+                            <input
+                              type="time"
+                              step="60"
+                              value={bulkValidFromTime}
+                              onChange={(event) =>
+                                setBulkValidFromTime(
+                                  event.target.value,
+                                )
+                              }
+                            />
+                          </div>
                         </label>
 
                         <label>
                           <span>Meddig</span>
 
-                          <input
-                            type="date"
-                            value={bulkValidTo}
-                            min={
-                              bulkValidFrom ||
-                              (campaign.publication.from
-                                ? campaign.publication.from.slice(0, 10)
-                                : undefined)
-                            }
-                            max={
-                              campaign.publication.to
-                                ? campaign.publication.to.slice(0, 10)
-                                : undefined
-                            }
-                            onChange={(event) =>
-                              setBulkValidTo(
-                                event.target.value,
-                              )
-                            }
-                          />
+                          <div className="campaign-date-time-inputs">
+                            <input
+                              type="date"
+                              value={bulkValidTo}
+                              min={
+                                bulkValidFrom ||
+                                (campaign.publication.from
+                                  ? campaign.publication.from.slice(0, 10)
+                                  : undefined)
+                              }
+                              max={
+                                campaign.publication.to
+                                  ? campaign.publication.to.slice(0, 10)
+                                  : undefined
+                              }
+                              onChange={(event) =>
+                                setBulkValidTo(
+                                  event.target.value,
+                                )
+                              }
+                            />
+
+                            <input
+                              type="time"
+                              step="60"
+                              value={bulkValidToTime}
+                              onChange={(event) =>
+                                setBulkValidToTime(
+                                  event.target.value,
+                                )
+                              }
+                            />
+                          </div>
                         </label>
 
                         <button
@@ -993,7 +1257,9 @@ function AllegroCampaignsPage() {
                           disabled={
                             selectedListingIds.length === 0 ||
                             !bulkValidFrom ||
-                            !bulkValidTo
+                            !bulkValidFromTime ||
+                            !bulkValidTo ||
+                            !bulkValidToTime
                           }
                         >
                           Alkalmazás a kijelöltekre
@@ -1094,70 +1360,116 @@ function AllegroCampaignsPage() {
                               </td>
 
                               <td>
-                                <input
-                                  className="campaign-date-input"
-                                  type="date"
-                                  value={
-                                    validFromDrafts[
-                                      listing.id
-                                    ] ?? ''
-                                  }
-                                  min={
-                                    campaign.publication.from
-                                      ? campaign.publication.from.slice(0, 10)
-                                      : undefined
-                                  }
-                                  max={
-                                    campaign.publication.to
-                                      ? campaign.publication.to.slice(0, 10)
-                                      : undefined
-                                  }
-                                  disabled={!checked}
-                                  onChange={(event) =>
-                                    setValidFromDrafts(
-                                      (current) => ({
-                                        ...current,
-                                        [listing.id]:
-                                          event.target.value,
-                                      }),
-                                    )
-                                  }
-                                />
+                                <div className="campaign-date-time-inputs campaign-row-date-time">
+                                  <input
+                                    className="campaign-date-input"
+                                    type="date"
+                                    value={
+                                      validFromDrafts[
+                                        listing.id
+                                      ] ?? ''
+                                    }
+                                    min={
+                                      campaign.publication.from
+                                        ? campaign.publication.from.slice(0, 10)
+                                        : undefined
+                                    }
+                                    max={
+                                      campaign.publication.to
+                                        ? campaign.publication.to.slice(0, 10)
+                                        : undefined
+                                    }
+                                    disabled={!checked}
+                                    onChange={(event) =>
+                                      setValidFromDrafts(
+                                        (current) => ({
+                                          ...current,
+                                          [listing.id]:
+                                            event.target.value,
+                                        }),
+                                      )
+                                    }
+                                  />
+
+                                  <input
+                                    className="campaign-time-input"
+                                    type="time"
+                                    step="60"
+                                    value={
+                                      validFromTimeDrafts[
+                                        listing.id
+                                      ] ?? '00:00'
+                                    }
+                                    disabled={!checked}
+                                    onChange={(event) =>
+                                      setValidFromTimeDrafts(
+                                        (current) => ({
+                                          ...current,
+                                          [listing.id]:
+                                            event.target.value,
+                                        }),
+                                      )
+                                    }
+                                  />
+                                </div>
                               </td>
 
                               <td>
-                                <input
-                                  className="campaign-date-input"
-                                  type="date"
-                                  value={
-                                    validToDrafts[
-                                      listing.id
-                                    ] ?? ''
-                                  }
-                                  min={
-                                    validFromDrafts[
-                                      listing.id
-                                    ] ||
-                                    (campaign.publication.from
-                                      ? campaign.publication.from.slice(0, 10)
-                                      : undefined)
-                                  }
-                                  max={
-                                    campaign.publication.to
-                                      ? campaign.publication.to.slice(0, 10)
-                                      : undefined
-                                  }
-                                  disabled={!checked}
-                                  onChange={(event) =>
-                                    setValidToDrafts(
-                                      (current) => ({
-                                        ...current,
-                                        [listing.id]:
-                                          event.target.value,
-                                      }),
-                                    )
-                                  }
-                                />
+                                <div className="campaign-date-time-inputs campaign-row-date-time">
+                                  <input
+                                    className="campaign-date-input"
+                                    type="date"
+                                    value={
+                                      validToDrafts[
+                                        listing.id
+                                      ] ?? ''
+                                    }
+                                    min={
+                                      validFromDrafts[
+                                        listing.id
+                                      ] ||
+                                      (campaign.publication.from
+                                        ? campaign.publication.from.slice(0, 10)
+                                        : undefined)
+                                    }
+                                    max={
+                                      campaign.publication.to
+                                        ? campaign.publication.to.slice(0, 10)
+                                        : undefined
+                                    }
+                                    disabled={!checked}
+                                    onChange={(event) =>
+                                      setValidToDrafts(
+                                        (current) => ({
+                                          ...current,
+                                          [listing.id]:
+                                            event.target.value,
+                                        }),
+                                      )
+                                    }
+                                  />
+
+                                  <input
+                                    className="campaign-time-input"
+                                    type="time"
+                                    step="60"
+                                    value={
+                                      validToTimeDrafts[
+                                        listing.id
+                                      ] ?? '23:59'
+                                    }
+                                    disabled={!checked}
+                                    onChange={(event) =>
+                                      setValidToTimeDrafts(
+                                        (current) => ({
+                                          ...current,
+                                          [listing.id]:
+                                            event.target.value,
+                                        }),
+                                      )
+                                    }
+                                  />
+                                </div>
                               </td>
 
                               <td>
