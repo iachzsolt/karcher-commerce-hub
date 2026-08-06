@@ -50,6 +50,13 @@
       "when": 1786020864528,
       "tag": "0006_cloudy_alice",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786022374771,
+      "tag": "0007_plain_james_howlett",
+      "breakpoints": true
     }
   ]
 }

@@ -923,6 +923,241 @@ export async function submitOfferToAllegroCampaign(
     data: responseData,
   }
 }
+export type FinishAllegroCampaignOfferInput = {
+  campaignId: string
+  offerId: string
+}
+
+export type AllegroCampaignFinishResult =
+  | {
+      ok: true
+      status: number
+      data: unknown
+    }
+  | {
+      ok: false
+      status: number
+      data: unknown
+    }
+
+export async function finishOfferAllegroCampaign(
+  input: FinishAllegroCampaignOfferInput,
+): Promise<AllegroCampaignFinishResult> {
+  const apiUrl = process.env.ALLEGRO_API_URL
+
+  if (!apiUrl) {
+    throw new Error('ALLEGRO_API_URL is missing')
+  }
+
+  await refreshAllegroSessionIfNeeded()
+
+  if (!currentSession) {
+    throw new Error(
+      'Allegro session is not available',
+    )
+  }
+
+  const response = await fetch(
+    `${apiUrl}/sale/badges/offers/${encodeURIComponent(
+      input.offerId,
+    )}/campaigns/${encodeURIComponent(
+      input.campaignId,
+    )}`,
+    {
+      method: 'PATCH',
+
+      headers: {
+        Authorization:
+          `Bearer ${currentSession.accessToken}`,
+
+        Accept:
+          'application/vnd.allegro.public.v1+json',
+
+        'Content-Type':
+          'application/vnd.allegro.public.v1+json',
+
+        'Accept-Language':
+          'hu-HU',
+      },
+
+      body: JSON.stringify({
+        process: {
+          status: 'FINISHED',
+        },
+      }),
+    },
+  )
+
+  const responseText =
+    await response.text()
+
+  let responseData: unknown =
+    responseText
+
+  if (responseText) {
+    try {
+      responseData =
+        JSON.parse(responseText)
+    } catch {
+      responseData =
+        responseText
+    }
+  }
+
+  if (!response.ok) {
+    console.error(
+      'Allegro campaign finish failed:',
+      response.status,
+      responseData,
+    )
+
+    return {
+      ok: false,
+      status: response.status,
+      data: responseData,
+    }
+  }
+
+  return {
+    ok: true,
+    status: response.status,
+    data: responseData,
+  }
+}
+export type AllegroBadgeOperation = {
+  id: string
+  type: string
+  createdAt: string
+  updatedAt: string
+  campaign: {
+    id: string
+  }
+  offer: {
+    id: string
+  }
+  process: {
+    status: string
+    rejectionReasons: unknown[]
+  }
+}
+
+export async function getAllegroBadgeOperation(
+  operationId: string,
+): Promise<AllegroBadgeOperation> {
+  const apiUrl = process.env.ALLEGRO_API_URL
+
+  if (!apiUrl) {
+    throw new Error('ALLEGRO_API_URL is missing')
+  }
+
+  await refreshAllegroSessionIfNeeded()
+
+  if (!currentSession) {
+    throw new Error(
+      'Allegro session is not available',
+    )
+  }
+
+  const response = await fetch(
+    `${apiUrl}/sale/badge-operations/${encodeURIComponent(
+      operationId,
+    )}`,
+    {
+      headers: {
+        Authorization:
+          `Bearer ${currentSession.accessToken}`,
+
+        Accept:
+          'application/vnd.allegro.public.v1+json',
+
+        'Accept-Language':
+          'hu-HU',
+      },
+    },
+  )
+
+  const responseText =
+    await response.text()
+
+  if (!response.ok) {
+    throw new Error(
+      `Allegro badge operation loading failed (${response.status}): ${responseText}`,
+    )
+  }
+
+  return JSON.parse(
+    responseText,
+  ) as AllegroBadgeOperation
+}
+export type AllegroBadgeApplication = {
+  id: string
+  createdAt: string
+  updatedAt: string
+  campaign: {
+    id: string
+  }
+  offer: {
+    id: string
+  }
+  process: {
+    status:
+      | 'REQUESTED'
+      | 'PROCESSED'
+      | 'DECLINED'
+      | string
+
+    rejectionReasons: unknown[]
+  }
+}
+
+export async function getAllegroBadgeApplication(
+  applicationId: string,
+): Promise<AllegroBadgeApplication> {
+  const apiUrl = process.env.ALLEGRO_API_URL
+
+  if (!apiUrl) {
+    throw new Error('ALLEGRO_API_URL is missing')
+  }
+
+  await refreshAllegroSessionIfNeeded()
+
+  if (!currentSession) {
+    throw new Error(
+      'Allegro session is not available',
+    )
+  }
+
+  const response = await fetch(
+    `${apiUrl}/sale/badge-applications/${encodeURIComponent(
+      applicationId,
+    )}`,
+    {
+      headers: {
+        Authorization:
+          `Bearer ${currentSession.accessToken}`,
+
+        Accept:
+          'application/vnd.allegro.public.v1+json',
+
+        'Accept-Language':
+          'hu-HU',
+      },
+    },
+  )
+
+  const responseText =
+    await response.text()
+
+  if (!response.ok) {
+    throw new Error(
+      `Allegro badge application loading failed (${response.status}): ${responseText}`,
+    )
+  }
+
+  return JSON.parse(
+    responseText,
+  ) as AllegroBadgeApplication
+}
 export type AllegroBadgeCampaign = {
   id: string
   name: string

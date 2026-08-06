@@ -497,6 +497,14 @@ export const listingCampaigns = pgTable(
       'application_error',
     ),
 
+    finishOperationId: text(
+      'finish_operation_id',
+    ),
+
+    finishError: text(
+      'finish_error',
+    ),
+
     retryAfter: timestamp('retry_after', {
       withTimezone: true,
     }),
