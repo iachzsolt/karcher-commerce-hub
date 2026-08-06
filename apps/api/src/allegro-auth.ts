@@ -755,6 +755,106 @@ allegroAuth.get('/callback', async (context) => {
   })
 })
 
+allegroAuth.get('/campaigns', async (context) => {
+  if (!currentSession) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Allegro account is not connected',
+      },
+      401,
+    )
+  }
+
+  try {
+    const apiUrl = process.env.ALLEGRO_API_URL
+
+    if (!apiUrl) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'ALLEGRO_API_URL is missing',
+        },
+        500,
+      )
+    }
+
+    await refreshAllegroSessionIfNeeded()
+
+    const session = currentSession
+
+    if (!session) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Allegro session is not available',
+        },
+        401,
+      )
+    }
+
+    const response = await fetch(
+      `${apiUrl}/sale/badge-campaigns?marketplace.id=allegro-hu`,
+      {
+        headers: {
+          Authorization:
+            `Bearer ${session.accessToken}`,
+
+          Accept:
+            'application/vnd.allegro.public.v1+json',
+
+          'Accept-Language':
+            'hu-HU',
+        },
+      },
+    )
+
+    const body = await response.text()
+
+    if (!response.ok) {
+      console.error(
+        'Allegro campaign loading failed:',
+        response.status,
+        body,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Could not load Allegro campaigns',
+          allegroStatus:
+            response.status,
+          allegroResponse:
+            body,
+        },
+        502,
+      )
+    }
+
+    const data = JSON.parse(body)
+
+    return context.json({
+      status: 'ok',
+      marketplace: 'allegro-hu',
+      data,
+    })
+  } catch (error) {
+    console.error(
+      'Allegro campaign loading failed:',
+      error,
+    )
+
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Could not load Allegro campaigns',
+      },
+      500,
+    )
+  }
+})
 allegroAuth.get('/offers', async (context) => {
   if (!currentSession) {
     return context.json(
