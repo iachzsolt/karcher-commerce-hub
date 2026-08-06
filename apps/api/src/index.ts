@@ -738,6 +738,142 @@ app.put(
     }
   },
 )
+app.post(
+  '/allegro/remote-campaigns/:campaignId/schedule',
+  async (context) => {
+    if (!db) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Database is not configured',
+        },
+        500,
+      )
+    }
+
+    try {
+      const externalCampaignId =
+        context.req.param('campaignId')
+
+      const body = await context.req.json<{
+        listingIds?: string[]
+      }>()
+
+      const listingIds =
+        body.listingIds ?? []
+
+      if (listingIds.length === 0) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'At least one listing is required',
+          },
+          400,
+        )
+      }
+
+      const now = new Date()
+      const scheduled = []
+
+      for (const listingId of listingIds) {
+        const [preparation] = await db
+          .select()
+          .from(listingCampaigns)
+          .where(
+            and(
+              eq(
+                listingCampaigns.externalCampaignId,
+                externalCampaignId,
+              ),
+              eq(
+                listingCampaigns.listingId,
+                listingId,
+              ),
+            ),
+          )
+          .limit(1)
+
+        if (!preparation) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                `Preparation not found: ${listingId}`,
+            },
+            404,
+          )
+        }
+
+        if (
+          preparation.desiredPriceMinor === null ||
+          !preparation.validFrom ||
+          !preparation.validTo
+        ) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                `Preparation is incomplete: ${listingId}`,
+            },
+            400,
+          )
+        }
+
+        if (
+          preparation.validTo <
+          preparation.validFrom
+        ) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                `Invalid preparation period: ${listingId}`,
+            },
+            400,
+          )
+        }
+
+        const [updated] = await db
+          .update(listingCampaigns)
+          .set({
+            applicationStatus:
+              'SCHEDULED',
+            updatedAt: now,
+          })
+          .where(
+            eq(
+              listingCampaigns.id,
+              preparation.id,
+            ),
+          )
+          .returning()
+
+        scheduled.push(updated)
+      }
+
+      return context.json({
+        status: 'ok',
+        count: scheduled.length,
+        data: scheduled,
+      })
+    } catch (error) {
+      console.error(
+        'Campaign scheduling failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Could not schedule campaign listings',
+        },
+        500,
+      )
+    }
+  },
+)
 app.get('/allegro/campaigns', async (context) => {
   if (!db) {
     return context.json(

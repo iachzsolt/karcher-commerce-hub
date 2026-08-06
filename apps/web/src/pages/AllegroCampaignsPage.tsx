@@ -142,6 +142,17 @@ function getApplicationLabel(type: string) {
   }
 }
 
+function formatPreparationStatus(
+  status: string | null | undefined,
+) {
+  if (status === 'PREPARED') return 'Előkészítve'
+  if (status === 'SCHEDULED') return 'Ütemezve'
+  if (status === 'SUBMITTING') return 'Beküldés alatt'
+  if (status === 'SUBMITTED') return 'Beküldve'
+  if (status === 'FAILED') return 'Hiba'
+  if (status === 'FINISHED') return 'Lezárva'
+  return '–'
+}
 function formatListingStatus(
   status: AllegroListing['publicationStatus'],
 ) {
@@ -198,6 +209,16 @@ function AllegroCampaignsPage() {
     preparationMessage,
     setPreparationMessage,
   ] = useState<string | null>(null)
+
+  const [
+    preparationStatuses,
+    setPreparationStatuses,
+  ] = useState<Record<string, string | null>>({})
+
+  const [
+    schedulingPreparations,
+    setSchedulingPreparations,
+  ] = useState(false)
 
   const [loading, setLoading] =
     useState(true)
@@ -288,6 +309,7 @@ function AllegroCampaignsPage() {
     const prices: Record<string, string> = {}
     const starts: Record<string, string> = {}
     const ends: Record<string, string> = {}
+    const statuses: Record<string, string | null> = {}
 
     preparedListings.forEach(
       (item: {
@@ -295,6 +317,7 @@ function AllegroCampaignsPage() {
         desiredPriceMinor: number | null
         validFrom: string | null
         validTo: string | null
+        applicationStatus: string | null
       }) => {
         selectedIds.push(item.listingId)
 
@@ -313,6 +336,9 @@ function AllegroCampaignsPage() {
           ends[item.listingId] =
             item.validTo.slice(0, 10)
         }
+
+        statuses[item.listingId] =
+          item.applicationStatus
       },
     )
 
@@ -320,6 +346,7 @@ function AllegroCampaignsPage() {
     setCampaignPriceDrafts(prices)
     setValidFromDrafts(starts)
     setValidToDrafts(ends)
+    setPreparationStatuses(statuses)
   }
 
   async function toggleCampaign(
@@ -334,6 +361,7 @@ function AllegroCampaignsPage() {
       setBulkValidFrom('')
       setBulkValidTo('')
       setPreparationMessage(null)
+      setPreparationStatuses({})
       return
     }
 
@@ -345,6 +373,7 @@ function AllegroCampaignsPage() {
     setBulkValidFrom('')
     setBulkValidTo('')
     setPreparationMessage(null)
+    setPreparationStatuses({})
 
     try {
       await loadPreparations(campaignId)
@@ -392,14 +421,14 @@ function AllegroCampaignsPage() {
 
   async function savePreparations(
     campaign: AllegroCampaign,
-  ) {
+  ): Promise<boolean> {
     setPreparationMessage(null)
 
     if (selectedListingIds.length === 0) {
       setPreparationMessage(
         'Jelölj ki legalább egy ajánlatot.',
       )
-      return
+      return false
     }
 
     for (const listingId of selectedListingIds) {
@@ -414,7 +443,7 @@ function AllegroCampaignsPage() {
         setPreparationMessage(
           'Csak aktív Allegro-ajánlat készíthető elő kampányhoz.',
         )
-        return
+        return false
       }
 
       const price = Number(
@@ -434,21 +463,21 @@ function AllegroCampaignsPage() {
         setPreparationMessage(
           `Hiányzó vagy hibás kampányár: ${listing.sku}`,
         )
-        return
+        return false
       }
 
       if (!validFrom || !validTo) {
         setPreparationMessage(
           `Hiányzó időszak: ${listing.sku}`,
         )
-        return
+        return false
       }
 
       if (validTo < validFrom) {
         setPreparationMessage(
           `A záródátum nem lehet korábbi a kezdésnél: ${listing.sku}`,
         )
-        return
+        return false
       }
 
       const campaignFrom =
@@ -464,7 +493,7 @@ function AllegroCampaignsPage() {
         setPreparationMessage(
           `Az ajánlat kezdete a kampány időszaka elé esik: ${listing.sku}`,
         )
-        return
+        return false
       }
 
       if (
@@ -474,7 +503,7 @@ function AllegroCampaignsPage() {
         setPreparationMessage(
           `Az ajánlat vége a kampány időszaka utánra esik: ${listing.sku}`,
         )
-        return
+        return false
       }
     }
 
@@ -538,6 +567,8 @@ function AllegroCampaignsPage() {
       await loadPreparations(
         campaign.id,
       )
+
+      return true
     } catch (saveError) {
       console.error(
         'Preparation saving failed:',
@@ -549,8 +580,70 @@ function AllegroCampaignsPage() {
           ? saveError.message
           : 'Nem sikerült menteni az előkészítést.',
       )
+
+      return false
     } finally {
       setSavingPreparations(false)
+    }
+  }
+  async function finalizeSchedule(
+    campaign: AllegroCampaign,
+  ) {
+    setPreparationMessage(null)
+
+    const saved =
+      await savePreparations(campaign)
+
+    if (!saved) {
+      return
+    }
+
+    setSchedulingPreparations(true)
+
+    try {
+      const response = await fetch(
+        `http://localhost:3000/allegro/remote-campaigns/${campaign.id}/schedule`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            listingIds:
+              selectedListingIds,
+          }),
+        },
+      )
+
+      const result = await response.json()
+
+      if (!response.ok) {
+        throw new Error(
+          result.message ??
+            'Nem sikerült véglegesíteni az ütemezést.',
+        )
+      }
+
+      setPreparationMessage(
+        `${result.count} ajánlat ütemezése véglegesítve.`,
+      )
+
+      await loadPreparations(
+        campaign.id,
+      )
+    } catch (scheduleError) {
+      console.error(
+        'Campaign scheduling failed:',
+        scheduleError,
+      )
+
+      setPreparationMessage(
+        scheduleError instanceof Error
+          ? scheduleError.message
+          : 'Nem sikerült véglegesíteni az ütemezést.',
+      )
+    } finally {
+      setSchedulingPreparations(false)
     }
   }
   function toggleListing(
@@ -921,7 +1014,8 @@ function AllegroCampaignsPage() {
                           <th>Kampányár</th>
                           <th>Mettől</th>
                           <th>Meddig</th>
-                          <th>Állapot</th>
+                          <th>Kampány státusz</th>
+                          <th>Ajánlat státusz</th>
                         </tr>
                       </thead>
 
@@ -1067,7 +1161,19 @@ function AllegroCampaignsPage() {
                               </td>
 
                               <td>
-                                {formatListingStatus(listing.publicationStatus)}
+                                <span className="campaign-preparation-status">
+                                  {formatPreparationStatus(
+                                    preparationStatuses[
+                                      listing.id
+                                    ],
+                                  )}
+                                </span>
+                              </td>
+
+                              <td>
+                                {formatListingStatus(
+                                  listing.publicationStatus,
+                                )}
                               </td>
                             </tr>
                           )
@@ -1106,6 +1212,24 @@ function AllegroCampaignsPage() {
                         {savingPreparations
                           ? 'Mentés…'
                           : 'Előkészítés mentése'}
+                      </button>
+
+                      <button
+                        type="button"
+                        className="campaign-primary-button"
+                        disabled={
+                          schedulingPreparations ||
+                          selectedListingIds.length === 0
+                        }
+                        onClick={() =>
+                          void finalizeSchedule(
+                            campaign,
+                          )
+                        }
+                      >
+                        {schedulingPreparations
+                          ? 'Véglegesítés…'
+                          : 'Ütemezés véglegesítése'}
                       </button>
 
                       <button

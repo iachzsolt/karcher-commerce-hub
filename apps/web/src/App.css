@@ -1551,3 +1551,18 @@ textarea {
     width: 100%;
   }
 }
+
+/* Campaign preparation status */
+
+.campaign-preparation-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: #f0f0f0;
+  color: #444;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
