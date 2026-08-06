@@ -14,7 +14,11 @@ import { neon } from '@neondatabase/serverless'
 import { and, eq } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
-import { allegroAuth, restoreAllegroSession } from './allegro-auth.js'
+import {
+  allegroAuth,
+  refreshAllegroSessionIfNeeded,
+  restoreAllegroSession,
+} from './allegro-auth.js'
 
 const app = new Hono()
 
@@ -594,6 +598,19 @@ const port = 3000
 
 async function startServer() {
   await restoreAllegroSession()
+
+  const tokenRefreshTimer = setInterval(() => {
+    void refreshAllegroSessionIfNeeded().catch(
+      (error) => {
+        console.error(
+          'Automatic Allegro token refresh failed:',
+          error,
+        )
+      },
+    )
+  }, 60 * 1000)
+
+  tokenRefreshTimer.unref()
 
   serve(
     {
