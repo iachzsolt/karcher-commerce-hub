@@ -778,11 +778,25 @@ app.put(
           )
         }
 
+        const desiredPriceMinor =
+          Math.round(
+            desiredPrice * 100,
+          )
+
         const [listing] = await db
           .select({
             id: platformListings.id,
+            currentPriceMinor:
+              listingRemoteStates.priceMinor,
           })
           .from(platformListings)
+          .leftJoin(
+            listingRemoteStates,
+            eq(
+              listingRemoteStates.listingId,
+              platformListings.id,
+            ),
+          )
           .where(
             eq(
               platformListings.id,
@@ -799,6 +813,40 @@ app.put(
                 `Listing not found: ${listingId}`,
             },
             404,
+          )
+        }
+
+        const requiresDiscountPrice =
+          campaignType === 'DISCOUNT' ||
+          campaignType === 'SOURCING'
+
+        if (
+          requiresDiscountPrice &&
+          listing.currentPriceMinor === null
+        ) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                `Current Allegro price is unavailable: ${listingId}`,
+            },
+            400,
+          )
+        }
+
+        if (
+          requiresDiscountPrice &&
+          listing.currentPriceMinor !== null &&
+          desiredPriceMinor >=
+            listing.currentPriceMinor
+        ) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                `Campaign price must be lower than the current Allegro price: ${listingId}`,
+            },
+            400,
           )
         }
 
