@@ -142,6 +142,15 @@ function getApplicationLabel(type: string) {
   }
 }
 
+function formatListingStatus(
+  status: AllegroListing['publicationStatus'],
+) {
+  if (status === 'ACTIVE') return 'Aktív'
+  if (status === 'ACTIVATING') return 'Aktiválás alatt'
+  if (status === 'INACTIVE') return 'Inaktív'
+  if (status === 'ENDED') return 'Lejárt'
+  return 'Ismeretlen'
+}
 function AllegroCampaignsPage() {
   const [campaigns, setCampaigns] =
     useState<AllegroCampaign[]>([])
@@ -163,6 +172,32 @@ function AllegroCampaignsPage() {
     campaignPriceDrafts,
     setCampaignPriceDrafts,
   ] = useState<Record<string, string>>({})
+
+  const [
+    validFromDrafts,
+    setValidFromDrafts,
+  ] = useState<Record<string, string>>({})
+
+  const [
+    validToDrafts,
+    setValidToDrafts,
+  ] = useState<Record<string, string>>({})
+
+  const [bulkValidFrom, setBulkValidFrom] =
+    useState('')
+
+  const [bulkValidTo, setBulkValidTo] =
+    useState('')
+
+  const [
+    savingPreparations,
+    setSavingPreparations,
+  ] = useState(false)
+
+  const [
+    preparationMessage,
+    setPreparationMessage,
+  ] = useState<string | null>(null)
 
   const [loading, setLoading] =
     useState(true)
@@ -230,19 +265,294 @@ function AllegroCampaignsPage() {
     }
   }
 
-  function toggleCampaign(
+  async function loadPreparations(
     campaignId: string,
   ) {
-    setSelectedCampaignId((current) =>
-      current === campaignId
-        ? null
-        : campaignId,
+    const response = await fetch(
+      `http://localhost:3000/allegro/remote-campaigns/${campaignId}/preparations`,
     )
 
-    setSelectedListingIds([])
-    setCampaignPriceDrafts({})
+    const result = await response.json()
+
+    if (!response.ok) {
+      throw new Error(
+        result.message ??
+          'Nem sikerült betölteni az előkészített ajánlatokat.',
+      )
+    }
+
+    const preparedListings =
+      result.data ?? []
+
+    const selectedIds: string[] = []
+    const prices: Record<string, string> = {}
+    const starts: Record<string, string> = {}
+    const ends: Record<string, string> = {}
+
+    preparedListings.forEach(
+      (item: {
+        listingId: string
+        desiredPriceMinor: number | null
+        validFrom: string | null
+        validTo: string | null
+      }) => {
+        selectedIds.push(item.listingId)
+
+        if (item.desiredPriceMinor !== null) {
+          prices[item.listingId] = String(
+            item.desiredPriceMinor / 100,
+          )
+        }
+
+        if (item.validFrom) {
+          starts[item.listingId] =
+            item.validFrom.slice(0, 10)
+        }
+
+        if (item.validTo) {
+          ends[item.listingId] =
+            item.validTo.slice(0, 10)
+        }
+      },
+    )
+
+    setSelectedListingIds(selectedIds)
+    setCampaignPriceDrafts(prices)
+    setValidFromDrafts(starts)
+    setValidToDrafts(ends)
   }
 
+  async function toggleCampaign(
+    campaignId: string,
+  ) {
+    if (selectedCampaignId === campaignId) {
+      setSelectedCampaignId(null)
+      setSelectedListingIds([])
+      setCampaignPriceDrafts({})
+      setValidFromDrafts({})
+      setValidToDrafts({})
+      setBulkValidFrom('')
+      setBulkValidTo('')
+      setPreparationMessage(null)
+      return
+    }
+
+    setSelectedCampaignId(campaignId)
+    setSelectedListingIds([])
+    setCampaignPriceDrafts({})
+    setValidFromDrafts({})
+    setValidToDrafts({})
+    setBulkValidFrom('')
+    setBulkValidTo('')
+    setPreparationMessage(null)
+
+    try {
+      await loadPreparations(campaignId)
+    } catch (loadError) {
+      console.error(
+        'Preparation loading failed:',
+        loadError,
+      )
+
+      setPreparationMessage(
+        'A korábban előkészített ajánlatokat nem sikerült betölteni.',
+      )
+    }
+  }
+
+  function applyBulkPeriod() {
+    if (
+      !bulkValidFrom ||
+      !bulkValidTo ||
+      selectedListingIds.length === 0
+    ) {
+      return
+    }
+
+    setValidFromDrafts((current) => {
+      const next = { ...current }
+
+      selectedListingIds.forEach((listingId) => {
+        next[listingId] = bulkValidFrom
+      })
+
+      return next
+    })
+
+    setValidToDrafts((current) => {
+      const next = { ...current }
+
+      selectedListingIds.forEach((listingId) => {
+        next[listingId] = bulkValidTo
+      })
+
+      return next
+    })
+  }
+
+  async function savePreparations(
+    campaign: AllegroCampaign,
+  ) {
+    setPreparationMessage(null)
+
+    if (selectedListingIds.length === 0) {
+      setPreparationMessage(
+        'Jelölj ki legalább egy ajánlatot.',
+      )
+      return
+    }
+
+    for (const listingId of selectedListingIds) {
+      const listing = listings.find(
+        (item) => item.id === listingId,
+      )
+
+      if (
+        !listing ||
+        listing.publicationStatus !== 'ACTIVE'
+      ) {
+        setPreparationMessage(
+          'Csak aktív Allegro-ajánlat készíthető elő kampányhoz.',
+        )
+        return
+      }
+
+      const price = Number(
+        campaignPriceDrafts[listingId],
+      )
+
+      const validFrom =
+        validFromDrafts[listingId]
+
+      const validTo =
+        validToDrafts[listingId]
+
+      if (
+        !Number.isFinite(price) ||
+        price <= 0
+      ) {
+        setPreparationMessage(
+          `Hiányzó vagy hibás kampányár: ${listing.sku}`,
+        )
+        return
+      }
+
+      if (!validFrom || !validTo) {
+        setPreparationMessage(
+          `Hiányzó időszak: ${listing.sku}`,
+        )
+        return
+      }
+
+      if (validTo < validFrom) {
+        setPreparationMessage(
+          `A záródátum nem lehet korábbi a kezdésnél: ${listing.sku}`,
+        )
+        return
+      }
+
+      const campaignFrom =
+        campaign.publication.from?.slice(0, 10)
+
+      const campaignTo =
+        campaign.publication.to?.slice(0, 10)
+
+      if (
+        campaignFrom &&
+        validFrom < campaignFrom
+      ) {
+        setPreparationMessage(
+          `Az ajánlat kezdete a kampány időszaka elé esik: ${listing.sku}`,
+        )
+        return
+      }
+
+      if (
+        campaignTo &&
+        validTo > campaignTo
+      ) {
+        setPreparationMessage(
+          `Az ajánlat vége a kampány időszaka utánra esik: ${listing.sku}`,
+        )
+        return
+      }
+    }
+
+    setSavingPreparations(true)
+
+    try {
+      const response = await fetch(
+        `http://localhost:3000/allegro/remote-campaigns/${campaign.id}/preparations`,
+        {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            campaign: {
+              name: campaign.name,
+              type: campaign.type,
+              marketplace:
+                campaign.marketplace.id,
+              publicationFrom:
+                campaign.publication.from,
+              publicationTo:
+                campaign.publication.to,
+            },
+
+            listings:
+              selectedListingIds.map(
+                (listingId) => ({
+                  listingId,
+
+                  desiredPrice: Number(
+                    campaignPriceDrafts[
+                      listingId
+                    ],
+                  ),
+
+                  validFrom:
+                    `${validFromDrafts[listingId]}T00:00:00.000Z`,
+
+                  validTo:
+                    `${validToDrafts[listingId]}T23:59:59.999Z`,
+                }),
+              ),
+          }),
+        },
+      )
+
+      const result = await response.json()
+
+      if (!response.ok) {
+        throw new Error(
+          result.message ??
+            'Nem sikerült menteni az előkészítést.',
+        )
+      }
+
+      setPreparationMessage(
+        `${result.count} ajánlat előkészítése elmentve.`,
+      )
+
+      await loadPreparations(
+        campaign.id,
+      )
+    } catch (saveError) {
+      console.error(
+        'Preparation saving failed:',
+        saveError,
+      )
+
+      setPreparationMessage(
+        saveError instanceof Error
+          ? saveError.message
+          : 'Nem sikerült menteni az előkészítést.',
+      )
+    } finally {
+      setSavingPreparations(false)
+    }
+  }
   function toggleListing(
     listingId: string,
   ) {
@@ -392,7 +702,7 @@ function AllegroCampaignsPage() {
                         : 'campaign-primary-button'
                     }
                     onClick={() =>
-                      toggleCampaign(campaign.id)
+                      void toggleCampaign(campaign.id)
                     }
                   >
                     {selected
@@ -527,6 +837,78 @@ function AllegroCampaignsPage() {
                     </div>
                   )}
 
+                  <div className="campaign-bulk-period">
+                    <div>
+                      <span className="campaign-detail-label">
+                        Időszak a kijelölt ajánlatokra
+                      </span>
+
+                      <div className="campaign-bulk-period-fields">
+                        <label>
+                          <span>Mettől</span>
+
+                          <input
+                            type="date"
+                            value={bulkValidFrom}
+                            min={
+                              campaign.publication.from
+                                ? campaign.publication.from.slice(0, 10)
+                                : undefined
+                            }
+                            max={
+                              campaign.publication.to
+                                ? campaign.publication.to.slice(0, 10)
+                                : undefined
+                            }
+                            onChange={(event) =>
+                              setBulkValidFrom(
+                                event.target.value,
+                              )
+                            }
+                          />
+                        </label>
+
+                        <label>
+                          <span>Meddig</span>
+
+                          <input
+                            type="date"
+                            value={bulkValidTo}
+                            min={
+                              bulkValidFrom ||
+                              (campaign.publication.from
+                                ? campaign.publication.from.slice(0, 10)
+                                : undefined)
+                            }
+                            max={
+                              campaign.publication.to
+                                ? campaign.publication.to.slice(0, 10)
+                                : undefined
+                            }
+                            onChange={(event) =>
+                              setBulkValidTo(
+                                event.target.value,
+                              )
+                            }
+                          />
+                        </label>
+
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={applyBulkPeriod}
+                          disabled={
+                            selectedListingIds.length === 0 ||
+                            !bulkValidFrom ||
+                            !bulkValidTo
+                          }
+                        >
+                          Alkalmazás a kijelöltekre
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
                   <div className="campaign-offers-table-wrapper">
                     <table className="campaign-offers-table">
                       <thead>
@@ -537,6 +919,8 @@ function AllegroCampaignsPage() {
                           <th>Allegro ID</th>
                           <th>Aktuális ár</th>
                           <th>Kampányár</th>
+                          <th>Mettől</th>
+                          <th>Meddig</th>
                           <th>Állapot</th>
                         </tr>
                       </thead>
@@ -554,6 +938,10 @@ function AllegroCampaignsPage() {
                                 <input
                                   type="checkbox"
                                   checked={checked}
+                                  disabled={
+                                    listing.publicationStatus !==
+                                    'ACTIVE'
+                                  }
                                   onChange={() =>
                                     toggleListing(
                                       listing.id,
@@ -612,7 +1000,74 @@ function AllegroCampaignsPage() {
                               </td>
 
                               <td>
-                                {listing.publicationStatus}
+                                <input
+                                  className="campaign-date-input"
+                                  type="date"
+                                  value={
+                                    validFromDrafts[
+                                      listing.id
+                                    ] ?? ''
+                                  }
+                                  min={
+                                    campaign.publication.from
+                                      ? campaign.publication.from.slice(0, 10)
+                                      : undefined
+                                  }
+                                  max={
+                                    campaign.publication.to
+                                      ? campaign.publication.to.slice(0, 10)
+                                      : undefined
+                                  }
+                                  disabled={!checked}
+                                  onChange={(event) =>
+                                    setValidFromDrafts(
+                                      (current) => ({
+                                        ...current,
+                                        [listing.id]:
+                                          event.target.value,
+                                      }),
+                                    )
+                                  }
+                                />
+                              </td>
+
+                              <td>
+                                <input
+                                  className="campaign-date-input"
+                                  type="date"
+                                  value={
+                                    validToDrafts[
+                                      listing.id
+                                    ] ?? ''
+                                  }
+                                  min={
+                                    validFromDrafts[
+                                      listing.id
+                                    ] ||
+                                    (campaign.publication.from
+                                      ? campaign.publication.from.slice(0, 10)
+                                      : undefined)
+                                  }
+                                  max={
+                                    campaign.publication.to
+                                      ? campaign.publication.to.slice(0, 10)
+                                      : undefined
+                                  }
+                                  disabled={!checked}
+                                  onChange={(event) =>
+                                    setValidToDrafts(
+                                      (current) => ({
+                                        ...current,
+                                        [listing.id]:
+                                          event.target.value,
+                                      }),
+                                    )
+                                  }
+                                />
+                              </td>
+
+                              <td>
+                                {formatListingStatus(listing.publicationStatus)}
                               </td>
                             </tr>
                           )
@@ -621,6 +1076,12 @@ function AllegroCampaignsPage() {
                     </table>
                   </div>
 
+                  {preparationMessage && (
+                    <div className="campaign-preparation-message">
+                      {preparationMessage}
+                    </div>
+                  )}
+
                   <div className="campaign-submit-bar">
                     <span>
                       {selectedListingIds.length}
@@ -628,16 +1089,36 @@ function AllegroCampaignsPage() {
                       ajánlat kijelölve
                     </span>
 
-                    <button
-                      type="button"
-                      className="campaign-primary-button"
-                      disabled={
-                        !canSubmit ||
-                        selectedListingIds.length === 0
-                      }
-                    >
-                      Kijelölt ajánlatok beküldése
-                    </button>
+                    <div className="campaign-submit-actions">
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        disabled={
+                          savingPreparations ||
+                          selectedListingIds.length === 0
+                        }
+                        onClick={() =>
+                          void savePreparations(
+                            campaign,
+                          )
+                        }
+                      >
+                        {savingPreparations
+                          ? 'Mentés…'
+                          : 'Előkészítés mentése'}
+                      </button>
+
+                      <button
+                        type="button"
+                        className="campaign-primary-button"
+                        disabled={
+                          !canSubmit ||
+                          selectedListingIds.length === 0
+                        }
+                      >
+                        Kijelölt ajánlatok beküldése
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}

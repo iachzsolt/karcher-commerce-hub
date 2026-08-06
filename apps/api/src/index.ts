@@ -323,6 +323,421 @@ app.get('/allegro/listings', async (context) => {
   }
 })
 
+app.get(
+  '/allegro/remote-campaigns/:campaignId/preparations',
+  async (context) => {
+    if (!db) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Database is not configured',
+        },
+        500,
+      )
+    }
+
+    try {
+      const externalCampaignId =
+        context.req.param('campaignId')
+
+      const preparations = await db
+        .select({
+          id: listingCampaigns.id,
+          listingId: listingCampaigns.listingId,
+          externalCampaignId:
+            listingCampaigns.externalCampaignId,
+          desiredPriceMinor:
+            listingCampaigns.desiredPriceMinor,
+          validFrom: listingCampaigns.validFrom,
+          validTo: listingCampaigns.validTo,
+          applicationStatus:
+            listingCampaigns.applicationStatus,
+          campaignStatus:
+            listingCampaigns.campaignStatus,
+          updatedAt:
+            listingCampaigns.updatedAt,
+        })
+        .from(listingCampaigns)
+        .where(
+          eq(
+            listingCampaigns.externalCampaignId,
+            externalCampaignId,
+          ),
+        )
+
+      return context.json({
+        status: 'ok',
+        count: preparations.length,
+        data: preparations,
+      })
+    } catch (error) {
+      console.error(
+        'Campaign preparations loading failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Could not load campaign preparations',
+        },
+        500,
+      )
+    }
+  },
+)
+
+app.put(
+  '/allegro/remote-campaigns/:campaignId/preparations',
+  async (context) => {
+    if (!db) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Database is not configured',
+        },
+        500,
+      )
+    }
+
+    try {
+      const externalCampaignId =
+        context.req.param('campaignId')
+
+      const body = await context.req.json<{
+        campaign?: {
+          name?: string
+          type?: string
+          marketplace?: string
+          publicationFrom?: string | null
+          publicationTo?: string | null
+        }
+        listings?: Array<{
+          listingId?: string
+          desiredPrice?: number
+          validFrom?: string
+          validTo?: string
+        }>
+      }>()
+
+      const campaignName =
+        body.campaign?.name?.trim()
+
+      if (!campaignName) {
+        return context.json(
+          {
+            status: 'error',
+            message: 'Campaign name is required',
+          },
+          400,
+        )
+      }
+
+      const campaignType =
+        body.campaign?.type?.toUpperCase() ??
+        'OTHER'
+
+      const allowedCampaignTypes = [
+        'STANDARD',
+        'DISCOUNT',
+        'SOURCING',
+        'OTHER',
+      ] as const
+
+      if (
+        !allowedCampaignTypes.includes(
+          campaignType as
+            (typeof allowedCampaignTypes)[number],
+        )
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message: 'Invalid campaign type',
+          },
+          400,
+        )
+      }
+
+      const marketplace =
+        body.campaign?.marketplace?.trim() ||
+        'allegro-hu'
+
+      const publicationFrom =
+        body.campaign?.publicationFrom
+          ? new Date(
+              body.campaign.publicationFrom,
+            )
+          : null
+
+      const publicationTo =
+        body.campaign?.publicationTo
+          ? new Date(
+              body.campaign.publicationTo,
+            )
+          : null
+
+      const listingInputs =
+        body.listings ?? []
+
+      if (listingInputs.length === 0) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'At least one listing is required',
+          },
+          400,
+        )
+      }
+
+      const now = new Date()
+
+      let [localCampaign] = await db
+        .select()
+        .from(campaigns)
+        .where(
+          eq(
+            campaigns.externalCampaignId,
+            externalCampaignId,
+          ),
+        )
+        .limit(1)
+
+      if (!localCampaign) {
+        ;[localCampaign] = await db
+          .insert(campaigns)
+          .values({
+            externalCampaignId,
+            name: campaignName,
+            campaignType:
+              campaignType as
+                | 'STANDARD'
+                | 'DISCOUNT'
+                | 'SOURCING'
+                | 'OTHER',
+            marketplace,
+            status: 'AVAILABLE',
+            validFrom: publicationFrom,
+            validTo: publicationTo,
+            autoSync: false,
+            createdAt: now,
+            updatedAt: now,
+          })
+          .returning()
+      } else {
+        ;[localCampaign] = await db
+          .update(campaigns)
+          .set({
+            name: campaignName,
+            campaignType:
+              campaignType as
+                | 'STANDARD'
+                | 'DISCOUNT'
+                | 'SOURCING'
+                | 'OTHER',
+            marketplace,
+            validFrom: publicationFrom,
+            validTo: publicationTo,
+            updatedAt: now,
+          })
+          .where(
+            eq(
+              campaigns.id,
+              localCampaign.id,
+            ),
+          )
+          .returning()
+      }
+
+      const saved = []
+
+      for (const item of listingInputs) {
+        const listingId =
+          item.listingId?.trim()
+
+        const desiredPrice =
+          Number(item.desiredPrice)
+
+        if (
+          !listingId ||
+          !Number.isFinite(desiredPrice) ||
+          desiredPrice <= 0 ||
+          !item.validFrom ||
+          !item.validTo
+        ) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                'Each listing requires listingId, campaign price, validFrom and validTo',
+            },
+            400,
+          )
+        }
+
+        const validFrom =
+          new Date(item.validFrom)
+
+        const validTo =
+          new Date(item.validTo)
+
+        if (
+          Number.isNaN(validFrom.getTime()) ||
+          Number.isNaN(validTo.getTime()) ||
+          validTo < validFrom
+        ) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                'Invalid listing campaign period',
+            },
+            400,
+          )
+        }
+
+        if (
+          publicationFrom &&
+          validFrom < publicationFrom
+        ) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                'Listing start date is outside campaign period',
+            },
+            400,
+          )
+        }
+
+        if (
+          publicationTo &&
+          validTo > publicationTo
+        ) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                'Listing end date is outside campaign period',
+            },
+            400,
+          )
+        }
+
+        const [listing] = await db
+          .select({
+            id: platformListings.id,
+          })
+          .from(platformListings)
+          .where(
+            eq(
+              platformListings.id,
+              listingId,
+            ),
+          )
+          .limit(1)
+
+        if (!listing) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                `Listing not found: ${listingId}`,
+            },
+            404,
+          )
+        }
+
+        const [savedPreparation] =
+          await db
+            .insert(listingCampaigns)
+            .values({
+              campaignId:
+                localCampaign.id,
+              listingId,
+              externalCampaignId,
+              campaignName,
+              campaignType:
+                campaignType as
+                  | 'STANDARD'
+                  | 'DISCOUNT'
+                  | 'SOURCING'
+                  | 'OTHER',
+              marketplace,
+              desiredPriceMinor:
+                Math.round(
+                  desiredPrice * 100,
+                ),
+              priceLocked: true,
+              autoSync: false,
+              applicationStatus:
+                'PREPARED',
+              campaignStatus:
+                'PREPARED',
+              validFrom,
+              validTo,
+              createdAt: now,
+              updatedAt: now,
+            })
+            .onConflictDoUpdate({
+              target: [
+                listingCampaigns.listingId,
+                listingCampaigns.externalCampaignId,
+              ],
+              set: {
+                campaignId:
+                  localCampaign.id,
+                campaignName,
+                campaignType:
+                  campaignType as
+                    | 'STANDARD'
+                    | 'DISCOUNT'
+                    | 'SOURCING'
+                    | 'OTHER',
+                marketplace,
+                desiredPriceMinor:
+                  Math.round(
+                    desiredPrice * 100,
+                  ),
+                priceLocked: true,
+                applicationStatus:
+                  'PREPARED',
+                campaignStatus:
+                  'PREPARED',
+                validFrom,
+                validTo,
+                updatedAt: now,
+              },
+            })
+            .returning()
+
+        saved.push(savedPreparation)
+      }
+
+      return context.json({
+        status: 'ok',
+        count: saved.length,
+        data: saved,
+      })
+    } catch (error) {
+      console.error(
+        'Campaign preparations saving failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Could not save campaign preparations',
+        },
+        500,
+      )
+    }
+  },
+)
 app.get('/allegro/campaigns', async (context) => {
   if (!db) {
     return context.json(

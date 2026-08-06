@@ -1457,3 +1457,97 @@ textarea {
     white-space: nowrap;
   }
 }
+
+/* Campaign scheduling */
+
+.campaign-bulk-period {
+  padding: 0 24px 22px;
+}
+
+.campaign-bulk-period-fields {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.campaign-bulk-period-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.campaign-bulk-period-fields label > span {
+  color: #666;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.campaign-bulk-period-fields input,
+.campaign-date-input {
+  min-height: 38px;
+  box-sizing: border-box;
+  padding: 0 9px;
+  border: 1px solid #ccc;
+  border-radius: 7px;
+  background: #fff;
+  font: inherit;
+}
+
+.campaign-date-input {
+  min-width: 145px;
+}
+
+.campaign-bulk-period-fields input:focus,
+.campaign-date-input:focus {
+  outline: 2px solid #ffed00;
+  outline-offset: 1px;
+  border-color: #777;
+}
+
+.campaign-date-input:disabled {
+  background: #f4f4f4;
+  color: #999;
+}
+
+@media (max-width: 700px) {
+  .campaign-bulk-period-fields {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
+/* Campaign preparation saving */
+
+.campaign-submit-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.campaign-preparation-message {
+  margin: 0 24px 18px;
+  padding: 13px 16px;
+  border: 1px solid #d8d8d8;
+  border-radius: 8px;
+  background: #f7f7f7;
+  color: #444;
+  font-weight: 600;
+}
+
+.campaign-offers-table input[type='checkbox']:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+@media (max-width: 700px) {
+  .campaign-submit-actions {
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .campaign-submit-actions button {
+    width: 100%;
+  }
+}
