@@ -371,6 +371,103 @@ function AllegroCampaignsPage() {
   ] = useState<string[]>([])
 
   const [
+    listingSearch,
+    setListingSearch,
+  ] = useState('')
+
+  const [
+    listingStatusFilter,
+    setListingStatusFilter,
+  ] = useState<
+    'ALL' | 'ACTIVE' | 'ENDED'
+  >('ALL')
+
+  const [
+    showSelectedOnly,
+    setShowSelectedOnly,
+  ] = useState(false)
+
+  const [
+    listingPage,
+    setListingPage,
+  ] = useState(1)
+
+  const [
+    listingPageSize,
+    setListingPageSize,
+  ] = useState(25)
+
+  const normalizedListingSearch =
+    listingSearch.trim().toLowerCase()
+
+  const filteredListings =
+    listings.filter((listing) => {
+      const matchesSearch =
+        !normalizedListingSearch ||
+        listing.sku
+          .toLowerCase()
+          .includes(normalizedListingSearch) ||
+        listing.productName
+          .toLowerCase()
+          .includes(normalizedListingSearch) ||
+        listing.offerId
+          .toLowerCase()
+          .includes(normalizedListingSearch)
+
+      const matchesStatus =
+        listingStatusFilter === 'ALL' ||
+        listing.publicationStatus ===
+          listingStatusFilter
+
+      const matchesSelection =
+        !showSelectedOnly ||
+        selectedListingIds.includes(
+          listing.id,
+        )
+
+      return (
+        matchesSearch &&
+        matchesStatus &&
+        matchesSelection
+      )
+    })
+
+  const selectableFilteredListingIds =
+    filteredListings
+      .filter(
+        (listing) =>
+          listing.publicationStatus ===
+          'ACTIVE',
+      )
+      .map((listing) => listing.id)
+
+  const listingPageCount =
+    Math.max(
+      1,
+      Math.ceil(
+        filteredListings.length /
+          listingPageSize,
+      ),
+    )
+
+  const currentListingPage =
+    Math.min(
+      listingPage,
+      listingPageCount,
+    )
+
+  const listingPageStart =
+    (currentListingPage - 1) *
+    listingPageSize
+
+  const paginatedListings =
+    filteredListings.slice(
+      listingPageStart,
+      listingPageStart +
+        listingPageSize,
+    )
+
+  const [
     campaignPriceDrafts,
     setCampaignPriceDrafts,
   ] = useState<Record<string, string>>({})
@@ -643,6 +740,21 @@ function AllegroCampaignsPage() {
     }
   }
 
+  function selectAllFilteredListings() {
+    setSelectedListingIds(
+      (current) =>
+        Array.from(
+          new Set([
+            ...current,
+            ...selectableFilteredListingIds,
+          ]),
+        ),
+    )
+  }
+
+  function clearListingSelection() {
+    setSelectedListingIds([])
+  }
   function applyBulkPeriod() {
     if (
       !bulkValidFrom ||
@@ -1250,6 +1362,109 @@ function AllegroCampaignsPage() {
                     </div>
                   )}
 
+                  <div className="campaign-offer-toolbar">
+                    <div className="campaign-offer-search">
+                      <span className="campaign-offer-search-icon">
+                        ⌕
+                      </span>
+
+                      <input
+                        type="search"
+                        placeholder="Keresés SKU, terméknév vagy Allegro ID alapján..."
+                        value={listingSearch}
+                        onChange={(event) => {
+                          setListingSearch(
+                            event.target.value,
+                          )
+                          setListingPage(1)
+                        }}
+                      />
+                    </div>
+
+                    <select
+                      className="campaign-offer-filter"
+                      value={listingStatusFilter}
+                      onChange={(event) => {
+                        setListingStatusFilter(
+                          event.target.value as
+                            | 'ALL'
+                            | 'ACTIVE'
+                            | 'ENDED',
+                        )
+                        setListingPage(1)
+                      }}
+                    >
+                      <option value="ALL">
+                        Minden státusz
+                      </option>
+
+                      <option value="ACTIVE">
+                        Aktív
+                      </option>
+
+                      <option value="ENDED">
+                        Lejárt
+                      </option>
+                    </select>
+
+                    <label className="campaign-selected-filter">
+                      <input
+                        type="checkbox"
+                        checked={showSelectedOnly}
+                        onChange={(event) => {
+                          setShowSelectedOnly(
+                            event.target.checked,
+                          )
+                          setListingPage(1)
+                        }}
+                      />
+
+                      <span>
+                        Csak kijelöltek
+                      </span>
+                    </label>
+
+                    <div className="campaign-filter-count">
+                      <strong>
+                        {filteredListings.length}
+                      </strong>
+
+                      <span>
+                        / {listings.length} ajánlat
+                      </span>
+                    </div>
+
+                    <div className="campaign-filter-actions">
+                      <button
+                        type="button"
+                        className="secondary-button campaign-compact-button"
+                        onClick={
+                          selectAllFilteredListings
+                        }
+                        disabled={
+                          selectableFilteredListingIds.length ===
+                          0
+                        }
+                      >
+                        Összes szűrt kijelölése
+                      </button>
+
+                      <button
+                        type="button"
+                        className="secondary-button campaign-compact-button"
+                        onClick={
+                          clearListingSelection
+                        }
+                        disabled={
+                          selectedListingIds.length ===
+                          0
+                        }
+                      >
+                        Kijelölések törlése
+                      </button>
+                    </div>
+                  </div>
+
                   <div className="campaign-bulk-period">
                     <div>
                       <span className="campaign-detail-label">
@@ -1380,7 +1595,7 @@ function AllegroCampaignsPage() {
                       </thead>
 
                       <tbody>
-                        {listings.map((listing) => {
+                        {paginatedListings.map((listing) => {
                           const checked =
                             selectedListingIds.includes(
                               listing.id,
@@ -1622,6 +1837,97 @@ function AllegroCampaignsPage() {
                       </tbody>
                     </table>
                   </div>
+
+                  {filteredListings.length > 0 && (
+                    <div className="campaign-pagination">
+                      <div className="campaign-pagination-size">
+                        <span>
+                          Sorok oldalanként
+                        </span>
+
+                        <select
+                          value={listingPageSize}
+                          onChange={(event) => {
+                            setListingPageSize(
+                              Number(
+                                event.target.value,
+                              ),
+                            )
+                            setListingPage(1)
+                          }}
+                        >
+                          <option value={25}>
+                            25
+                          </option>
+
+                          <option value={50}>
+                            50
+                          </option>
+
+                          <option value={100}>
+                            100
+                          </option>
+                        </select>
+                      </div>
+
+                      <div className="campaign-pagination-info">
+                        {listingPageStart + 1}
+                        {' – '}
+                        {Math.min(
+                          listingPageStart +
+                            listingPageSize,
+                          filteredListings.length,
+                        )}
+                        {' / '}
+                        {filteredListings.length}
+                      </div>
+
+                      <div className="campaign-pagination-actions">
+                        <button
+                          type="button"
+                          className="secondary-button campaign-pagination-button"
+                          disabled={
+                            currentListingPage <= 1
+                          }
+                          onClick={() =>
+                            setListingPage(
+                              Math.max(
+                                1,
+                                currentListingPage - 1,
+                              ),
+                            )
+                          }
+                        >
+                          ‹
+                        </button>
+
+                        <span>
+                          {currentListingPage}
+                          {' / '}
+                          {listingPageCount}
+                        </span>
+
+                        <button
+                          type="button"
+                          className="secondary-button campaign-pagination-button"
+                          disabled={
+                            currentListingPage >=
+                            listingPageCount
+                          }
+                          onClick={() =>
+                            setListingPage(
+                              Math.min(
+                                listingPageCount,
+                                currentListingPage + 1,
+                              ),
+                            )
+                          }
+                        >
+                          ›
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   {preparationMessage && (
                     <div className="campaign-preparation-message">

@@ -1747,3 +1747,160 @@ textarea {
   color: #888888;
   cursor: not-allowed;
 }
+
+/* Campaign offer filters */
+
+.campaign-offer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 14px 0;
+  padding: 10px;
+  border: 1px solid #e2e2e2;
+  border-radius: 12px;
+  background: #fafafa;
+}
+
+.campaign-offer-search {
+  position: relative;
+  flex: 1 1 280px;
+  min-width: 220px;
+}
+
+.campaign-offer-search input {
+  width: 100%;
+  height: 40px;
+  box-sizing: border-box;
+  padding: 0 12px 0 34px;
+  border: 1px solid #d4d4d4;
+  border-radius: 9px;
+  background: #ffffff;
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.campaign-offer-search input:focus,
+.campaign-offer-filter:focus {
+  border-color: #888888;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.05);
+}
+
+.campaign-offer-search-icon {
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  z-index: 1;
+  transform: translateY(-50%);
+  font-size: 17px;
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.campaign-offer-filter {
+  height: 40px;
+  padding: 0 30px 0 10px;
+  border: 1px solid #d4d4d4;
+  border-radius: 9px;
+  background: #ffffff;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  outline: none;
+}
+
+.campaign-selected-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 40px;
+  padding: 0 10px;
+  border-radius: 9px;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.campaign-selected-filter input {
+  margin: 0;
+  cursor: pointer;
+}
+
+.campaign-filter-count {
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
+  padding: 0 4px;
+  font-size: 12px;
+  white-space: nowrap;
+  color: #666666;
+}
+
+.campaign-filter-count strong {
+  color: #222222;
+  font-size: 14px;
+}
+
+.campaign-filter-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.campaign-compact-button {
+  min-height: 36px;
+  padding: 7px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* Campaign pagination */
+
+.campaign-pagination {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 10px 12px;
+  border-top: 1px solid #e8e8e8;
+  font-size: 12px;
+  color: #666666;
+}
+
+.campaign-pagination-size {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.campaign-pagination-size select {
+  height: 32px;
+  padding: 0 26px 0 8px;
+  border: 1px solid #d7d7d7;
+  border-radius: 8px;
+  background: #ffffff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.campaign-pagination-info {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.campaign-pagination-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.campaign-pagination-button {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  font-size: 20px;
+  line-height: 1;
+}
