@@ -1,10 +1,11 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Hono } from 'hono'
-import { and, eq } from 'drizzle-orm'
+import { and, desc, eq } from 'drizzle-orm'
 import { decryptSecret, encryptSecret } from './token-crypto.js'
 import {
   createDatabase,
   listingDesiredStates,
+  listingPriceHistory,
   listingRemoteStates,
   platformAccountCredentials,
   platformAccounts,
@@ -1857,6 +1858,37 @@ allegroAuth.post('/sync', async (context) => {
       priceAutomation?.type ??
       null
 
+    const [lastPriceHistory] = await db
+      .select({
+        priceMinor:
+          listingPriceHistory.priceMinor,
+        observedAt:
+          listingPriceHistory.observedAt,
+      })
+      .from(listingPriceHistory)
+      .where(
+        eq(
+          listingPriceHistory.listingId,
+          listing.id,
+        ),
+      )
+      .orderBy(
+        desc(
+          listingPriceHistory.observedAt,
+        ),
+      )
+      .limit(1)
+
+    const priceChangedSinceLastSnapshot =
+      lastPriceHistory?.priceMinor !==
+      priceMinor
+
+    const dailyPriceSnapshotDue =
+      !lastPriceHistory ||
+      now.getTime() -
+        lastPriceHistory.observedAt.getTime() >=
+        24 * 60 * 60 * 1000
+
     await db
       .insert(listingRemoteStates)
       .values({
@@ -1900,6 +1932,24 @@ allegroAuth.post('/sync', async (context) => {
           updatedAt: now,
         },
       })
+
+    if (
+      priceMinor !== null &&
+      (
+        priceChangedSinceLastSnapshot ||
+        dailyPriceSnapshotDue
+      )
+    ) {
+      await db
+        .insert(listingPriceHistory)
+        .values({
+          listingId: listing.id,
+          priceMinor,
+          currency,
+          source: 'ALLEGRO_SYNC',
+          observedAt: now,
+        })
+    }
 
     await db
       .insert(listingDesiredStates)

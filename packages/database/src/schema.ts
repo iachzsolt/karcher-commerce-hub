@@ -338,6 +338,41 @@ export const listingRemoteStates = pgTable(
   ],
 )
 
+export const listingPriceHistory = pgTable(
+  'listing_price_history',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+
+    listingId: uuid('listing_id')
+      .notNull()
+      .references(() => platformListings.id),
+
+    priceMinor: integer('price_minor')
+      .notNull(),
+
+    currency: text('currency')
+      .notNull()
+      .default('HUF'),
+
+    source: text('source')
+      .notNull()
+      .default('ALLEGRO_SYNC'),
+
+    observedAt: timestamp('observed_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index(
+      'listing_price_history_listing_observed_index',
+    ).on(
+      table.listingId,
+      table.observedAt,
+    ),
+  ],
+)
 export const listingDesiredStates = pgTable(
   'listing_desired_states',
   {
