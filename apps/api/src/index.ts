@@ -19,8 +19,10 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import {
   allegroAuth,
+  getAllegroBadgeCampaigns,
   refreshAllegroSessionIfNeeded,
   restoreAllegroSession,
+  submitOfferToAllegroCampaign,
 } from './allegro-auth.js'
 
 const app = new Hono()
@@ -868,6 +870,525 @@ app.post(
           status: 'error',
           message:
             'Could not schedule campaign listings',
+        },
+        500,
+      )
+    }
+  },
+)
+app.post(
+  '/allegro/remote-campaigns/:campaignId/submit',
+  async (context) => {
+    if (!db) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Database is not configured',
+        },
+        500,
+      )
+    }
+
+    try {
+      const externalCampaignId =
+        context.req.param('campaignId')
+
+      const body = await context.req.json<{
+        listingIds?: string[]
+      }>()
+
+      const listingIds =
+        body.listingIds ?? []
+
+      if (listingIds.length === 0) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'At least one listing is required',
+          },
+          400,
+        )
+      }
+
+      const remoteCampaigns =
+        await getAllegroBadgeCampaigns(
+          'allegro-hu',
+        )
+
+      const remoteCampaign =
+        remoteCampaigns.badgeCampaigns.find(
+          (campaign) =>
+            campaign.id === externalCampaignId,
+        )
+
+      if (!remoteCampaign) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Campaign is no longer available in Allegro',
+          },
+          404,
+        )
+      }
+
+      if (!remoteCampaign.eligibility.eligible) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Allegro account is not eligible for this campaign',
+
+            refusalReasons:
+              remoteCampaign.eligibility.refusalReasons,
+          },
+          409,
+        )
+      }
+
+      if (
+        remoteCampaign.application.type ===
+        'NEVER'
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'This campaign does not accept manual applications',
+          },
+          409,
+        )
+      }
+
+      if (
+        remoteCampaign.application.type ===
+        'WITHIN'
+      ) {
+        const now = new Date()
+
+        const applicationFrom =
+          remoteCampaign.application.from
+            ? new Date(
+                remoteCampaign.application.from,
+              )
+            : null
+
+        const applicationTo =
+          remoteCampaign.application.to
+            ? new Date(
+                remoteCampaign.application.to,
+              )
+            : null
+
+        if (
+          applicationFrom &&
+          now < applicationFrom
+        ) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                'Campaign application period has not started yet',
+            },
+            409,
+          )
+        }
+
+        if (
+          applicationTo &&
+          now > applicationTo
+        ) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                'Campaign application period has already ended',
+            },
+            409,
+          )
+        }
+      }
+
+      const results: Array<{
+        listingId: string
+        offerId?: string
+        status: string
+        applicationId?: string | null
+        error?: string
+      }> = []
+
+      for (const listingId of listingIds) {
+        const [preparation] = await db
+          .select({
+            id: listingCampaigns.id,
+
+            listingId:
+              listingCampaigns.listingId,
+
+            externalCampaignId:
+              listingCampaigns.externalCampaignId,
+
+            campaignType:
+              listingCampaigns.campaignType,
+
+            desiredPriceMinor:
+              listingCampaigns.desiredPriceMinor,
+
+            dedicatedStock:
+              listingCampaigns.dedicatedStock,
+
+            applicationStatus:
+              listingCampaigns.applicationStatus,
+
+            validFrom:
+              listingCampaigns.validFrom,
+
+            validTo:
+              listingCampaigns.validTo,
+
+            offerId:
+              platformListings.externalListingId,
+          })
+          .from(listingCampaigns)
+          .innerJoin(
+            platformListings,
+            eq(
+              platformListings.id,
+              listingCampaigns.listingId,
+            ),
+          )
+          .where(
+            and(
+              eq(
+                listingCampaigns.externalCampaignId,
+                externalCampaignId,
+              ),
+              eq(
+                listingCampaigns.listingId,
+                listingId,
+              ),
+            ),
+          )
+          .limit(1)
+
+        if (!preparation) {
+          results.push({
+            listingId,
+            status: 'FAILED',
+            error:
+              'Campaign preparation not found',
+          })
+
+          continue
+        }
+
+        if (
+          preparation.applicationStatus !==
+          'SCHEDULED'
+        ) {
+          results.push({
+            listingId,
+            offerId: preparation.offerId,
+            status: 'FAILED',
+            error:
+              `Listing is not scheduled. Current status: ${
+                preparation.applicationStatus ?? 'NONE'
+              }`,
+          })
+
+          continue
+        }
+
+        if (
+          preparation.desiredPriceMinor === null
+        ) {
+          results.push({
+            listingId,
+            offerId: preparation.offerId,
+            status: 'FAILED',
+            error:
+              'Campaign price is missing',
+          })
+
+          continue
+        }
+
+        if (
+          remoteCampaign.stockReservationIsRequired &&
+          (
+            preparation.dedicatedStock === null ||
+            preparation.dedicatedStock <= 0
+          )
+        ) {
+          results.push({
+            listingId,
+            offerId: preparation.offerId,
+            status: 'FAILED',
+            error:
+              'Dedicated campaign stock is required',
+          })
+
+          continue
+        }
+
+        const submittingAt = new Date()
+
+        if (
+          preparation.validFrom &&
+          submittingAt < preparation.validFrom
+        ) {
+          results.push({
+            listingId,
+            offerId: preparation.offerId,
+            status: 'SCHEDULED',
+            error:
+              `Not due yet. Scheduled from: ${preparation.validFrom.toISOString()}`,
+          })
+
+          continue
+        }
+
+        if (
+          preparation.validTo &&
+          submittingAt > preparation.validTo
+        ) {
+          const errorText =
+            `Submission period already expired: ${preparation.validTo.toISOString()}`
+
+          await db
+            .update(listingCampaigns)
+            .set({
+              applicationStatus:
+                'FAILED',
+
+              applicationError:
+                errorText,
+
+              updatedAt:
+                submittingAt,
+            })
+            .where(
+              eq(
+                listingCampaigns.id,
+                preparation.id,
+              ),
+            )
+
+          results.push({
+            listingId,
+            offerId: preparation.offerId,
+            status: 'FAILED',
+            error: errorText,
+          })
+
+          continue
+        }
+
+        await db
+          .update(listingCampaigns)
+          .set({
+            applicationStatus:
+              'SUBMITTING',
+
+            applicationError: null,
+
+            updatedAt: submittingAt,
+          })
+          .where(
+            eq(
+              listingCampaigns.id,
+              preparation.id,
+            ),
+          )
+
+        try {
+          const submission =
+            await submitOfferToAllegroCampaign({
+              campaignId:
+                externalCampaignId,
+
+              offerId:
+                preparation.offerId,
+
+              campaignType:
+                preparation.campaignType,
+
+              bargainPriceMinor:
+                preparation.desiredPriceMinor,
+
+              currency: 'HUF',
+
+              campaignStock:
+                preparation.dedicatedStock,
+            })
+
+          if (!submission.ok) {
+            const errorText =
+              typeof submission.data ===
+              'string'
+                ? submission.data
+                : JSON.stringify(
+                    submission.data,
+                  )
+
+            await db
+              .update(listingCampaigns)
+              .set({
+                applicationStatus:
+                  'FAILED',
+
+                applicationError:
+                  errorText,
+
+                lastSyncedAt:
+                  new Date(),
+
+                updatedAt:
+                  new Date(),
+              })
+              .where(
+                eq(
+                  listingCampaigns.id,
+                  preparation.id,
+                ),
+              )
+
+            results.push({
+              listingId,
+              offerId:
+                preparation.offerId,
+              status: 'FAILED',
+              error: errorText,
+            })
+
+            continue
+          }
+
+          const responseData =
+            submission.data &&
+            typeof submission.data === 'object'
+              ? submission.data as {
+                  id?: unknown
+                  process?: {
+                    status?: unknown
+                  }
+                }
+              : null
+
+          const externalApplicationId =
+            typeof responseData?.id === 'string'
+              ? responseData.id
+              : null
+
+          const remoteStatus =
+            typeof responseData?.process?.status ===
+            'string'
+              ? responseData.process.status
+              : 'REQUESTED'
+
+          await db
+            .update(listingCampaigns)
+            .set({
+              externalApplicationId,
+
+              applicationStatus:
+                remoteStatus,
+
+              applicationError: null,
+
+              lastSyncedAt:
+                new Date(),
+
+              updatedAt:
+                new Date(),
+            })
+            .where(
+              eq(
+                listingCampaigns.id,
+                preparation.id,
+              ),
+            )
+
+          results.push({
+            listingId,
+            offerId:
+              preparation.offerId,
+            status: remoteStatus,
+            applicationId:
+              externalApplicationId,
+          })
+        } catch (submissionError) {
+          const errorText =
+            submissionError instanceof Error
+              ? submissionError.message
+              : 'Unknown Allegro submission error'
+
+          await db
+            .update(listingCampaigns)
+            .set({
+              applicationStatus:
+                'FAILED',
+
+              applicationError:
+                errorText,
+
+              lastSyncedAt:
+                new Date(),
+
+              updatedAt:
+                new Date(),
+            })
+            .where(
+              eq(
+                listingCampaigns.id,
+                preparation.id,
+              ),
+            )
+
+          results.push({
+            listingId,
+            offerId:
+              preparation.offerId,
+            status: 'FAILED',
+            error: errorText,
+          })
+        }
+      }
+
+      const succeeded =
+        results.filter(
+          (result) =>
+            result.status !== 'FAILED',
+        ).length
+
+      const failed =
+        results.length - succeeded
+
+      return context.json({
+        status:
+          failed === 0
+            ? 'ok'
+            : succeeded === 0
+              ? 'error'
+              : 'partial',
+
+        count: results.length,
+        succeeded,
+        failed,
+        data: results,
+      })
+    } catch (error) {
+      console.error(
+        'Campaign batch submission failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Could not submit campaign listings',
         },
         500,
       )

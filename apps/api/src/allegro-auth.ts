@@ -755,6 +755,268 @@ allegroAuth.get('/callback', async (context) => {
   })
 })
 
+export type SubmitAllegroCampaignOfferInput = {
+  campaignId: string
+  offerId: string
+  campaignType:
+    | 'STANDARD'
+    | 'DISCOUNT'
+    | 'SOURCING'
+    | 'OTHER'
+  bargainPriceMinor?: number | null
+  currency?: string
+  campaignStock?: number | null
+}
+
+export type AllegroCampaignSubmissionResult =
+  | {
+      ok: true
+      status: number
+      data: unknown
+    }
+  | {
+      ok: false
+      status: number
+      data: unknown
+    }
+
+export async function submitOfferToAllegroCampaign(
+  input: SubmitAllegroCampaignOfferInput,
+): Promise<AllegroCampaignSubmissionResult> {
+  const apiUrl = process.env.ALLEGRO_API_URL
+
+  if (!apiUrl) {
+    throw new Error('ALLEGRO_API_URL is missing')
+  }
+
+  await refreshAllegroSessionIfNeeded()
+
+  if (!currentSession) {
+    throw new Error(
+      'Allegro session is not available',
+    )
+  }
+
+  const body: {
+    campaign: {
+      id: string
+    }
+    offer: {
+      id: string
+    }
+    prices?: {
+      bargain: {
+        amount: string
+        currency: string
+      }
+    }
+    campaignStock?: {
+      quantity: number
+    }
+  } = {
+    campaign: {
+      id: input.campaignId,
+    },
+    offer: {
+      id: input.offerId,
+    },
+  }
+
+  if (
+    input.campaignType === 'DISCOUNT' ||
+    input.campaignType === 'SOURCING'
+  ) {
+    if (
+      input.bargainPriceMinor === null ||
+      input.bargainPriceMinor === undefined ||
+      input.bargainPriceMinor <= 0
+    ) {
+      throw new Error(
+        'Campaign bargain price is required',
+      )
+    }
+
+    body.prices = {
+      bargain: {
+        amount:
+          (
+            input.bargainPriceMinor / 100
+          ).toFixed(2),
+        currency:
+          input.currency ?? 'HUF',
+      },
+    }
+  }
+
+  if (
+    input.campaignStock !== null &&
+    input.campaignStock !== undefined
+  ) {
+    if (
+      !Number.isInteger(input.campaignStock) ||
+      input.campaignStock <= 0
+    ) {
+      throw new Error(
+        'Declared campaign stock must be a positive integer',
+      )
+    }
+
+    body.campaignStock = {
+      quantity: input.campaignStock,
+    }
+  }
+
+  const response = await fetch(
+    `${apiUrl}/sale/badges`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization:
+          `Bearer ${currentSession.accessToken}`,
+
+        Accept:
+          'application/vnd.allegro.public.v1+json',
+
+        'Content-Type':
+          'application/vnd.allegro.public.v1+json',
+
+        'Accept-Language':
+          'hu-HU',
+      },
+      body: JSON.stringify(body),
+    },
+  )
+
+  const responseText =
+    await response.text()
+
+  let responseData: unknown =
+    responseText
+
+  if (responseText) {
+    try {
+      responseData =
+        JSON.parse(responseText)
+    } catch {
+      responseData =
+        responseText
+    }
+  }
+
+  if (!response.ok) {
+    console.error(
+      'Allegro campaign submission failed:',
+      response.status,
+      responseData,
+    )
+
+    return {
+      ok: false,
+      status: response.status,
+      data: responseData,
+    }
+  }
+
+  return {
+    ok: true,
+    status: response.status,
+    data: responseData,
+  }
+}
+export type AllegroBadgeCampaign = {
+  id: string
+  name: string
+  marketplace: {
+    id: string
+  }
+  type: string
+  eligibility: {
+    eligible: boolean
+    refusalReasons: Array<{
+      code: string
+      messages: Array<{
+        text: string
+        link: string | null
+      }>
+    }>
+  }
+  application: {
+    type: string
+    from: string | null
+    to: string | null
+  }
+  publication: {
+    type: string
+    from: string | null
+    to: string | null
+  }
+  visibility: {
+    type: string
+    from: string | null
+    to: string | null
+  }
+  regulationsLink: string | null
+  stockReservationIsRequired: boolean
+}
+
+export type AllegroBadgeCampaignsPayload = {
+  badgeCampaigns: AllegroBadgeCampaign[]
+}
+
+export async function getAllegroBadgeCampaigns(
+  marketplaceId = 'allegro-hu',
+): Promise<AllegroBadgeCampaignsPayload> {
+  const apiUrl = process.env.ALLEGRO_API_URL
+
+  if (!apiUrl) {
+    throw new Error('ALLEGRO_API_URL is missing')
+  }
+
+  await refreshAllegroSessionIfNeeded()
+
+  if (!currentSession) {
+    throw new Error(
+      'Allegro session is not available',
+    )
+  }
+
+  const response = await fetch(
+    `${apiUrl}/sale/badge-campaigns?marketplace.id=${encodeURIComponent(
+      marketplaceId,
+    )}`,
+    {
+      headers: {
+        Authorization:
+          `Bearer ${currentSession.accessToken}`,
+
+        Accept:
+          'application/vnd.allegro.public.v1+json',
+
+        'Accept-Language':
+          'hu-HU',
+      },
+    },
+  )
+
+  const responseText =
+    await response.text()
+
+  if (!response.ok) {
+    throw new Error(
+      `Allegro campaign loading failed (${response.status}): ${responseText}`,
+    )
+  }
+
+  const data =
+    JSON.parse(
+      responseText,
+    ) as AllegroBadgeCampaignsPayload
+
+  return {
+    badgeCampaigns:
+      data.badgeCampaigns ?? [],
+  }
+}
 allegroAuth.get('/campaigns', async (context) => {
   if (!currentSession) {
     return context.json(
@@ -767,72 +1029,10 @@ allegroAuth.get('/campaigns', async (context) => {
   }
 
   try {
-    const apiUrl = process.env.ALLEGRO_API_URL
-
-    if (!apiUrl) {
-      return context.json(
-        {
-          status: 'error',
-          message: 'ALLEGRO_API_URL is missing',
-        },
-        500,
+    const data =
+      await getAllegroBadgeCampaigns(
+        'allegro-hu',
       )
-    }
-
-    await refreshAllegroSessionIfNeeded()
-
-    const session = currentSession
-
-    if (!session) {
-      return context.json(
-        {
-          status: 'error',
-          message: 'Allegro session is not available',
-        },
-        401,
-      )
-    }
-
-    const response = await fetch(
-      `${apiUrl}/sale/badge-campaigns?marketplace.id=allegro-hu`,
-      {
-        headers: {
-          Authorization:
-            `Bearer ${session.accessToken}`,
-
-          Accept:
-            'application/vnd.allegro.public.v1+json',
-
-          'Accept-Language':
-            'hu-HU',
-        },
-      },
-    )
-
-    const body = await response.text()
-
-    if (!response.ok) {
-      console.error(
-        'Allegro campaign loading failed:',
-        response.status,
-        body,
-      )
-
-      return context.json(
-        {
-          status: 'error',
-          message:
-            'Could not load Allegro campaigns',
-          allegroStatus:
-            response.status,
-          allegroResponse:
-            body,
-        },
-        502,
-      )
-    }
-
-    const data = JSON.parse(body)
 
     return context.json({
       status: 'ok',
@@ -849,7 +1049,9 @@ allegroAuth.get('/campaigns', async (context) => {
       {
         status: 'error',
         message:
-          'Could not load Allegro campaigns',
+          error instanceof Error
+            ? error.message
+            : 'Could not load Allegro campaigns',
       },
       500,
     )
