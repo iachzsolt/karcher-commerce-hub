@@ -52,6 +52,25 @@ type AlleDiscountCampaign = {
 
 type AlleDiscountEligibleOffer = {
   id: string
+
+  alleDiscount?: {
+    campaignConditions?: {
+      meetsConditions: boolean
+      violations: Array<{
+        code?: string
+        message?: string
+      }>
+    }
+
+    requiredMerchantPrice?: {
+      amount: string
+      currency: string
+    } | null
+
+    minimumGuaranteedDiscount?: {
+      percentage: string
+    } | null
+  }
 }
 type PriceHistorySummary = {
   listingId: string
@@ -502,9 +521,16 @@ function AllegroCampaignsPage() {
   ] = useState<string | null>(null)
 
   const [
-    alleDiscountEligibleOfferIds,
-    setAlleDiscountEligibleOfferIds,
-  ] = useState<Set<string> | null>(null)
+    alleDiscountOffersById,
+    setAlleDiscountOffersById,
+  ] = useState<
+    Record<string, AlleDiscountEligibleOffer>
+  >({})
+
+  const [
+    showAlleDiscountEligibleOnly,
+    setShowAlleDiscountEligibleOnly,
+  ] = useState(true)
 
   const [
     ,
@@ -577,13 +603,22 @@ function AllegroCampaignsPage() {
           listing.id,
         )
 
+      const alleDiscountOffer =
+        alleDiscountOffersById[
+          listing.offerId
+        ]
+
       const matchesCampaignEligibility =
         selectedCampaign?.source !==
           'ALLE_DISCOUNT' ||
         (
-          alleDiscountEligibleOfferIds?.has(
-            listing.offerId,
-          ) ?? false
+          alleDiscountOffer !== undefined &&
+          (
+            !showAlleDiscountEligibleOnly ||
+            alleDiscountOffer.alleDiscount
+              ?.campaignConditions
+              ?.meetsConditions === true
+          )
         )
 
       return (
@@ -1000,7 +1035,7 @@ function AllegroCampaignsPage() {
       setBulkValidToTime('23:59')
       setPreparationMessage(null)
       setPreparationStatuses({})
-      setAlleDiscountEligibleOfferIds(null)
+      setAlleDiscountOffersById({})
       setAlleDiscountEligibilityLoading(false)
       return
     }
@@ -1024,7 +1059,7 @@ function AllegroCampaignsPage() {
     setBulkValidToTime('23:59')
     setPreparationMessage(null)
     setPreparationStatuses({})
-    setAlleDiscountEligibleOfferIds(null)
+    setAlleDiscountOffersById({})
 
     if (
       campaign?.source ===
@@ -1040,7 +1075,7 @@ function AllegroCampaignsPage() {
         const response = await fetch(
           `http://localhost:3000/auth/allegro/alle-discount/${encodeURIComponent(
             campaign.id,
-          )}/eligible-offers?meetsConditions=true`,
+          )}/eligible-offers?meetsConditions=false`,
         )
 
         const result =
@@ -1059,29 +1094,51 @@ function AllegroCampaignsPage() {
             []
           ) as AlleDiscountEligibleOffer[]
 
-        const offerIds =
-          new Set(
+        const offersById =
+          Object.fromEntries(
             eligibleOffers.map(
-              (offer) => offer.id,
+              (offer) => [
+                offer.id,
+                offer,
+              ],
             ),
           )
 
-        setAlleDiscountEligibleOfferIds(
-          offerIds,
+        setAlleDiscountOffersById(
+          offersById,
         )
 
+        const localInScopeOffers =
+          listings
+            .map(
+              (listing) =>
+                offersById[
+                  listing.offerId
+                ],
+            )
+            .filter(
+              (
+                offer,
+              ): offer is AlleDiscountEligibleOffer =>
+                offer !== undefined,
+            )
+
         const localEligibleCount =
-          listings.filter(
-            (listing) =>
-              offerIds.has(
-                listing.offerId,
-              ),
+          localInScopeOffers.filter(
+            (offer) =>
+              offer.alleDiscount
+                ?.campaignConditions
+                ?.meetsConditions === true,
           ).length
 
+        setShowAlleDiscountEligibleOnly(
+          true,
+        )
+
         setPreparationMessage(
-          localEligibleCount === 0
-            ? 'Ehhez a kampányhoz jelenleg nincs beküldhető ajánlat.'
-            : `${localEligibleCount} beküldhető ajánlat található ehhez a kampányhoz.`,
+          localInScopeOffers.length === 0
+            ? 'Ehhez a kampányhoz jelenleg nincs megfelelő ajánlat.'
+            : `${localEligibleCount} beküldhető ajánlat / ${localInScopeOffers.length} kampányhoz tartozó ajánlat.`,
         )
       } catch (loadError) {
         console.error(
@@ -1089,9 +1146,7 @@ function AllegroCampaignsPage() {
           loadError,
         )
 
-        setAlleDiscountEligibleOfferIds(
-          new Set(),
-        )
+        setAlleDiscountOffersById({})
 
         setPreparationMessage(
           loadError instanceof Error
@@ -1893,6 +1948,28 @@ function AllegroCampaignsPage() {
                       </span>
                     </label>
 
+                    {campaign.source ===
+                      'ALLE_DISCOUNT' && (
+                      <label className="campaign-selected-filter">
+                        <input
+                          type="checkbox"
+                          checked={
+                            showAlleDiscountEligibleOnly
+                          }
+                          onChange={(event) => {
+                            setShowAlleDiscountEligibleOnly(
+                              event.target.checked,
+                            )
+                            setListingPage(1)
+                          }}
+                        />
+
+                        <span>
+                          Csak beküldhetők
+                        </span>
+                      </label>
+                    )}
+
                     <div className="campaign-filter-count">
                       <strong>
                         {filteredListings.length}
@@ -2101,6 +2178,12 @@ function AllegroCampaignsPage() {
                           <th>Termék</th>
                           <th>Allegro ID</th>
                           <th>Aktuális ár</th>
+
+                          {campaign.source ===
+                            'ALLE_DISCOUNT' && (
+                            <th>Kampányfeltétel</th>
+                          )}
+
                           <th>30 napos min.</th>
                           <th>Kampányár</th>
                           <th>Kedvezmény</th>
@@ -2132,6 +2215,49 @@ function AllegroCampaignsPage() {
                                 listing.id
                               ],
                             )
+
+                          const alleDiscountOffer =
+                            alleDiscountOffersById[
+                              listing.offerId
+                            ]
+
+                          const alleDiscountConditions =
+                            alleDiscountOffer
+                              ?.alleDiscount
+                              ?.campaignConditions
+
+                          const alleDiscountEligible =
+                            alleDiscountConditions
+                              ?.meetsConditions ===
+                            true
+
+                          const alleDiscountViolations =
+                            alleDiscountConditions
+                              ?.violations ?? []
+
+                          const requiredMerchantPrice =
+                            alleDiscountOffer
+                              ?.alleDiscount
+                              ?.requiredMerchantPrice
+
+                          const requiredMerchantPriceAmount =
+                            requiredMerchantPrice
+                              ? Number(
+                                  requiredMerchantPrice.amount,
+                                )
+                              : null
+
+                          const requiredMerchantPriceMinor =
+                            requiredMerchantPriceAmount !==
+                              null &&
+                            Number.isFinite(
+                              requiredMerchantPriceAmount,
+                            )
+                              ? Math.round(
+                                  requiredMerchantPriceAmount *
+                                    100,
+                                )
+                              : null
 
                           return (
                             <tr key={listing.id}>
@@ -2173,6 +2299,59 @@ function AllegroCampaignsPage() {
                                   listing.currency,
                                 )}
                               </td>
+
+                              {campaign.source ===
+                                'ALLE_DISCOUNT' && (
+                                <td>
+                                  <div className="campaign-condition-cell">
+                                    <span
+                                      className={
+                                        alleDiscountEligible
+                                          ? 'campaign-eligibility campaign-eligible'
+                                          : 'campaign-eligibility campaign-ineligible'
+                                      }
+                                    >
+                                      {alleDiscountEligible
+                                        ? '✓ Beküldhető'
+                                        : '✕ Nem megfelelő'}
+                                    </span>
+
+                                    {!alleDiscountEligible &&
+                                      alleDiscountViolations.length >
+                                        0 && (
+                                        <div className="campaign-condition-violations">
+                                          {alleDiscountViolations.map(
+                                            (
+                                              violation,
+                                              index,
+                                            ) => (
+                                              <span
+                                                key={`${listing.id}-${violation.code ?? index}`}
+                                              >
+                                                {violation.message ??
+                                                  violation.code ??
+                                                  'Nem teljesített kampányfeltétel'}
+                                              </span>
+                                            ),
+                                          )}
+                                        </div>
+                                      )}
+
+                                    {requiredMerchantPriceMinor !==
+                                      null && (
+                                      <span className="campaign-condition-price">
+                                        Elvárt max. ár:{' '}
+                                        {formatPrice(
+                                          requiredMerchantPriceMinor,
+                                          requiredMerchantPrice
+                                            ?.currency ??
+                                            listing.currency,
+                                        )}
+                                      </span>
+                                    )}
+                                  </div>
+                                </td>
+                              )}
 
                               <td>
                                 <div className="campaign-history-price">

@@ -2062,3 +2062,27 @@ textarea {
 .campaign-history-control-error {
   color: #b42318 !important;
 }
+
+/* AlleDiscount campaign conditions */
+
+.campaign-condition-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  min-width: 150px;
+}
+
+.campaign-condition-violations {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.campaign-condition-price {
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
