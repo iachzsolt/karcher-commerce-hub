@@ -1160,6 +1160,101 @@ export async function getAllegroBadgeApplication(
     responseText,
   ) as AllegroBadgeApplication
 }
+export type AllegroBadgeApplicationsPayload = {
+  badgeApplications: AllegroBadgeApplication[]
+  count: number
+  totalCount: number
+}
+
+export async function getAllegroBadgeApplicationsForOffer(
+  offerId: string,
+): Promise<AllegroBadgeApplication[]> {
+  const apiUrl = process.env.ALLEGRO_API_URL
+
+  if (!apiUrl) {
+    throw new Error('ALLEGRO_API_URL is missing')
+  }
+
+  await refreshAllegroSessionIfNeeded()
+
+  if (!currentSession) {
+    throw new Error(
+      'Allegro session is not available',
+    )
+  }
+
+  const applications: AllegroBadgeApplication[] = []
+
+  const limit = 1000
+  let offset = 0
+
+  while (true) {
+    const url = new URL(
+      `${apiUrl}/sale/badge-applications`,
+    )
+
+    url.searchParams.set(
+      'offer.id',
+      offerId,
+    )
+
+    url.searchParams.set(
+      'limit',
+      String(limit),
+    )
+
+    url.searchParams.set(
+      'offset',
+      String(offset),
+    )
+
+    const response = await fetch(
+      url.toString(),
+      {
+        headers: {
+          Authorization:
+            `Bearer ${currentSession.accessToken}`,
+
+          Accept:
+            'application/vnd.allegro.public.v1+json',
+
+          'Accept-Language':
+            'hu-HU',
+        },
+      },
+    )
+
+    const responseText =
+      await response.text()
+
+    if (!response.ok) {
+      throw new Error(
+        `Allegro badge applications loading failed (${response.status}): ${responseText}`,
+      )
+    }
+
+    const payload = JSON.parse(
+      responseText,
+    ) as AllegroBadgeApplicationsPayload
+
+    applications.push(
+      ...payload.badgeApplications,
+    )
+
+    offset +=
+      payload.badgeApplications.length
+
+    if (
+      payload.badgeApplications.length === 0 ||
+      offset >= payload.totalCount
+    ) {
+      break
+    }
+  }
+
+  return applications
+}
+
 export type AllegroBadgeCampaign = {
   id: string
   name: string

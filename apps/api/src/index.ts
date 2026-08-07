@@ -22,6 +22,7 @@ import {
   allegroAuth,
   finishOfferAllegroCampaign,
   getAllegroBadgeApplication,
+  getAllegroBadgeApplicationsForOffer,
   getAllegroBadgeCampaigns,
   getAllegroBadgeOperation,
   refreshAllegroSessionIfNeeded,
@@ -3928,6 +3929,212 @@ async function processDueCampaignFinishes() {
 }
 let campaignSchedulerRunning = false
 
+async function recoverStaleCampaignSubmissions() {
+  if (!db) {
+    return
+  }
+
+  const staleBefore =
+    new Date(
+      Date.now() -
+        10 * 60 * 1000,
+    )
+
+  const submittingRows =
+    await db
+      .select({
+        id:
+          listingCampaigns.id,
+
+        listingId:
+          listingCampaigns.listingId,
+
+        externalCampaignId:
+          listingCampaigns.externalCampaignId,
+
+        externalApplicationId:
+          listingCampaigns.externalApplicationId,
+
+        updatedAt:
+          listingCampaigns.updatedAt,
+
+        offerId:
+          platformListings.externalListingId,
+      })
+      .from(listingCampaigns)
+      .innerJoin(
+        platformListings,
+        eq(
+          platformListings.id,
+          listingCampaigns.listingId,
+        ),
+      )
+      .where(
+        eq(
+          listingCampaigns.applicationStatus,
+          'SUBMITTING',
+        ),
+      )
+
+  const staleRows =
+    submittingRows.filter(
+      (row) =>
+        row.externalApplicationId === null &&
+        row.updatedAt <= staleBefore,
+    )
+
+  for (const row of staleRows) {
+    try {
+      const applications =
+        await getAllegroBadgeApplicationsForOffer(
+          row.offerId,
+        )
+
+      const matchingApplications =
+        applications
+          .filter(
+            (application) =>
+              application.campaign.id ===
+                row.externalCampaignId &&
+              application.offer.id ===
+                row.offerId,
+          )
+          .sort(
+            (left, right) =>
+              new Date(
+                right.createdAt,
+              ).getTime() -
+              new Date(
+                left.createdAt,
+              ).getTime(),
+          )
+
+      const matchingApplication =
+        matchingApplications[0]
+
+      const recoveredAt =
+        new Date()
+
+      if (matchingApplication) {
+        const rejectionText =
+          matchingApplication.process
+            .status === 'DECLINED' &&
+          matchingApplication.process
+            .rejectionReasons.length > 0
+            ? JSON.stringify(
+                matchingApplication.process
+                  .rejectionReasons,
+              )
+            : null
+
+        await db
+          .update(listingCampaigns)
+          .set({
+            externalApplicationId:
+              matchingApplication.id,
+
+            applicationStatus:
+              matchingApplication.process
+                .status,
+
+            applicationError:
+              rejectionText,
+
+            lastSyncedAt:
+              recoveredAt,
+
+            updatedAt:
+              recoveredAt,
+          })
+          .where(
+            and(
+              eq(
+                listingCampaigns.id,
+                row.id,
+              ),
+              eq(
+                listingCampaigns.applicationStatus,
+                'SUBMITTING',
+              ),
+            ),
+          )
+
+        console.log(
+          'Recovered stale Allegro campaign submission:',
+          {
+            campaignId:
+              row.externalCampaignId,
+            listingId:
+              row.listingId,
+            offerId:
+              row.offerId,
+            applicationId:
+              matchingApplication.id,
+            status:
+              matchingApplication.process
+                .status,
+          },
+        )
+
+        continue
+      }
+
+      await db
+        .update(listingCampaigns)
+        .set({
+          applicationStatus:
+            'SUBMISSION_UNKNOWN',
+
+          applicationError:
+            'Submission outcome could not be verified after backend interruption. Automatic resubmission is blocked.',
+
+          updatedAt:
+            recoveredAt,
+        })
+        .where(
+          and(
+            eq(
+              listingCampaigns.id,
+              row.id,
+            ),
+            eq(
+              listingCampaigns.applicationStatus,
+              'SUBMITTING',
+            ),
+          ),
+        )
+
+      console.warn(
+        'Stale Allegro campaign submission requires manual review:',
+        {
+          campaignId:
+            row.externalCampaignId,
+          listingId:
+            row.listingId,
+          offerId:
+            row.offerId,
+        },
+      )
+    } catch (error) {
+      console.error(
+        'Stale Allegro campaign submission recovery failed:',
+        {
+          campaignId:
+            row.externalCampaignId,
+          listingId:
+            row.listingId,
+          offerId:
+            row.offerId,
+          error:
+            error instanceof Error
+              ? error.message
+              : error,
+        },
+      )
+    }
+  }
+}
+
 async function processDueCampaignSubmissions() {
   if (!db || campaignSchedulerRunning) {
     return
@@ -3936,6 +4143,8 @@ async function processDueCampaignSubmissions() {
   campaignSchedulerRunning = true
 
   try {
+    await recoverStaleCampaignSubmissions()
+
     const now = new Date()
 
     const scheduledRows = await db
