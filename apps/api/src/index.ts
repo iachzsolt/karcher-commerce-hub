@@ -690,6 +690,13 @@ app.put(
         )
       }
 
+      const campaignTypeValue =
+        campaignType as
+          | 'STANDARD'
+          | 'DISCOUNT'
+          | 'SOURCING'
+          | 'OTHER'
+
       const marketplace =
         body.campaign?.marketplace?.trim() ||
         'allegro-hu'
@@ -708,6 +715,53 @@ app.put(
             )
           : null
 
+      if (
+        publicationFrom &&
+        Number.isNaN(
+          publicationFrom.getTime(),
+        )
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Invalid campaign publication start',
+          },
+          400,
+        )
+      }
+
+      if (
+        publicationTo &&
+        Number.isNaN(
+          publicationTo.getTime(),
+        )
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Invalid campaign publication end',
+          },
+          400,
+        )
+      }
+
+      if (
+        publicationFrom &&
+        publicationTo &&
+        publicationTo < publicationFrom
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Invalid campaign publication period',
+          },
+          400,
+        )
+      }
+
       const listingInputs =
         body.listings ?? []
 
@@ -722,67 +776,63 @@ app.put(
         )
       }
 
-      const now = new Date()
+      const duplicateCheck =
+        new Set<string>()
 
-      let [localCampaign] = await db
-        .select()
-        .from(campaigns)
-        .where(
-          eq(
-            campaigns.externalCampaignId,
-            externalCampaignId,
-          ),
-        )
-        .limit(1)
+      for (const item of listingInputs) {
+        const listingId =
+          item.listingId?.trim()
 
-      if (!localCampaign) {
-        ;[localCampaign] = await db
-          .insert(campaigns)
-          .values({
-            externalCampaignId,
-            name: campaignName,
-            campaignType:
-              campaignType as
-                | 'STANDARD'
-                | 'DISCOUNT'
-                | 'SOURCING'
-                | 'OTHER',
-            marketplace,
-            status: 'AVAILABLE',
-            validFrom: publicationFrom,
-            validTo: publicationTo,
-            autoSync: false,
-            createdAt: now,
-            updatedAt: now,
-          })
-          .returning()
-      } else {
-        ;[localCampaign] = await db
-          .update(campaigns)
-          .set({
-            name: campaignName,
-            campaignType:
-              campaignType as
-                | 'STANDARD'
-                | 'DISCOUNT'
-                | 'SOURCING'
-                | 'OTHER',
-            marketplace,
-            validFrom: publicationFrom,
-            validTo: publicationTo,
-            updatedAt: now,
-          })
-          .where(
-            eq(
-              campaigns.id,
-              localCampaign.id,
-            ),
+        if (
+          listingId &&
+          duplicateCheck.has(listingId)
+        ) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                `Duplicate listing in preparation request: ${listingId}`,
+            },
+            400,
           )
-          .returning()
+        }
+
+        if (listingId) {
+          duplicateCheck.add(listingId)
+        }
       }
 
-      const saved = []
+      const now = new Date()
 
+      const [existingLocalCampaign] =
+        await db
+          .select()
+          .from(campaigns)
+          .where(
+            eq(
+              campaigns.externalCampaignId,
+              externalCampaignId,
+            ),
+          )
+          .limit(1)
+
+      const localCampaignId =
+        existingLocalCampaign?.id ??
+        crypto.randomUUID()
+
+      const normalizedListings: Array<{
+        listingId: string
+        desiredPriceMinor: number
+        validFrom: Date
+        validTo: Date
+      }> = []
+
+      /*
+       * IMPORTANT:
+       * Everything above the batch is validation/read-only.
+       * No campaign or preparation data is written until
+       * every requested listing has passed validation.
+       */
       for (const item of listingInputs) {
         const listingId =
           item.listingId?.trim()
@@ -931,9 +981,12 @@ app.put(
         const [existingPreparation] =
           await db
             .select({
-              id: listingCampaigns.id,
+              id:
+                listingCampaigns.id,
+
               applicationStatus:
                 listingCampaigns.applicationStatus,
+
               campaignStatus:
                 listingCampaigns.campaignStatus,
             })
@@ -975,67 +1028,187 @@ app.put(
           )
         }
 
-        const [savedPreparation] =
-          await db
-            .insert(listingCampaigns)
-            .values({
-              campaignId:
-                localCampaign.id,
-              listingId,
-              externalCampaignId,
-              campaignName,
-              campaignType:
-                campaignType as
-                  | 'STANDARD'
-                  | 'DISCOUNT'
-                  | 'SOURCING'
-                  | 'OTHER',
-              marketplace,
-              desiredPriceMinor:
-                Math.round(
-                  desiredPrice * 100,
-                ),
-              priceLocked: true,
-              autoSync: false,
-              applicationStatus:
-                'PREPARED',
-              campaignStatus:
-                'PREPARED',
-              validFrom,
-              validTo,
-              createdAt: now,
-              updatedAt: now,
-            })
-            .onConflictDoUpdate({
-              target: [
-                listingCampaigns.listingId,
-                listingCampaigns.externalCampaignId,
-              ],
-              set: {
-                campaignId:
-                  localCampaign.id,
-                campaignName,
-                campaignType:
-                  campaignType as
-                    | 'STANDARD'
-                    | 'DISCOUNT'
-                    | 'SOURCING'
-                    | 'OTHER',
-                marketplace,
-                desiredPriceMinor:
-                  Math.round(
-                    desiredPrice * 100,
-                  ),
-                priceLocked: true,
-                validFrom,
-                validTo,
-                updatedAt: now,
-              },
-            })
-            .returning()
-
-        saved.push(savedPreparation)
+        normalizedListings.push({
+          listingId,
+          desiredPriceMinor,
+          validFrom,
+          validTo,
+        })
       }
+
+      const campaignWrite =
+        existingLocalCampaign
+          ? db
+              .update(campaigns)
+              .set({
+                name: campaignName,
+                campaignType:
+                  campaignTypeValue,
+                marketplace,
+                validFrom:
+                  publicationFrom,
+                validTo:
+                  publicationTo,
+                updatedAt: now,
+              })
+              .where(
+                eq(
+                  campaigns.id,
+                  localCampaignId,
+                ),
+              )
+          : db
+              .insert(campaigns)
+              .values({
+                id:
+                  localCampaignId,
+
+                externalCampaignId,
+
+                name:
+                  campaignName,
+
+                campaignType:
+                  campaignTypeValue,
+
+                marketplace,
+
+                status:
+                  'AVAILABLE',
+
+                validFrom:
+                  publicationFrom,
+
+                validTo:
+                  publicationTo,
+
+                autoSync:
+                  false,
+
+                createdAt:
+                  now,
+
+                updatedAt:
+                  now,
+              })
+
+      const preparationWrites =
+        normalizedListings.map(
+          (item) =>
+            db
+              .insert(listingCampaigns)
+              .values({
+                campaignId:
+                  localCampaignId,
+
+                listingId:
+                  item.listingId,
+
+                externalCampaignId,
+
+                campaignName,
+
+                campaignType:
+                  campaignTypeValue,
+
+                marketplace,
+
+                desiredPriceMinor:
+                  item.desiredPriceMinor,
+
+                priceLocked:
+                  true,
+
+                autoSync:
+                  false,
+
+                applicationStatus:
+                  'PREPARED',
+
+                campaignStatus:
+                  'PREPARED',
+
+                validFrom:
+                  item.validFrom,
+
+                validTo:
+                  item.validTo,
+
+                createdAt:
+                  now,
+
+                updatedAt:
+                  now,
+              })
+              .onConflictDoUpdate({
+                target: [
+                  listingCampaigns.listingId,
+                  listingCampaigns.externalCampaignId,
+                ],
+                set: {
+                  campaignId:
+                    localCampaignId,
+
+                  campaignName,
+
+                  campaignType:
+                    campaignTypeValue,
+
+                  marketplace,
+
+                  desiredPriceMinor:
+                    item.desiredPriceMinor,
+
+                  priceLocked:
+                    true,
+
+                  validFrom:
+                    item.validFrom,
+
+                  validTo:
+                    item.validTo,
+
+                  updatedAt:
+                    now,
+                },
+              }),
+        )
+
+      await db.batch(
+        [
+          campaignWrite,
+          ...preparationWrites,
+        ] as [
+          typeof campaignWrite,
+          ...typeof preparationWrites,
+        ],
+      )
+
+      const savedCampaignRows =
+        await db
+          .select()
+          .from(listingCampaigns)
+          .where(
+            eq(
+              listingCampaigns.externalCampaignId,
+              externalCampaignId,
+            ),
+          )
+
+      const requestedListingIds =
+        new Set(
+          normalizedListings.map(
+            (item) => item.listingId,
+          ),
+        )
+
+      const saved =
+        savedCampaignRows.filter(
+          (row) =>
+            requestedListingIds.has(
+              row.listingId,
+            ),
+        )
 
       return context.json({
         status: 'ok',
