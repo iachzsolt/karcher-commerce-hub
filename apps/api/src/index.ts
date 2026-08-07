@@ -1724,22 +1724,46 @@ app.post(
           continue
         }
 
-        await db
-          .update(listingCampaigns)
-          .set({
-            applicationStatus:
-              'SUBMITTING',
+        const [claimedPreparation] =
+          await db
+            .update(listingCampaigns)
+            .set({
+              applicationStatus:
+                'SUBMITTING',
 
-            applicationError: null,
+              applicationError: null,
 
-            updatedAt: submittingAt,
+              updatedAt: submittingAt,
+            })
+            .where(
+              and(
+                eq(
+                  listingCampaigns.id,
+                  preparation.id,
+                ),
+                eq(
+                  listingCampaigns.applicationStatus,
+                  'SCHEDULED',
+                ),
+              ),
+            )
+            .returning({
+              id:
+                listingCampaigns.id,
+            })
+
+        if (!claimedPreparation) {
+          results.push({
+            listingId,
+            offerId:
+              preparation.offerId,
+            status: 'SKIPPED',
+            error:
+              'Preparation was already claimed by another process',
           })
-          .where(
-            eq(
-              listingCampaigns.id,
-              preparation.id,
-            ),
-          )
+
+          continue
+        }
 
         try {
           const submission =
@@ -1898,11 +1922,21 @@ app.post(
       const succeeded =
         results.filter(
           (result) =>
-            result.status !== 'FAILED',
+            result.status !== 'FAILED' &&
+            result.status !== 'SKIPPED',
         ).length
 
       const failed =
-        results.length - succeeded
+        results.filter(
+          (result) =>
+            result.status === 'FAILED',
+        ).length
+
+      const skipped =
+        results.filter(
+          (result) =>
+            result.status === 'SKIPPED',
+        ).length
 
       return context.json({
         status:
@@ -1915,6 +1949,7 @@ app.post(
         count: results.length,
         succeeded,
         failed,
+        skipped,
         data: results,
       })
     } catch (error) {
