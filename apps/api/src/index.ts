@@ -928,6 +928,53 @@ app.put(
           )
         }
 
+        const [existingPreparation] =
+          await db
+            .select({
+              id: listingCampaigns.id,
+              applicationStatus:
+                listingCampaigns.applicationStatus,
+              campaignStatus:
+                listingCampaigns.campaignStatus,
+            })
+            .from(listingCampaigns)
+            .where(
+              and(
+                eq(
+                  listingCampaigns.listingId,
+                  listingId,
+                ),
+                eq(
+                  listingCampaigns.externalCampaignId,
+                  externalCampaignId,
+                ),
+              ),
+            )
+            .limit(1)
+
+        if (
+          existingPreparation &&
+          (
+            existingPreparation.applicationStatus !==
+              'PREPARED' ||
+            existingPreparation.campaignStatus !==
+              'PREPARED'
+          )
+        ) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                `Campaign preparation is already in progress and cannot be edited: ${listingId}`,
+              applicationStatus:
+                existingPreparation.applicationStatus,
+              campaignStatus:
+                existingPreparation.campaignStatus,
+            },
+            409,
+          )
+        }
+
         const [savedPreparation] =
           await db
             .insert(listingCampaigns)
@@ -980,10 +1027,6 @@ app.put(
                     desiredPrice * 100,
                   ),
                 priceLocked: true,
-                applicationStatus:
-                  'PREPARED',
-                campaignStatus:
-                  'PREPARED',
                 validFrom,
                 validTo,
                 updatedAt: now,
