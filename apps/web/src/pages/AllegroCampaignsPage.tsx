@@ -348,6 +348,13 @@ function formatPreparationStatus(
     return 'Hiba'
   }
 
+  if (
+    state.applicationStatus ===
+    'SUBMISSION_UNKNOWN'
+  ) {
+    return 'Kézi ellenőrzés szükséges'
+  }
+
   return state.applicationStatus ?? '–'
 }
 
@@ -2679,7 +2686,16 @@ function AllegroCampaignsPage() {
 
                               <td>
                                 <div className="campaign-preparation-state">
-                                  <span className="campaign-preparation-status">
+                                  <span
+                                    className={`campaign-preparation-status${
+                                      preparationStatuses[
+                                        listing.id
+                                      ]?.applicationStatus ===
+                                      'SUBMISSION_UNKNOWN'
+                                        ? ' campaign-preparation-status-warning'
+                                        : ''
+                                    }`}
+                                  >
                                     {formatPreparationStatus(
                                       preparationStatuses[
                                         listing.id
