@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from 'node:crypto'
+﻿import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Hono } from 'hono'
 import { and, desc, eq } from 'drizzle-orm'
 import { decryptSecret, encryptSecret } from './token-crypto.js'
@@ -7,6 +7,7 @@ import {
   listingCampaigns,
   listingDesiredStates,
   listingPriceHistory,
+  listingPriceSchedules,
   listingRemoteStates,
   platformAccountCredentials,
   platformAccounts,
@@ -2633,8 +2634,102 @@ allegroAuth.post('/push-price/:listingId', async (context) => {
     )
   }
 
+  const priceResolutionNow = new Date()
+
+  const activeCampaignRowsForPrice =
+    await db
+      .select({
+        desiredPriceMinor:
+          listingCampaigns.desiredPriceMinor,
+
+        validFrom:
+          listingCampaigns.validFrom,
+
+        validTo:
+          listingCampaigns.validTo,
+      })
+      .from(listingCampaigns)
+      .where(
+        and(
+          eq(
+            listingCampaigns.listingId,
+            listingId,
+          ),
+          eq(
+            listingCampaigns.campaignType,
+            'DISCOUNT',
+          ),
+          eq(
+            listingCampaigns.campaignStatus,
+            'ACTIVE',
+          ),
+        ),
+      )
+
+  const hasActiveAllegroCampaign =
+    activeCampaignRowsForPrice.some(
+      (campaign) =>
+        (
+          !campaign.validFrom ||
+          campaign.validFrom <= priceResolutionNow
+        ) &&
+        (
+          !campaign.validTo ||
+          campaign.validTo >= priceResolutionNow
+        ),
+    )
+
+  const enabledPriceSchedules =
+    await db
+      .select({
+        promotionalPriceMinor:
+          listingPriceSchedules
+            .promotionalPriceMinor,
+
+        validFrom:
+          listingPriceSchedules.validFrom,
+
+        validTo:
+          listingPriceSchedules.validTo,
+      })
+      .from(listingPriceSchedules)
+      .where(
+        and(
+          eq(
+            listingPriceSchedules.listingId,
+            listingId,
+          ),
+          eq(
+            listingPriceSchedules.enabled,
+            true,
+          ),
+        ),
+      )
+
+  const activePriceSchedule =
+    enabledPriceSchedules
+      .filter(
+        (schedule) =>
+          schedule.validFrom <=
+            priceResolutionNow &&
+          schedule.validTo >=
+            priceResolutionNow,
+      )
+      .sort(
+        (left, right) =>
+          right.validFrom.getTime() -
+          left.validFrom.getTime(),
+      )[0] ?? null
+
+  const effectiveDesiredPriceMinor =
+    !hasActiveAllegroCampaign &&
+    activePriceSchedule
+      ? activePriceSchedule
+          .promotionalPriceMinor
+      : row.desiredPriceMinor
+
   const desiredPrice =
-    row.desiredPriceMinor / 100
+    effectiveDesiredPriceMinor / 100
 
   const commandId = randomUUID()
 
@@ -3331,6 +3426,1303 @@ allegroAuth.post('/push-status/:listingId', async (context) => {
     202,
   )
 })
+allegroAuth.post(
+  '/stop-price-schedule/:scheduleId',
+  async (context) => {
+    if (!currentSession) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Allegro account is not connected',
+        },
+        401,
+      )
+    }
+
+    const databaseUrl =
+      process.env.DATABASE_URL
+
+    if (!databaseUrl) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Database configuration is missing',
+        },
+        500,
+      )
+    }
+
+    const scheduleId =
+      context.req.param('scheduleId')
+
+    const db =
+      createDatabase(databaseUrl)
+
+    try {
+      const [schedule] =
+        await db
+          .select({
+            id:
+              listingPriceSchedules.id,
+
+            listingId:
+              listingPriceSchedules.listingId,
+
+            validTo:
+              listingPriceSchedules.validTo,
+
+            startAppliedAt:
+              listingPriceSchedules
+                .startAppliedAt,
+
+            endAppliedAt:
+              listingPriceSchedules
+                .endAppliedAt,
+          })
+          .from(listingPriceSchedules)
+          .where(
+            eq(
+              listingPriceSchedules.id,
+              scheduleId,
+            ),
+          )
+          .limit(1)
+
+      if (!schedule) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Price schedule was not found',
+          },
+          404,
+        )
+      }
+
+      if (
+        schedule.startAppliedAt === null ||
+        schedule.endAppliedAt !== null
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Only an active price schedule can be stopped',
+          },
+          409,
+        )
+      }
+
+      const now = new Date()
+
+      const closedValidTo =
+        new Date(now.getTime() - 1)
+
+      const activeCampaignRows =
+        await db
+          .select({
+            validFrom:
+              listingCampaigns.validFrom,
+
+            validTo:
+              listingCampaigns.validTo,
+          })
+          .from(listingCampaigns)
+          .where(
+            and(
+              eq(
+                listingCampaigns.listingId,
+                schedule.listingId,
+              ),
+              eq(
+                listingCampaigns.campaignType,
+                'DISCOUNT',
+              ),
+              eq(
+                listingCampaigns.campaignStatus,
+                'ACTIVE',
+              ),
+            ),
+          )
+
+      const hasActiveCampaign =
+        activeCampaignRows.some(
+          (campaign) =>
+            (
+              !campaign.validFrom ||
+              campaign.validFrom <= now
+            ) &&
+            (
+              !campaign.validTo ||
+              campaign.validTo >= now
+            ),
+        )
+
+
+      // Előbb lezárjuk az időablakot, hogy a push-price
+      // már ne ezt a kedvezményes árat válassza ki.
+      await db
+        .update(listingPriceSchedules)
+        .set({
+          validTo: closedValidTo,
+          updatedAt: now,
+        })
+        .where(
+          eq(
+            listingPriceSchedules.id,
+            schedule.id,
+          ),
+        )
+
+
+      // Ha hivatalos Allegro-kampány aktív,
+      // nem írjuk felül annak árát.
+      if (hasActiveCampaign) {
+        await db
+          .update(listingPriceSchedules)
+          .set({
+            endAppliedAt: now,
+            lastError: null,
+            updatedAt: now,
+          })
+          .where(
+            eq(
+              listingPriceSchedules.id,
+              schedule.id,
+            ),
+          )
+
+        return context.json({
+          status: 'ok',
+          data: {
+            scheduleId: schedule.id,
+            listingId: schedule.listingId,
+            stoppedAt: now.toISOString(),
+            priceRestore:
+              'SKIPPED_ACTIVE_CAMPAIGN',
+          },
+        })
+      }
+
+
+      // Nincs kampány: a push-price most már
+      // a normál kívánt árat fogja kiválasztani.
+      const priceResponse =
+        await allegroAuth.request(
+          `/push-price/${encodeURIComponent(
+            schedule.listingId,
+          )}`,
+          {
+            method: 'POST',
+          },
+        )
+
+      if (!priceResponse.ok) {
+        const responseBody =
+          await priceResponse.text()
+
+        // Ha az Allegro-visszaállítás nem sikerült,
+        // visszaállítjuk az eredeti lejáratot,
+        // így a schedule nem vész el.
+        await db
+          .update(listingPriceSchedules)
+          .set({
+            validTo: schedule.validTo,
+            lastError:
+              `Price restore failed: ${responseBody}`,
+            updatedAt: new Date(),
+          })
+          .where(
+            eq(
+              listingPriceSchedules.id,
+              schedule.id,
+            ),
+          )
+
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Could not restore the normal Allegro price',
+          },
+          502,
+        )
+      }
+
+
+      await db
+        .update(listingPriceSchedules)
+        .set({
+          endAppliedAt: now,
+          lastError: null,
+          updatedAt: now,
+        })
+        .where(
+          eq(
+            listingPriceSchedules.id,
+            schedule.id,
+          ),
+        )
+
+      return context.json({
+        status: 'ok',
+        data: {
+          scheduleId: schedule.id,
+          listingId: schedule.listingId,
+          stoppedAt: now.toISOString(),
+          priceRestore: 'APPLIED',
+        },
+      })
+    } catch (error) {
+      console.error(
+        'Stopping active price schedule failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Could not stop active price schedule',
+        },
+        500,
+      )
+    }
+  },
+)
+
+
+allegroAuth.patch(
+  '/price-schedule/:scheduleId',
+  async (context) => {
+    const databaseUrl =
+      process.env.DATABASE_URL
+
+    if (!databaseUrl) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Database configuration is missing',
+        },
+        500,
+      )
+    }
+
+    const db = createDatabase(databaseUrl)
+
+    try {
+      const scheduleId =
+        context.req.param('scheduleId')
+
+      const body = await context.req.json<{
+        promotionalPrice: number
+        validFrom?: string
+        validTo: string
+      }>()
+
+      const promotionalPrice =
+        Number(body.promotionalPrice)
+
+      if (
+        !Number.isFinite(promotionalPrice) ||
+        promotionalPrice <= 0
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Invalid promotional price',
+          },
+          400,
+        )
+      }
+
+      const promotionalPriceMinor =
+        Math.round(promotionalPrice * 100)
+
+      const [schedule] =
+        await db
+          .select({
+            id:
+              listingPriceSchedules.id,
+
+            listingId:
+              listingPriceSchedules.listingId,
+
+            promotionalPriceMinor:
+              listingPriceSchedules
+                .promotionalPriceMinor,
+
+            validFrom:
+              listingPriceSchedules.validFrom,
+
+            validTo:
+              listingPriceSchedules.validTo,
+
+            enabled:
+              listingPriceSchedules.enabled,
+
+            startAppliedAt:
+              listingPriceSchedules
+                .startAppliedAt,
+
+            endAppliedAt:
+              listingPriceSchedules
+                .endAppliedAt,
+          })
+          .from(listingPriceSchedules)
+          .where(
+            eq(
+              listingPriceSchedules.id,
+              scheduleId,
+            ),
+          )
+          .limit(1)
+
+      if (!schedule) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Price schedule was not found',
+          },
+          404,
+        )
+      }
+
+      if (schedule.endAppliedAt !== null) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Expired price schedule cannot be edited',
+          },
+          409,
+        )
+      }
+
+      const [desiredState] =
+        await db
+          .select({
+            regularPriceMinor:
+              listingDesiredStates
+                .regularPriceMinor,
+          })
+          .from(listingDesiredStates)
+          .where(
+            eq(
+              listingDesiredStates.listingId,
+              schedule.listingId,
+            ),
+          )
+          .limit(1)
+
+      if (
+        !desiredState ||
+        desiredState.regularPriceMinor === null
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Normal desired price is missing',
+          },
+          400,
+        )
+      }
+
+      if (
+        promotionalPriceMinor >=
+        desiredState.regularPriceMinor
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Promotional price must be lower than the normal desired price',
+          },
+          400,
+        )
+      }
+
+      const parsedValidTo =
+        new Date(body.validTo)
+
+      if (
+        Number.isNaN(
+          parsedValidTo.getTime(),
+        )
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Invalid schedule end date',
+          },
+          400,
+        )
+      }
+
+      const now = new Date()
+
+      const isActive =
+        schedule.startAppliedAt !== null &&
+        schedule.endAppliedAt === null
+
+      let nextValidFrom =
+        schedule.validFrom
+
+      if (!isActive) {
+        const parsedValidFrom =
+          new Date(body.validFrom ?? '')
+
+        if (
+          Number.isNaN(
+            parsedValidFrom.getTime(),
+          )
+        ) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                'Invalid schedule start date',
+            },
+            400,
+          )
+        }
+
+        nextValidFrom =
+          parsedValidFrom
+      }
+
+      if (
+        parsedValidTo <= nextValidFrom
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Schedule end must be later than its start',
+          },
+          400,
+        )
+      }
+
+      if (
+        isActive &&
+        parsedValidTo <= now
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Use delete to stop an active discount immediately',
+          },
+          400,
+        )
+      }
+
+      const otherSchedules =
+        await db
+          .select({
+            id:
+              listingPriceSchedules.id,
+
+            validFrom:
+              listingPriceSchedules.validFrom,
+
+            validTo:
+              listingPriceSchedules.validTo,
+
+            enabled:
+              listingPriceSchedules.enabled,
+
+            endAppliedAt:
+              listingPriceSchedules
+                .endAppliedAt,
+          })
+          .from(listingPriceSchedules)
+          .where(
+            eq(
+              listingPriceSchedules.listingId,
+              schedule.listingId,
+            ),
+          )
+
+      const overlaps =
+        otherSchedules.some(
+          (other) =>
+            other.id !== schedule.id &&
+            other.enabled &&
+            other.endAppliedAt === null &&
+            nextValidFrom < other.validTo &&
+            parsedValidTo > other.validFrom,
+        )
+
+      if (overlaps) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Another enabled price schedule overlaps this period',
+          },
+          409,
+        )
+      }
+
+      const oldValues = {
+        promotionalPriceMinor:
+          schedule.promotionalPriceMinor,
+
+        validFrom:
+          schedule.validFrom,
+
+        validTo:
+          schedule.validTo,
+
+        enabled:
+          schedule.enabled,
+      }
+
+      await db
+        .update(listingPriceSchedules)
+        .set({
+          promotionalPriceMinor,
+          validFrom: nextValidFrom,
+          validTo: parsedValidTo,
+          enabled: true,
+          lastError: null,
+          updatedAt: now,
+        })
+        .where(
+          eq(
+            listingPriceSchedules.id,
+            schedule.id,
+          ),
+        )
+
+      const priceChanged =
+        promotionalPriceMinor !==
+        schedule.promotionalPriceMinor
+
+      if (isActive && priceChanged) {
+        if (!currentSession) {
+          await db
+            .update(listingPriceSchedules)
+            .set({
+              ...oldValues,
+              updatedAt: new Date(),
+            })
+            .where(
+              eq(
+                listingPriceSchedules.id,
+                schedule.id,
+              ),
+            )
+
+          return context.json(
+            {
+              status: 'error',
+              message:
+                'Allegro account is not connected',
+            },
+            401,
+          )
+        }
+
+        const activeCampaignRows =
+          await db
+            .select({
+              validFrom:
+                listingCampaigns.validFrom,
+
+              validTo:
+                listingCampaigns.validTo,
+            })
+            .from(listingCampaigns)
+            .where(
+              and(
+                eq(
+                  listingCampaigns.listingId,
+                  schedule.listingId,
+                ),
+                eq(
+                  listingCampaigns.campaignType,
+                  'DISCOUNT',
+                ),
+                eq(
+                  listingCampaigns.campaignStatus,
+                  'ACTIVE',
+                ),
+              ),
+            )
+
+        const hasActiveCampaign =
+          activeCampaignRows.some(
+            (campaign) =>
+              (
+                !campaign.validFrom ||
+                campaign.validFrom <= now
+              ) &&
+              (
+                !campaign.validTo ||
+                campaign.validTo >= now
+              ),
+          )
+
+        if (!hasActiveCampaign) {
+          const priceResponse =
+            await allegroAuth.request(
+              `/push-price/${encodeURIComponent(
+                schedule.listingId,
+              )}`,
+              {
+                method: 'POST',
+              },
+            )
+
+          if (!priceResponse.ok) {
+            const responseBody =
+              await priceResponse.text()
+
+            await db
+              .update(listingPriceSchedules)
+              .set({
+                ...oldValues,
+                lastError:
+                  `Price update failed: ${responseBody}`,
+                updatedAt: new Date(),
+              })
+              .where(
+                eq(
+                  listingPriceSchedules.id,
+                  schedule.id,
+                ),
+              )
+
+            return context.json(
+              {
+                status: 'error',
+                message:
+                  'Could not update the active Allegro discount price',
+              },
+              502,
+            )
+          }
+        }
+      }
+
+      const [updated] =
+        await db
+          .select()
+          .from(listingPriceSchedules)
+          .where(
+            eq(
+              listingPriceSchedules.id,
+              schedule.id,
+            ),
+          )
+          .limit(1)
+
+      return context.json({
+        status: 'ok',
+        data: updated,
+      })
+    } catch (error) {
+      console.error(
+        'Smart price schedule update failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Could not update price schedule',
+        },
+        500,
+      )
+    }
+  },
+)
+
+
+allegroAuth.delete(
+  '/price-schedule/:scheduleId',
+  async (context) => {
+    const databaseUrl =
+      process.env.DATABASE_URL
+
+    if (!databaseUrl) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Database configuration is missing',
+        },
+        500,
+      )
+    }
+
+    const db = createDatabase(databaseUrl)
+
+    try {
+      const scheduleId =
+        context.req.param('scheduleId')
+
+      const [schedule] =
+        await db
+          .select({
+            id:
+              listingPriceSchedules.id,
+
+            listingId:
+              listingPriceSchedules.listingId,
+
+            enabled:
+              listingPriceSchedules.enabled,
+
+            startAppliedAt:
+              listingPriceSchedules
+                .startAppliedAt,
+
+            endAppliedAt:
+              listingPriceSchedules
+                .endAppliedAt,
+          })
+          .from(listingPriceSchedules)
+          .where(
+            eq(
+              listingPriceSchedules.id,
+              scheduleId,
+            ),
+          )
+          .limit(1)
+
+      if (!schedule) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Price schedule was not found',
+          },
+          404,
+        )
+      }
+
+      const isActive =
+        schedule.startAppliedAt !== null &&
+        schedule.endAppliedAt === null
+
+      if (isActive) {
+        if (!currentSession) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                'Allegro account is not connected',
+            },
+            401,
+          )
+        }
+
+        const now = new Date()
+
+        const activeCampaignRows =
+          await db
+            .select({
+              validFrom:
+                listingCampaigns.validFrom,
+
+              validTo:
+                listingCampaigns.validTo,
+            })
+            .from(listingCampaigns)
+            .where(
+              and(
+                eq(
+                  listingCampaigns.listingId,
+                  schedule.listingId,
+                ),
+                eq(
+                  listingCampaigns.campaignType,
+                  'DISCOUNT',
+                ),
+                eq(
+                  listingCampaigns.campaignStatus,
+                  'ACTIVE',
+                ),
+              ),
+            )
+
+        const hasActiveCampaign =
+          activeCampaignRows.some(
+            (campaign) =>
+              (
+                !campaign.validFrom ||
+                campaign.validFrom <= now
+              ) &&
+              (
+                !campaign.validTo ||
+                campaign.validTo >= now
+              ),
+          )
+
+        if (!hasActiveCampaign) {
+          await db
+            .update(listingPriceSchedules)
+            .set({
+              enabled: false,
+              updatedAt: now,
+            })
+            .where(
+              eq(
+                listingPriceSchedules.id,
+                schedule.id,
+              ),
+            )
+
+          const priceResponse =
+            await allegroAuth.request(
+              `/push-price/${encodeURIComponent(
+                schedule.listingId,
+              )}`,
+              {
+                method: 'POST',
+              },
+            )
+
+          if (!priceResponse.ok) {
+            const responseBody =
+              await priceResponse.text()
+
+            await db
+              .update(listingPriceSchedules)
+              .set({
+                enabled: schedule.enabled,
+                lastError:
+                  `Price restore failed: ${responseBody}`,
+                updatedAt: new Date(),
+              })
+              .where(
+                eq(
+                  listingPriceSchedules.id,
+                  schedule.id,
+                ),
+              )
+
+            return context.json(
+              {
+                status: 'error',
+                message:
+                  'Could not restore the normal Allegro price',
+              },
+              502,
+            )
+          }
+        }
+      }
+
+      await db
+        .delete(listingPriceSchedules)
+        .where(
+          eq(
+            listingPriceSchedules.id,
+            schedule.id,
+          ),
+        )
+
+      return context.json({
+        status: 'ok',
+        deletedId: schedule.id,
+        restoredNormalPrice:
+          isActive,
+      })
+    } catch (error) {
+      console.error(
+        'Smart price schedule deletion failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Could not delete price schedule',
+        },
+        500,
+      )
+    }
+  },
+)
+
+
+allegroAuth.post(
+  '/process-price-schedules',
+  async (context) => {
+    if (!currentSession) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Allegro account is not connected',
+        },
+        401,
+      )
+    }
+
+    const databaseUrl =
+      process.env.DATABASE_URL
+
+    if (!databaseUrl) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Database configuration is missing',
+        },
+        500,
+      )
+    }
+
+    const db = createDatabase(databaseUrl)
+
+    try {
+      const now = new Date()
+
+      const schedules =
+        await db
+          .select({
+            id:
+              listingPriceSchedules.id,
+
+            listingId:
+              listingPriceSchedules.listingId,
+
+            validFrom:
+              listingPriceSchedules.validFrom,
+
+            validTo:
+              listingPriceSchedules.validTo,
+
+            startAppliedAt:
+              listingPriceSchedules
+                .startAppliedAt,
+
+            endAppliedAt:
+              listingPriceSchedules
+                .endAppliedAt,
+          })
+          .from(listingPriceSchedules)
+          .where(
+            eq(
+              listingPriceSchedules.enabled,
+              true,
+            ),
+          )
+
+      let applied = 0
+      let blocked = 0
+      let failed = 0
+      let skipped = 0
+
+      const results: Array<{
+        scheduleId: string
+        listingId: string
+        action:
+          | 'START'
+          | 'END'
+          | 'SKIP'
+        status:
+          | 'APPLIED'
+          | 'BLOCKED'
+          | 'FAILED'
+          | 'SKIPPED'
+        message?: string
+      }> = []
+
+      for (const schedule of schedules) {
+        if (schedule.endAppliedAt !== null) {
+          skipped += 1
+
+          results.push({
+            scheduleId: schedule.id,
+            listingId: schedule.listingId,
+            action: 'SKIP',
+            status: 'SKIPPED',
+            message:
+              'Schedule already completed',
+          })
+
+          continue
+        }
+
+        const shouldStart =
+          schedule.startAppliedAt === null &&
+          now >= schedule.validFrom &&
+          now <= schedule.validTo
+
+        const shouldEnd =
+          schedule.startAppliedAt !== null &&
+          now > schedule.validTo
+
+        if (
+          schedule.startAppliedAt === null &&
+          now > schedule.validTo
+        ) {
+          await db
+            .update(listingPriceSchedules)
+            .set({
+              endAppliedAt: now,
+              lastError:
+                'Schedule expired before its start could be applied',
+              updatedAt: now,
+            })
+            .where(
+              eq(
+                listingPriceSchedules.id,
+                schedule.id,
+              ),
+            )
+
+          skipped += 1
+
+          results.push({
+            scheduleId: schedule.id,
+            listingId: schedule.listingId,
+            action: 'SKIP',
+            status: 'SKIPPED',
+            message:
+              'Schedule expired before start',
+          })
+
+          continue
+        }
+
+        if (!shouldStart && !shouldEnd) {
+          skipped += 1
+
+          results.push({
+            scheduleId: schedule.id,
+            listingId: schedule.listingId,
+            action: 'SKIP',
+            status: 'SKIPPED',
+            message:
+              schedule.startAppliedAt === null
+                ? 'Waiting for start time'
+                : 'Schedule is currently active',
+          })
+
+          continue
+        }
+
+        const activeCampaignRows =
+          await db
+            .select({
+              validFrom:
+                listingCampaigns.validFrom,
+
+              validTo:
+                listingCampaigns.validTo,
+            })
+            .from(listingCampaigns)
+            .where(
+              and(
+                eq(
+                  listingCampaigns.listingId,
+                  schedule.listingId,
+                ),
+                eq(
+                  listingCampaigns.campaignType,
+                  'DISCOUNT',
+                ),
+                eq(
+                  listingCampaigns.campaignStatus,
+                  'ACTIVE',
+                ),
+              ),
+            )
+
+        const hasActiveCampaign =
+          activeCampaignRows.some(
+            (campaign) =>
+              (
+                !campaign.validFrom ||
+                campaign.validFrom <= now
+              ) &&
+              (
+                !campaign.validTo ||
+                campaign.validTo >= now
+              ),
+          )
+
+        if (hasActiveCampaign) {
+          const message =
+            'Price schedule is temporarily blocked by an active Allegro campaign'
+
+          await db
+            .update(listingPriceSchedules)
+            .set({
+              lastError: message,
+              updatedAt: now,
+            })
+            .where(
+              eq(
+                listingPriceSchedules.id,
+                schedule.id,
+              ),
+            )
+
+          blocked += 1
+
+          results.push({
+            scheduleId: schedule.id,
+            listingId: schedule.listingId,
+            action: shouldStart
+              ? 'START'
+              : 'END',
+            status: 'BLOCKED',
+            message,
+          })
+
+          continue
+        }
+
+        const response =
+          await allegroAuth.request(
+            `/push-price/${encodeURIComponent(
+              schedule.listingId,
+            )}`,
+            {
+              method: 'POST',
+            },
+          )
+
+        const responseData =
+          await response
+            .json()
+            .catch(() => null) as
+            | {
+                message?: string
+              }
+            | null
+
+        if (!response.ok) {
+          const message =
+            responseData?.message ??
+            `Price push failed with HTTP ${response.status}`
+
+          await db
+            .update(listingPriceSchedules)
+            .set({
+              lastError: message,
+              updatedAt: now,
+            })
+            .where(
+              eq(
+                listingPriceSchedules.id,
+                schedule.id,
+              ),
+            )
+
+          failed += 1
+
+          results.push({
+            scheduleId: schedule.id,
+            listingId: schedule.listingId,
+            action: shouldStart
+              ? 'START'
+              : 'END',
+            status: 'FAILED',
+            message,
+          })
+
+          continue
+        }
+
+        if (shouldStart) {
+          await db
+            .update(listingPriceSchedules)
+            .set({
+              startAppliedAt: now,
+              lastError: null,
+              updatedAt: now,
+            })
+            .where(
+              eq(
+                listingPriceSchedules.id,
+                schedule.id,
+              ),
+            )
+
+          applied += 1
+
+          results.push({
+            scheduleId: schedule.id,
+            listingId: schedule.listingId,
+            action: 'START',
+            status: 'APPLIED',
+          })
+
+          continue
+        }
+
+        await db
+          .update(listingPriceSchedules)
+          .set({
+            endAppliedAt: now,
+            lastError: null,
+            updatedAt: now,
+          })
+          .where(
+            eq(
+              listingPriceSchedules.id,
+              schedule.id,
+            ),
+          )
+
+        applied += 1
+
+        results.push({
+          scheduleId: schedule.id,
+          listingId: schedule.listingId,
+          action: 'END',
+          status: 'APPLIED',
+        })
+      }
+
+      return context.json({
+        status: 'ok',
+        checked: schedules.length,
+        applied,
+        blocked,
+        failed,
+        skipped,
+        processedAt: now.toISOString(),
+        results,
+      })
+    } catch (error) {
+      console.error(
+        'Price schedule processing failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Could not process price schedules',
+        },
+        500,
+      )
+    }
+  },
+)
+
+
 allegroAuth.post('/sync-selected', async (context) => {
   if (!currentSession) {
     return context.json(
@@ -3476,9 +4868,107 @@ allegroAuth.post('/sync-selected', async (context) => {
       continue
     }
 
+    const priceResolutionNow =
+      new Date()
+
+    const activeCampaignRowsForBulkPrice =
+      await db
+        .select({
+          validFrom:
+            listingCampaigns.validFrom,
+
+          validTo:
+            listingCampaigns.validTo,
+        })
+        .from(listingCampaigns)
+        .where(
+          and(
+            eq(
+              listingCampaigns.listingId,
+              listingId,
+            ),
+            eq(
+              listingCampaigns.campaignType,
+              'DISCOUNT',
+            ),
+            eq(
+              listingCampaigns.campaignStatus,
+              'ACTIVE',
+            ),
+          ),
+        )
+
+    const hasActiveAllegroCampaignForBulkPrice =
+      activeCampaignRowsForBulkPrice.some(
+        (campaign) =>
+          (
+            !campaign.validFrom ||
+            campaign.validFrom <=
+              priceResolutionNow
+          ) &&
+          (
+            !campaign.validTo ||
+            campaign.validTo >=
+              priceResolutionNow
+          ),
+      )
+
+    const enabledSchedulesForBulkPrice =
+      hasActiveAllegroCampaignForBulkPrice
+        ? []
+        : await db
+            .select({
+              promotionalPriceMinor:
+                listingPriceSchedules
+                  .promotionalPriceMinor,
+
+              validFrom:
+                listingPriceSchedules.validFrom,
+
+              validTo:
+                listingPriceSchedules.validTo,
+            })
+            .from(listingPriceSchedules)
+            .where(
+              and(
+                eq(
+                  listingPriceSchedules.listingId,
+                  listingId,
+                ),
+                eq(
+                  listingPriceSchedules.enabled,
+                  true,
+                ),
+              ),
+            )
+
+    const activeScheduleForBulkPrice =
+      enabledSchedulesForBulkPrice
+        .filter(
+          (schedule) =>
+            schedule.validFrom <=
+              priceResolutionNow &&
+            schedule.validTo >=
+              priceResolutionNow,
+        )
+        .sort(
+          (left, right) =>
+            right.validFrom.getTime() -
+            left.validFrom.getTime(),
+        )[0] ?? null
+
+    const effectiveDesiredPriceMinorForBulk =
+      hasActiveAllegroCampaignForBulkPrice
+        ? row.priceMinor
+        : activeScheduleForBulkPrice
+          ? activeScheduleForBulkPrice
+              .promotionalPriceMinor
+          : row.desiredPriceMinor
+
     const priceChanged =
-      row.desiredPriceMinor !== null &&
-      row.priceMinor !== row.desiredPriceMinor
+      effectiveDesiredPriceMinorForBulk !== null &&
+      row.priceMinor !==
+        effectiveDesiredPriceMinorForBulk
 
     const stockChanged =
       row.desiredStock !== null &&

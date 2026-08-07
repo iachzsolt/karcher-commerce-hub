@@ -1,4 +1,4 @@
-import {
+﻿import {
   boolean,
   index,
   integer,
@@ -441,6 +441,70 @@ export const listingDesiredStates = pgTable(
   ],
 )
 
+export const listingPriceSchedules = pgTable(
+  'listing_price_schedules',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+
+    listingId: uuid('listing_id')
+      .notNull()
+      .references(() => platformListings.id),
+
+    promotionalPriceMinor: integer(
+      'promotional_price_minor',
+    ).notNull(),
+
+    validFrom: timestamp('valid_from', {
+      withTimezone: true,
+    }).notNull(),
+
+    validTo: timestamp('valid_to', {
+      withTimezone: true,
+    }).notNull(),
+
+    enabled: boolean('enabled')
+      .notNull()
+      .default(true),
+
+    startAppliedAt: timestamp('start_applied_at', {
+      withTimezone: true,
+    }),
+
+    endAppliedAt: timestamp('end_applied_at', {
+      withTimezone: true,
+    }),
+
+    lastError: text('last_error'),
+
+    createdAt: timestamp('created_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp('updated_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index(
+      'listing_price_schedules_listing_index',
+    ).on(table.listingId),
+
+    index(
+      'listing_price_schedules_period_index',
+    ).on(
+      table.validFrom,
+      table.validTo,
+    ),
+
+    index(
+      'listing_price_schedules_enabled_index',
+    ).on(table.enabled),
+  ],
+)
 export const campaigns = pgTable(
   'campaigns',
   {

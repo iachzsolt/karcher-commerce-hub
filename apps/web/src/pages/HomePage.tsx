@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+﻿import { useEffect, useState } from 'react'
 import '../App.css'
 
 type HealthResponse = {
@@ -91,6 +91,46 @@ type AllegroListingResponse = {
   data: AllegroListing[]
 }
 
+type PriceHistorySummary = {
+  listingId: string
+  min30PriceMinor: number | null
+  observationCount: number
+  coverageDayCount: number
+  missingDayCount: number
+  historyStartedAt: string | null
+  hasFull30DayWindow: boolean
+}
+
+type PriceHistorySummaryResponse = {
+  status: string
+  data: PriceHistorySummary[]
+}
+
+type ListingPriceSchedule = {
+  id: string
+  listingId: string
+  promotionalPriceMinor: number
+  validFrom: string
+  validTo: string
+  enabled: boolean
+  startAppliedAt: string | null
+  endAppliedAt: string | null
+  lastError: string | null
+  createdAt: string
+  updatedAt: string
+  scheduleStatus:
+    | 'SCHEDULED'
+    | 'ACTIVE'
+    | 'EXPIRED'
+    | 'DISABLED'
+}
+
+type ListingPriceScheduleResponse = {
+  status: string
+  count: number
+  data: ListingPriceSchedule[]
+}
+
 type AllegroImportIssue = {
   offerId: string
   name: string
@@ -174,6 +214,266 @@ type HomePageProps = {
   view?: 'home' | 'allegroOffers'
 }
 
+function getRelevantPriceSchedule(
+  schedules: ListingPriceSchedule[],
+) {
+  return (
+    schedules.find(
+      (schedule) =>
+        schedule.scheduleStatus === 'ACTIVE',
+    ) ??
+    schedules.find(
+      (schedule) =>
+        schedule.scheduleStatus === 'SCHEDULED',
+    ) ??
+    null
+  )
+}
+
+function formatPriceScheduleDiscount(
+  regularPriceMinor: number | null,
+  promotionalPriceValue: string,
+) {
+  if (
+    regularPriceMinor === null ||
+    regularPriceMinor <= 0 ||
+    !promotionalPriceValue
+  ) {
+    return '–'
+  }
+
+  const promotionalPrice = Number(
+    promotionalPriceValue.replace(',', '.'),
+  )
+
+  if (
+    !Number.isFinite(promotionalPrice) ||
+    promotionalPrice <= 0
+  ) {
+    return '–'
+  }
+
+  const promotionalPriceMinor =
+    Math.round(promotionalPrice * 100)
+
+  const discount =
+    ((regularPriceMinor - promotionalPriceMinor) /
+      regularPriceMinor) *
+    100
+
+  return `${new Intl.NumberFormat(
+    'hu-HU',
+    {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 1,
+    },
+  ).format(discount)}%`
+}
+
+function getPriceScheduleControl(
+  regularPriceMinor: number | null,
+  min30PriceMinor: number | null | undefined,
+  hasFull30DayWindow: boolean | undefined,
+  promotionalPriceValue: string,
+) {
+  if (!promotionalPriceValue) {
+    return null
+  }
+
+  const promotionalPrice = Number(
+    promotionalPriceValue.replace(',', '.'),
+  )
+
+  if (
+    !Number.isFinite(promotionalPrice) ||
+    promotionalPrice <= 0
+  ) {
+    return null
+  }
+
+  const promotionalPriceMinor =
+    Math.round(promotionalPrice * 100)
+
+  if (
+    regularPriceMinor !== null &&
+    promotionalPriceMinor >= regularPriceMinor
+  ) {
+    return {
+      tone: 'error' as const,
+      label: '✕ Nem kedvezmény',
+    }
+  }
+
+  if (
+    min30PriceMinor === null ||
+    min30PriceMinor === undefined
+  ) {
+    return {
+      tone: 'neutral' as const,
+      label: 'Nincs még árhistorika',
+    }
+  }
+
+  if (promotionalPriceMinor < min30PriceMinor) {
+    return {
+      tone: 'good' as const,
+      label: hasFull30DayWindow
+        ? '✓ 30 napos minimum alatt'
+        : '✓ Eddigi minimum alatt',
+    }
+  }
+
+  if (promotionalPriceMinor === min30PriceMinor) {
+    return {
+      tone: 'neutral' as const,
+      label: hasFull30DayWindow
+        ? '= 30 napos minimummal'
+        : '= Eddigi minimummal',
+    }
+  }
+
+  return {
+    tone: 'warning' as const,
+    label: hasFull30DayWindow
+      ? '⚠ Volt már olcsóbb 30 napon belül'
+      : '⚠ Eddig már volt olcsóbb',
+  }
+}
+
+function formatPriceScheduleStatus(
+  status: ListingPriceSchedule[
+    'scheduleStatus'
+  ],
+) {
+  switch (status) {
+    case 'SCHEDULED':
+      return 'Ütemezett'
+    case 'ACTIVE':
+      return 'Aktív'
+    case 'EXPIRED':
+      return 'Lejárt'
+    case 'DISABLED':
+      return 'Kikapcsolva'
+  }
+}
+
+function formatPriceScheduleDateTime(
+  value: string,
+) {
+  const date = new Date(value)
+
+  if (Number.isNaN(date.getTime())) {
+    return '–'
+  }
+
+  return new Intl.DateTimeFormat(
+    'hu-HU',
+    {
+      timeZone: 'Europe/Budapest',
+      dateStyle: 'short',
+      timeStyle: 'short',
+    },
+  ).format(date)
+}
+
+function toBudapestInputParts(value: string) {
+  const date = new Date(value)
+
+  const formatter = new Intl.DateTimeFormat(
+    'en-CA',
+    {
+      timeZone: 'Europe/Budapest',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    },
+  )
+
+  const parts = Object.fromEntries(
+    formatter
+      .formatToParts(date)
+      .filter((part) => part.type !== 'literal')
+      .map((part) => [part.type, part.value]),
+  )
+
+  return {
+    date:
+      `${parts.year}-${parts.month}-${parts.day}`,
+    time: `${parts.hour}:${parts.minute}`,
+  }
+}
+
+function budapestLocalToIso(
+  dateValue: string,
+  timeValue: string,
+) {
+  const [year, month, day] = dateValue
+    .split('-')
+    .map(Number)
+
+  const [hour, minute] = timeValue
+    .split(':')
+    .map(Number)
+
+  const targetAsUtc = Date.UTC(
+    year,
+    month - 1,
+    day,
+    hour,
+    minute,
+    0,
+  )
+
+  let candidate = new Date(targetAsUtc)
+
+  const formatter = new Intl.DateTimeFormat(
+    'en-CA',
+    {
+      timeZone: 'Europe/Budapest',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    },
+  )
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const parts = Object.fromEntries(
+      formatter
+        .formatToParts(candidate)
+        .filter((part) => part.type !== 'literal')
+        .map((part) => [part.type, part.value]),
+    )
+
+    const actualAsUtc = Date.UTC(
+      Number(parts.year),
+      Number(parts.month) - 1,
+      Number(parts.day),
+      Number(parts.hour),
+      Number(parts.minute),
+      Number(parts.second),
+    )
+
+    const difference = targetAsUtc - actualAsUtc
+
+    if (difference === 0) {
+      break
+    }
+
+    candidate = new Date(
+      candidate.getTime() + difference,
+    )
+  }
+
+  return candidate.toISOString()
+}
+
 function HomePage({
   view = 'home',
 }: HomePageProps) {
@@ -213,32 +513,250 @@ function HomePage({
   const [allegroListings, setAllegroListings] =
     useState<AllegroListing[]>([])
 
+  const [
+    priceHistoryByListing,
+    setPriceHistoryByListing,
+  ] = useState<
+    Record<string, PriceHistorySummary>
+  >({})
+
+  const [
+    priceSchedulesByListing,
+    setPriceSchedulesByListing,
+  ] = useState<
+    Record<string, ListingPriceSchedule[]>
+  >({})
+
+  const [
+    priceScheduleDialogListingId,
+    setPriceScheduleDialogListingId,
+  ] = useState<string | null>(null)
+
+  const [
+    editingPriceScheduleId,
+    setEditingPriceScheduleId,
+  ] = useState<string | null>(null)
+
+  const [
+    schedulePriceDraft,
+    setSchedulePriceDraft,
+  ] = useState('')
+
+  const [
+    scheduleValidFromDraft,
+    setScheduleValidFromDraft,
+  ] = useState('')
+
+  const [
+    scheduleValidFromTimeDraft,
+    setScheduleValidFromTimeDraft,
+  ] = useState('00:00')
+
+  const [
+    scheduleValidToDraft,
+    setScheduleValidToDraft,
+  ] = useState('')
+
+  const [
+    scheduleValidToTimeDraft,
+    setScheduleValidToTimeDraft,
+  ] = useState('23:59')
+
+  const [
+    savingPriceSchedule,
+    setSavingPriceSchedule,
+  ] = useState(false)
+
+  const [
+    deletingPriceScheduleId,
+    setDeletingPriceScheduleId,
+  ] = useState<string | null>(null)
+
+  const [
+    priceScheduleError,
+    setPriceScheduleError,
+  ] = useState<string | null>(null)
+
   const [allegroImportIssues, setAllegroImportIssues] =
     useState<AllegroImportIssue[]>([])
 
-  const [desiredPriceDrafts, setDesiredPriceDrafts] =
-    useState<Record<string, string>>({})
+  const [
+    desiredPriceDrafts,
+    setDesiredPriceDraftsState,
+  ] = useState<Record<string, string>>(() => {
+    try {
+      const stored = window.sessionStorage.getItem(
+        'commerce-hub:allegro:unsaved-price-drafts-v2',
+      )
+
+      return stored
+        ? (JSON.parse(stored) as Record<string, string>)
+        : {}
+    } catch {
+      return {}
+    }
+  })
+
+  const setDesiredPriceDrafts = (
+    update:
+      | Record<string, string>
+      | ((
+          current: Record<string, string>,
+        ) => Record<string, string>),
+  ) => {
+    setDesiredPriceDraftsState((current) => {
+      const next =
+        typeof update === 'function'
+          ? update(current)
+          : {
+              ...update,
+              ...current,
+            }
+
+      try {
+        window.sessionStorage.setItem(
+          'commerce-hub:allegro:unsaved-price-drafts-v2',
+          JSON.stringify(next),
+        )
+      } catch {
+        // A sessionStorage hiánya nem akadályozza a szerkesztést.
+      }
+
+      return next
+    })
+  }
 
   const [savingDesiredPrice, setSavingDesiredPrice] =
     useState<string | null>(null)
 
-  const [desiredStockDrafts, setDesiredStockDrafts] =
-    useState<Record<string, string>>({})
+  const [
+    desiredStockDrafts,
+    setDesiredStockDraftsState,
+  ] = useState<Record<string, string>>(() => {
+    try {
+      const stored = window.sessionStorage.getItem(
+        'commerce-hub:allegro:unsaved-stock-drafts-v2',
+      )
+
+      return stored
+        ? (JSON.parse(stored) as Record<string, string>)
+        : {}
+    } catch {
+      return {}
+    }
+  })
+
+  const setDesiredStockDrafts = (
+    update:
+      | Record<string, string>
+      | ((
+          current: Record<string, string>,
+        ) => Record<string, string>),
+  ) => {
+    setDesiredStockDraftsState((current) => {
+      const next =
+        typeof update === 'function'
+          ? update(current)
+          : {
+              ...update,
+              ...current,
+            }
+
+      try {
+        window.sessionStorage.setItem(
+          'commerce-hub:allegro:unsaved-stock-drafts-v2',
+          JSON.stringify(next),
+        )
+      } catch {
+        // A sessionStorage hiánya nem akadályozza a szerkesztést.
+      }
+
+      return next
+    })
+  }
 
   const [savingDesiredStock, setSavingDesiredStock] =
     useState<string | null>(null)
 
-  const [desiredStatusDrafts, setDesiredStatusDrafts] =
-    useState<Record<string, 'ACTIVE' | 'INACTIVE'>>({})
+  const [
+    desiredStatusDrafts,
+    setDesiredStatusDraftsState,
+  ] = useState<
+    Record<string, 'ACTIVE' | 'INACTIVE'>
+  >(() => {
+    try {
+      const stored = window.sessionStorage.getItem(
+        'commerce-hub:allegro:unsaved-status-drafts-v2',
+      )
+
+      return stored
+        ? (JSON.parse(stored) as Record<
+            string,
+            'ACTIVE' | 'INACTIVE'
+          >)
+        : {}
+    } catch {
+      return {}
+    }
+  })
+
+  const setDesiredStatusDrafts = (
+    update:
+      | Record<string, 'ACTIVE' | 'INACTIVE'>
+      | ((
+          current: Record<
+            string,
+            'ACTIVE' | 'INACTIVE'
+          >,
+        ) => Record<
+          string,
+          'ACTIVE' | 'INACTIVE'
+        >),
+  ) => {
+    setDesiredStatusDraftsState((current) => {
+      const next =
+        typeof update === 'function'
+          ? update(current)
+          : {
+              ...update,
+              ...current,
+            }
+
+      try {
+        window.sessionStorage.setItem(
+          'commerce-hub:allegro:unsaved-status-drafts-v2',
+          JSON.stringify(next),
+        )
+      } catch {
+        // A sessionStorage hiánya nem akadályozza a szerkesztést.
+      }
+
+      return next
+    })
+  }
 
   const [savingDesiredStatus, setSavingDesiredStatus] =
     useState<string | null>(null)
+
+  const [listingSearch, setListingSearch] =
+    useState('')
+
+  const [listingFilter, setListingFilter] =
+    useState<
+      | 'ALL'
+      | 'DIFFERENT'
+      | 'UNSAVED'
+      | 'ACTIVE'
+      | 'INACTIVE'
+      | 'ENDED'
+    >('ALL')
 
   const [selectedListingIds, setSelectedListingIds] =
     useState<string[]>([])
 
   const [bulkSyncing, setBulkSyncing] =
     useState(false)
+  const [bulkSavingDesiredChanges, setBulkSavingDesiredChanges] = useState(false)
 
   const [syncingWholeListingId, setSyncingWholeListingId] =
     useState<string | null>(null)
@@ -257,18 +775,28 @@ function HomePage({
           platformResponse,
           productResponse,
           allegroResponse,
+          priceHistoryResponse,
+          priceSchedulesResponse,
         ] = await Promise.all([
           fetch('http://localhost:3000/health'),
           fetch('http://localhost:3000/platforms'),
           fetch('http://localhost:3000/products'),
           fetch('http://localhost:3000/allegro/listings'),
+          fetch(
+            'http://localhost:3000/allegro/listing-price-history-summary',
+          ),
+          fetch(
+            'http://localhost:3000/allegro/listing-price-schedules',
+          ),
         ])
 
         if (
           !healthResponse.ok ||
           !platformResponse.ok ||
           !productResponse.ok ||
-          !allegroResponse.ok
+          !allegroResponse.ok ||
+          !priceHistoryResponse.ok ||
+          !priceSchedulesResponse.ok
         ) {
           throw new Error('API request failed')
         }
@@ -285,10 +813,45 @@ function HomePage({
         const allegroData =
           (await allegroResponse.json()) as AllegroListingResponse
 
+        const priceHistoryData =
+          (await priceHistoryResponse.json()) as PriceHistorySummaryResponse
+
+        const priceSchedulesData =
+          (await priceSchedulesResponse.json()) as ListingPriceScheduleResponse
+
         setApiHealth(healthData)
         setPlatforms(platformData.data)
         setProducts(productData.data)
         setAllegroListings(allegroData.data)
+
+        setPriceHistoryByListing(
+          Object.fromEntries(
+            priceHistoryData.data.map((row) => [
+              row.listingId,
+              row,
+            ]),
+          ),
+        )
+
+        setPriceSchedulesByListing(
+          priceSchedulesData.data.reduce<
+            Record<string, ListingPriceSchedule[]>
+          >((result, schedule) => {
+            const current =
+              result[schedule.listingId] ?? []
+
+            result[schedule.listingId] = [
+              ...current,
+              schedule,
+            ].sort(
+              (left, right) =>
+                new Date(left.validFrom).getTime() -
+                new Date(right.validFrom).getTime(),
+            )
+
+            return result
+          }, {}),
+        )
 
         try {
           const importIssuesResponse = await fetch(
@@ -309,27 +872,7 @@ function HomePage({
           setAllegroImportIssues([])
         }
 
-        setDesiredPriceDrafts(
-          Object.fromEntries(
-            allegroData.data.map((listing) => [
-              listing.id,
-              listing.desiredPriceMinor !== null
-                ? String(listing.desiredPriceMinor / 100)
-                : '',
-            ]),
-          ),
-        )
 
-        setDesiredStockDrafts(
-          Object.fromEntries(
-            allegroData.data.map((listing) => [
-              listing.id,
-              listing.desiredStock !== null
-                ? String(listing.desiredStock)
-                : '',
-            ]),
-          ),
-        )
       } catch (error) {
         console.error(
           'Commerce Hub data loading failed:',
@@ -397,29 +940,7 @@ function HomePage({
 
       setAllegroListings(listingsData.data)
 
-      setDesiredPriceDrafts(
-        Object.fromEntries(
-          listingsData.data.map((listing) => [
-            listing.id,
-            listing.desiredPriceMinor !== null
-              ? String(
-                  listing.desiredPriceMinor / 100,
-                )
-              : '',
-          ]),
-        ),
-      )
 
-      setDesiredStockDrafts(
-        Object.fromEntries(
-          listingsData.data.map((listing) => [
-            listing.id,
-            listing.desiredStock !== null
-              ? String(listing.desiredStock)
-              : '',
-          ]),
-        ),
-      )
 
       if (issuesResponse.ok) {
         const issuesData =
@@ -515,12 +1036,13 @@ function HomePage({
         ),
       )
 
-      setDesiredPriceDrafts((current) => ({
-        ...current,
-        [listing.id]: String(
-          result.data.desiredPriceMinor / 100,
-        ),
-      }))
+      setDesiredPriceDrafts((current) => {
+        const next = { ...current }
+        delete next[listing.id]
+        return next
+      })
+
+      return true
     } catch (error) {
       console.error(
         'Desired price save failed:',
@@ -530,6 +1052,8 @@ function HomePage({
       window.alert(
         'Nem sikerült elmenteni a kívánt árat.',
       )
+
+      return false
     } finally {
       setSavingDesiredPrice(null)
     }
@@ -596,12 +1120,13 @@ function HomePage({
         ),
       )
 
-      setDesiredStockDrafts((current) => ({
-        ...current,
-        [listing.id]: String(
-          result.data.desiredStock,
-        ),
-      }))
+      setDesiredStockDrafts((current) => {
+        const next = { ...current }
+        delete next[listing.id]
+        return next
+      })
+
+      return true
     } catch (error) {
       console.error(
         'Desired stock save failed:',
@@ -611,6 +1136,8 @@ function HomePage({
       window.alert(
         'Nem sikerült elmenteni a kívánt készletet.',
       )
+
+      return false
     } finally {
       setSavingDesiredStock(null)
     }
@@ -673,11 +1200,13 @@ function HomePage({
         ),
       )
 
-      setDesiredStatusDrafts((current) => ({
-        ...current,
-        [listing.id]:
-          result.data.desiredPublicationStatus,
-      }))
+      setDesiredStatusDrafts((current) => {
+        const next = { ...current }
+        delete next[listing.id]
+        return next
+      })
+
+      return true
     } catch (error) {
       console.error(
         'Desired publication status save failed:',
@@ -687,10 +1216,617 @@ function HomePage({
       window.alert(
         'Nem sikerült elmenteni a kívánt státuszt.',
       )
+
+      return false
     } finally {
       setSavingDesiredStatus(null)
     }
   }
+  const getStoredDesiredStatus = (
+    listing: AllegroListing,
+  ): 'ACTIVE' | 'INACTIVE' =>
+    listing.desiredPublicationStatus === 'ACTIVE' ||
+    listing.desiredPublicationStatus === 'INACTIVE'
+      ? listing.desiredPublicationStatus
+      : listing.publicationStatus === 'ACTIVE' ||
+          listing.publicationStatus === 'ACTIVATING'
+        ? 'ACTIVE'
+        : 'INACTIVE'
+
+  const hasUnsavedDesiredPrice = (
+    listing: AllegroListing,
+  ) => {
+    const draft = desiredPriceDrafts[listing.id]
+
+    if (draft === undefined) {
+      return false
+    }
+
+    if (draft.trim() === '') {
+      return true
+    }
+
+    const value = Number(draft.replace(',', '.'))
+
+    if (!Number.isFinite(value)) {
+      return true
+    }
+
+    return (
+      Math.round(value * 100) !==
+      listing.desiredPriceMinor
+    )
+  }
+
+  const hasUnsavedDesiredStock = (
+    listing: AllegroListing,
+  ) => {
+    const draft = desiredStockDrafts[listing.id]
+
+    if (draft === undefined) {
+      return false
+    }
+
+    if (draft.trim() === '') {
+      return true
+    }
+
+    const value = Number(draft)
+
+    if (!Number.isInteger(value)) {
+      return true
+    }
+
+    return value !== listing.desiredStock
+  }
+
+  const hasUnsavedDesiredStatus = (
+    listing: AllegroListing,
+  ) => {
+    const storedStatus = getStoredDesiredStatus(listing)
+
+    const draft =
+      desiredStatusDrafts[listing.id] ??
+      storedStatus
+
+    return draft !== storedStatus
+  }
+
+  const changedListingsCount =
+    allegroListings.filter(
+      (listing) =>
+        (listing.desiredPriceMinor !== null &&
+          listing.priceMinor !==
+            listing.desiredPriceMinor) ||
+        (listing.desiredStock !== null &&
+          listing.stockAvailable !==
+            listing.desiredStock) ||
+        hasPublicationDifference(listing),
+    ).length
+  const unsavedDesiredListings =
+    allegroListings.filter(
+      (listing) =>
+        hasUnsavedDesiredPrice(listing) ||
+        hasUnsavedDesiredStock(listing) ||
+        hasUnsavedDesiredStatus(listing),
+    )
+
+  const unsavedDesiredChangesCount =
+    unsavedDesiredListings.length
+
+  const saveAllDesiredChanges = async () => {
+    if (unsavedDesiredChangesCount === 0) {
+      return
+    }
+
+    for (const listing of unsavedDesiredListings) {
+      if (hasUnsavedDesiredPrice(listing)) {
+        const draft =
+          desiredPriceDrafts[listing.id] ?? ''
+
+        const value = Number(
+          draft.replace(',', '.'),
+        )
+
+        if (
+          draft.trim() === '' ||
+          !Number.isFinite(value) ||
+          value < 0
+        ) {
+          window.alert(
+            `Érvénytelen kívánt ár ennél az ajánlatnál: ${listing.id}`,
+          )
+          return
+        }
+      }
+
+      if (hasUnsavedDesiredStock(listing)) {
+        const draft =
+          desiredStockDrafts[listing.id] ?? ''
+
+        const value = Number(draft)
+
+        if (
+          draft.trim() === '' ||
+          !Number.isInteger(value) ||
+          value < 0
+        ) {
+          window.alert(
+            `Érvénytelen kívánt készlet ennél az ajánlatnál: ${listing.id}`,
+          )
+          return
+        }
+      }
+    }
+
+    const confirmed = window.confirm(
+      `${unsavedDesiredChangesCount} ajánlatnál van nem mentett módosítás.
+
+Elmented ezeket a Commerce Hubba?`,
+    )
+
+    if (!confirmed) {
+      return
+    }
+
+    setBulkSavingDesiredChanges(true)
+
+    let succeeded = 0
+    let failed = 0
+
+    try {
+      for (const listing of unsavedDesiredListings) {
+        let listingSucceeded = true
+
+        if (hasUnsavedDesiredPrice(listing)) {
+          const saved =
+            await saveDesiredPrice(listing)
+
+          if (saved !== true) {
+            listingSucceeded = false
+          }
+        }
+
+        if (hasUnsavedDesiredStock(listing)) {
+          const saved =
+            await saveDesiredStock(listing)
+
+          if (saved !== true) {
+            listingSucceeded = false
+          }
+        }
+
+        if (hasUnsavedDesiredStatus(listing)) {
+          const saved =
+            await saveDesiredStatus(listing)
+
+          if (saved !== true) {
+            listingSucceeded = false
+          }
+        }
+
+        if (listingSucceeded) {
+          succeeded += 1
+        } else {
+          failed += 1
+        }
+      }
+
+      window.alert(
+        `Mentés kész.
+
+Sikeres: ${succeeded}
+Hibás: ${failed}`,
+      )
+    } finally {
+      setBulkSavingDesiredChanges(false)
+    }
+  }
+  const loadPriceSchedules = async () => {
+    const response = await fetch(
+      'http://localhost:3000/allegro/listing-price-schedules',
+    )
+
+    const result =
+      (await response.json()) as ListingPriceScheduleResponse & {
+        message?: string
+      }
+
+    if (!response.ok) {
+      throw new Error(
+        result.message ??
+          'Nem sikerült betölteni az időszakos árakat.',
+      )
+    }
+
+    setPriceSchedulesByListing(
+      result.data.reduce<
+        Record<string, ListingPriceSchedule[]>
+      >((current, schedule) => {
+        const schedules =
+          current[schedule.listingId] ?? []
+
+        current[schedule.listingId] = [
+          ...schedules,
+          schedule,
+        ].sort(
+          (left, right) =>
+            new Date(left.validFrom).getTime() -
+            new Date(right.validFrom).getTime(),
+        )
+
+        return current
+      }, {}),
+    )
+  }
+
+  const resetPriceScheduleDraft = () => {
+    setEditingPriceScheduleId(null)
+    setSchedulePriceDraft('')
+    setScheduleValidFromDraft('')
+    setScheduleValidFromTimeDraft('00:00')
+    setScheduleValidToDraft('')
+    setScheduleValidToTimeDraft('23:59')
+    setPriceScheduleError(null)
+  }
+
+  const openPriceScheduleDialog = (
+    listing: AllegroListing,
+  ) => {
+    resetPriceScheduleDraft()
+    setPriceScheduleDialogListingId(listing.id)
+  }
+
+  const closePriceScheduleDialog = () => {
+    setPriceScheduleDialogListingId(null)
+    resetPriceScheduleDraft()
+  }
+
+  const editPriceSchedule = (
+    schedule: ListingPriceSchedule,
+  ) => {
+    const from = toBudapestInputParts(
+      schedule.validFrom,
+    )
+
+    const to = toBudapestInputParts(
+      schedule.validTo,
+    )
+
+    setEditingPriceScheduleId(schedule.id)
+    setSchedulePriceDraft(
+      String(schedule.promotionalPriceMinor / 100),
+    )
+    setScheduleValidFromDraft(from.date)
+    setScheduleValidFromTimeDraft(from.time)
+    setScheduleValidToDraft(to.date)
+    setScheduleValidToTimeDraft(to.time)
+    setPriceScheduleError(null)
+  }
+
+  const isEditingActivePriceSchedule = (
+    listingId: string,
+  ) => {
+    if (editingPriceScheduleId === null) {
+      return false
+    }
+
+    const schedule =
+      (
+        priceSchedulesByListing[listingId] ??
+        []
+      ).find(
+        (item) =>
+          item.id === editingPriceScheduleId,
+      )
+
+    return (
+      schedule?.startAppliedAt !== null &&
+      schedule?.startAppliedAt !== undefined &&
+      schedule.endAppliedAt === null
+    )
+  }
+
+  const savePriceSchedule = async (
+    listing: AllegroListing,
+  ) => {
+    setPriceScheduleError(null)
+
+    const promotionalPrice = Number(
+      schedulePriceDraft.replace(',', '.'),
+    )
+
+    if (
+      !Number.isFinite(promotionalPrice) ||
+      promotionalPrice <= 0
+    ) {
+      setPriceScheduleError(
+        'Adj meg egy érvényes kedvezményes árat.',
+      )
+      return
+    }
+
+    if (
+      listing.desiredPriceMinor !== null &&
+      Math.round(promotionalPrice * 100) >=
+        listing.desiredPriceMinor
+    ) {
+      setPriceScheduleError(
+        'A kedvezményes árnak alacsonyabbnak kell lennie a normál kívánt árnál.',
+      )
+      return
+    }
+
+    if (
+      !scheduleValidFromDraft ||
+      !scheduleValidFromTimeDraft ||
+      !scheduleValidToDraft ||
+      !scheduleValidToTimeDraft
+    ) {
+      setPriceScheduleError(
+        'Add meg a kedvezmény teljes időszakát.',
+      )
+      return
+    }
+
+    const validFrom = budapestLocalToIso(
+      scheduleValidFromDraft,
+      scheduleValidFromTimeDraft,
+    )
+
+    const validTo = budapestLocalToIso(
+      scheduleValidToDraft,
+      scheduleValidToTimeDraft,
+    )
+
+    if (
+      new Date(validTo).getTime() <=
+      new Date(validFrom).getTime()
+    ) {
+      setPriceScheduleError(
+        'A befejezésnek később kell lennie a kezdésnél.',
+      )
+      return
+    }
+
+    setSavingPriceSchedule(true)
+
+    try {
+      const editing =
+        editingPriceScheduleId !== null
+
+      const editingActive =
+        isEditingActivePriceSchedule(
+          listing.id,
+        )
+
+      const response = await fetch(
+        editing
+          ? `http://localhost:3000/auth/allegro/price-schedule/${editingPriceScheduleId}`
+          : 'http://localhost:3000/allegro/listing-price-schedules',
+        {
+          method: editing ? 'PATCH' : 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            ...(editing
+              ? {}
+              : { listingId: listing.id }),
+            promotionalPrice,
+            ...(editingActive ? {} : { validFrom }),
+            validTo,
+            ...(editing ? {} : { enabled: true }),
+          }),
+        },
+      )
+
+      const result = (await response.json()) as {
+        status: string
+        message?: string
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          result.message ??
+            'Az időszakos kedvezmény mentése sikertelen.',
+        )
+      }
+
+      await loadPriceSchedules()
+
+      if (editingActive) {
+        await refreshAllegroData()
+      }
+      resetPriceScheduleDraft()
+    } catch (error) {
+      console.error(
+        'Price schedule save failed:',
+        error,
+      )
+
+      setPriceScheduleError(
+        error instanceof Error
+          ? error.message
+          : 'Az időszakos kedvezmény mentése sikertelen.',
+      )
+    } finally {
+      setSavingPriceSchedule(false)
+    }
+  }
+
+  const deletePriceSchedule = async (
+    schedule: ListingPriceSchedule,
+  ) => {
+    const isActive =
+      schedule.startAppliedAt !== null &&
+      schedule.endAppliedAt === null
+
+    const confirmed = window.confirm(
+      isActive
+        ? 'Biztosan törlöd az aktív kedvezményt? Az Allegro ár automatikusan visszaáll a kívánt árra.'
+        : 'Biztosan törlöd ezt az időszakos kedvezményt?',
+    )
+
+    if (!confirmed) {
+      return
+    }
+
+    setDeletingPriceScheduleId(schedule.id)
+    setPriceScheduleError(null)
+
+    try {
+      const response = await fetch(
+        `http://localhost:3000/auth/allegro/price-schedule/${schedule.id}`,
+        { method: 'DELETE' },
+      )
+
+      const result = (await response.json()) as {
+        status: string
+        message?: string
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          result.message ??
+            'Az időszakos kedvezmény törlése sikertelen.',
+        )
+      }
+
+      await loadPriceSchedules()
+
+      if (isActive) {
+        await refreshAllegroData()
+      }
+
+      if (
+        editingPriceScheduleId === schedule.id
+      ) {
+        resetPriceScheduleDraft()
+      }
+    } catch (error) {
+      console.error(
+        'Price schedule deletion failed:',
+        error,
+      )
+
+      setPriceScheduleError(
+        error instanceof Error
+          ? error.message
+          : 'Az időszakos kedvezmény törlése sikertelen.',
+      )
+    } finally {
+      setDeletingPriceScheduleId(null)
+    }
+  }
+
+  const normalizedListingSearch =
+    listingSearch.trim().toLowerCase()
+
+  const searchedAllegroListings =
+    allegroListings.filter((listing) => {
+      if (normalizedListingSearch === '') {
+        return true
+      }
+
+      const searchableText = [
+        listing.sku,
+        listing.productName,
+        listing.offerId,
+      ]
+        .map((value) =>
+          String(value ?? '').toLowerCase(),
+        )
+        .join(' ')
+
+      return searchableText.includes(
+        normalizedListingSearch,
+      )
+    })
+
+  const searchedDifferentListingsCount =
+    searchedAllegroListings.filter(
+      (listing) =>
+        (listing.desiredPriceMinor !== null &&
+          listing.priceMinor !==
+            listing.desiredPriceMinor) ||
+        (listing.desiredStock !== null &&
+          listing.stockAvailable !==
+            listing.desiredStock) ||
+        hasPublicationDifference(listing),
+    ).length
+
+  const searchedUnsavedListingsCount =
+    searchedAllegroListings.filter(
+      (listing) =>
+        hasUnsavedDesiredPrice(listing) ||
+        hasUnsavedDesiredStock(listing) ||
+        hasUnsavedDesiredStatus(listing),
+    ).length
+
+  const searchedActiveListingsCount =
+    searchedAllegroListings.filter(
+      (listing) =>
+        listing.publicationStatus === 'ACTIVE' ||
+        listing.publicationStatus === 'ACTIVATING',
+    ).length
+
+  const searchedInactiveListingsCount =
+    searchedAllegroListings.filter(
+      (listing) =>
+        listing.publicationStatus === 'INACTIVE',
+    ).length
+
+  const searchedEndedListingsCount =
+    searchedAllegroListings.filter(
+      (listing) =>
+        listing.publicationStatus === 'ENDED',
+    ).length
+
+  const filteredAllegroListings =
+    searchedAllegroListings.filter((listing) => {
+      switch (listingFilter) {
+        case 'DIFFERENT':
+          return (
+            (listing.desiredPriceMinor !== null &&
+              listing.priceMinor !==
+                listing.desiredPriceMinor) ||
+            (listing.desiredStock !== null &&
+              listing.stockAvailable !==
+                listing.desiredStock) ||
+            hasPublicationDifference(listing)
+          )
+
+        case 'UNSAVED':
+          return (
+            hasUnsavedDesiredPrice(listing) ||
+            hasUnsavedDesiredStock(listing) ||
+            hasUnsavedDesiredStatus(listing)
+          )
+
+        case 'ACTIVE':
+          return (
+            listing.publicationStatus === 'ACTIVE' ||
+            listing.publicationStatus ===
+              'ACTIVATING'
+          )
+
+        case 'INACTIVE':
+          return (
+            listing.publicationStatus ===
+            'INACTIVE'
+          )
+
+        case 'ENDED':
+          return (
+            listing.publicationStatus === 'ENDED'
+          )
+
+        case 'ALL':
+        default:
+          return true
+      }
+    })
   const toggleListingSelection = (
     listingId: string,
   ) => {
@@ -702,24 +1838,24 @@ function HomePage({
   }
 
   const toggleAllListings = () => {
-    const allSelected =
-      allegroListings.length > 0 &&
-      allegroListings.every((listing) =>
+    const allVisibleSelected =
+      filteredAllegroListings.length > 0 &&
+      filteredAllegroListings.every((listing) =>
         selectedListingIds.includes(listing.id),
       )
 
     setSelectedListingIds(
-      allSelected
+      allVisibleSelected
         ? []
-        : allegroListings.map(
+        : filteredAllegroListings.map(
             (listing) => listing.id,
           ),
     )
   }
 
   const allListingsSelected =
-    allegroListings.length > 0 &&
-    allegroListings.every((listing) =>
+    filteredAllegroListings.length > 0 &&
+    filteredAllegroListings.every((listing) =>
       selectedListingIds.includes(listing.id),
     )
 
@@ -968,27 +2104,7 @@ ${changes.join('\n')}`,
 
       setAllegroListings(listingData.data)
 
-      setDesiredPriceDrafts(
-        Object.fromEntries(
-          listingData.data.map((item) => [
-            item.id,
-            item.desiredPriceMinor !== null
-              ? String(item.desiredPriceMinor / 100)
-              : '',
-          ]),
-        ),
-      )
 
-      setDesiredStockDrafts(
-        Object.fromEntries(
-          listingData.data.map((item) => [
-            item.id,
-            item.desiredStock !== null
-              ? String(item.desiredStock)
-              : '',
-          ]),
-        ),
-      )
 
       window.alert('Az ajánlat sikeresen szinkronizálva.')
     } catch (error) {
@@ -1067,7 +2183,7 @@ ${changes.join('\n')}`,
               <span>
                 {loading
                   ? 'Betöltés...'
-                  : `${allegroListings.length} ajánlat`}
+                  : `${filteredAllegroListings.length} / ${allegroListings.length} ajánlat`}
               </span>
 
               <button
@@ -1124,6 +2240,118 @@ ${changes.join('\n')}`,
               </div>
             </div>
           )}
+          <div className="listing-filter-panel">
+            <div className="listing-search-wrapper">
+              <input
+                className="listing-search-input"
+                type="search"
+                value={listingSearch}
+                placeholder="Cikkszám, terméknév vagy Offer ID..."
+                onChange={(event) => {
+                  setListingSearch(
+                    event.target.value,
+                  )
+                  setSelectedListingIds([])
+                }}
+              />
+            </div>
+
+            <div
+              className="listing-filter-chips"
+              aria-label="Ajánlat szűrők"
+            >
+              <button
+                className={
+                  listingFilter === 'ALL'
+                    ? 'listing-filter-chip active'
+                    : 'listing-filter-chip'
+                }
+                type="button"
+                onClick={() => {
+                  setListingFilter('ALL')
+                  setSelectedListingIds([])
+                }}
+              >
+                Összes ({searchedAllegroListings.length})
+              </button>
+
+              <button
+                className={
+                  listingFilter === 'DIFFERENT'
+                    ? 'listing-filter-chip active'
+                    : 'listing-filter-chip'
+                }
+                type="button"
+                onClick={() => {
+                  setListingFilter('DIFFERENT')
+                  setSelectedListingIds([])
+                }}
+              >
+                Eltérő ({searchedDifferentListingsCount})
+              </button>
+
+              <button
+                className={
+                  listingFilter === 'UNSAVED'
+                    ? 'listing-filter-chip active'
+                    : 'listing-filter-chip'
+                }
+                type="button"
+                onClick={() => {
+                  setListingFilter('UNSAVED')
+                  setSelectedListingIds([])
+                }}
+              >
+                Nem mentett ({searchedUnsavedListingsCount})
+              </button>
+
+              <button
+                className={
+                  listingFilter === 'ACTIVE'
+                    ? 'listing-filter-chip active'
+                    : 'listing-filter-chip'
+                }
+                type="button"
+                onClick={() => {
+                  setListingFilter('ACTIVE')
+                  setSelectedListingIds([])
+                }}
+              >
+                Aktív ({searchedActiveListingsCount})
+              </button>
+
+              <button
+                className={
+                  listingFilter === 'INACTIVE'
+                    ? 'listing-filter-chip active'
+                    : 'listing-filter-chip'
+                }
+                type="button"
+                onClick={() => {
+                  setListingFilter('INACTIVE')
+                  setSelectedListingIds([])
+                }}
+              >
+                Inaktív ({searchedInactiveListingsCount})
+              </button>
+
+              <button
+                className={
+                  listingFilter === 'ENDED'
+                    ? 'listing-filter-chip active'
+                    : 'listing-filter-chip'
+                }
+                type="button"
+                onClick={() => {
+                  setListingFilter('ENDED')
+                  setSelectedListingIds([])
+                }}
+              >
+                Lejárt ({searchedEndedListingsCount})
+              </button>
+            </div>
+          </div>
+
           <div className="bulk-toolbar">
             <label className="select-all-control">
               <input
@@ -1131,20 +2359,41 @@ ${changes.join('\n')}`,
                 checked={allListingsSelected}
                 onChange={toggleAllListings}
               />
-              <span>Összes kijelölése</span>
+              <span>Láthatók kijelölése</span>
             </label>
 
             <div className="bulk-toolbar-right">
               <span>
-                {selectedListingIds.length} kijelölve
+                {selectedListingIds.length} kijelölve ·{' '}
+                {changedListingsCount} eltérő ajánlat ·{' '}
+                {unsavedDesiredChangesCount} nem mentett
               </span>
+
+                <button
+                  className="bulk-sync-button bulk-save-button"
+                  type="button"
+                  disabled={
+                    unsavedDesiredChangesCount === 0 ||
+                    bulkSavingDesiredChanges ||
+                    bulkSyncing
+                  }
+                  onClick={() =>
+                    void saveAllDesiredChanges()
+                  }
+                >
+                  {bulkSavingDesiredChanges
+                    ? 'Mentés...'
+                    : `Módosítások mentése (${unsavedDesiredChangesCount})`}
+                </button>
 
                 <button
                   className="bulk-sync-button"
                   type="button"
                   disabled={
                     selectedListingIds.length === 0 ||
-                    bulkSyncing
+                    selectedChangedListingsCount === 0 ||
+                    bulkSyncing ||
+                    bulkSavingDesiredChanges
                   }
                   onClick={() =>
                     void syncSelectedListingsToAllegro()
@@ -1176,8 +2425,24 @@ ${changes.join('\n')}`,
               </thead>
 
               <tbody>
-                {allegroListings.map((listing) => (
-                  <tr key={listing.id}>
+                {filteredAllegroListings.map((listing) => (
+                  <tr
+                    key={listing.id}
+                    className={[
+                      selectedListingIds.includes(
+                        listing.id,
+                      )
+                        ? 'allegro-row-selected'
+                        : '',
+                      hasUnsavedDesiredPrice(listing) ||
+                      hasUnsavedDesiredStock(listing) ||
+                      hasUnsavedDesiredStatus(listing)
+                        ? 'allegro-row-unsaved'
+                        : '',
+                    ]
+                      .filter(Boolean)
+                      .join(' ')}
+                  >
                       <td className="selection-column">
                         <input
                           type="checkbox"
@@ -1205,12 +2470,13 @@ ${changes.join('\n')}`,
                     <td className="management-cell">
                       <div className="management-current">
                         <span className="management-label">
-                          Aktuális
+                          Alapár
                         </span>
 
                         <strong>
                           {formatMoney(
-                            listing.priceMinor,
+                            listing.desiredPriceMinor ??
+                              listing.priceMinor,
                             listing.currency,
                           )}
                         </strong>
@@ -1231,7 +2497,12 @@ ${changes.join('\n')}`,
                               value={
                                 desiredPriceDrafts[
                                   listing.id
-                                ] ?? ''
+                                ] ??
+                                (listing.desiredPriceMinor !== null
+                                  ? String(
+                                      listing.desiredPriceMinor / 100,
+                                    )
+                                  : '')
                               }
                               onChange={(event) =>
                                 setDesiredPriceDrafts(
@@ -1247,26 +2518,508 @@ ${changes.join('\n')}`,
                             <span>Ft</span>
                           </div>
 
-                          <button
-                            className="save-price-button"
-                            type="button"
-                            disabled={
-                              savingDesiredPrice ===
-                              listing.id
-                            }
-                            onClick={() =>
-                              void saveDesiredPrice(
-                                listing,
-                              )
-                            }
-                          >
-                            {savingDesiredPrice ===
-                            listing.id
-                              ? 'Mentés...'
-                              : 'Mentés'}
-                          </button>
+                          
                         </div>
                       </div>
+
+                      <div className="price-schedule-trigger">
+                        {(() => {
+                          const relevantSchedule =
+                            getRelevantPriceSchedule(
+                              priceSchedulesByListing[
+                                listing.id
+                              ] ?? [],
+                            )
+
+                          return relevantSchedule ? (
+                            <div className="price-schedule-compact">
+                              <div className="price-schedule-compact-main">
+                                <span className="price-schedule-discount-label">
+                                  Kedvezményes ár
+                                </span>
+
+                                <strong>
+                                  {formatMoney(
+                                    relevantSchedule.promotionalPriceMinor,
+                                    listing.currency,
+                                  )}
+                                </strong>
+                              </div>
+
+                              <span className="price-schedule-period">
+                                {formatPriceScheduleDateTime(
+                                  relevantSchedule.validFrom,
+                                )}
+                                {' – '}
+                                {formatPriceScheduleDateTime(
+                                  relevantSchedule.validTo,
+                                )}
+                              </span>
+                            </div>
+                          ) : null
+                        })()}
+
+                        <button
+                          className="price-schedule-open-button"
+                          type="button"
+                          onClick={() =>
+                            openPriceScheduleDialog(listing)
+                          }
+                        >
+                          {(priceSchedulesByListing[
+                            listing.id
+                          ] ?? []).some(
+                            (schedule) =>
+                              schedule.scheduleStatus ===
+                                'ACTIVE' ||
+                              schedule.scheduleStatus ===
+                                'SCHEDULED',
+                          )
+                            ? 'Kedvezmény kezelése'
+                            : '+ Időszakos kedvezmény'}
+                        </button>
+                      </div>
+
+                      {priceScheduleDialogListingId ===
+                        listing.id && (
+                        <div
+                          className="price-schedule-overlay"
+                          role="presentation"
+                          onMouseDown={closePriceScheduleDialog}
+                        >
+                          <div
+                            className="price-schedule-modal"
+                            role="dialog"
+                            aria-modal="true"
+                            aria-label="Időszakos kedvezmény"
+                            onMouseDown={(event) =>
+                              event.stopPropagation()
+                            }
+                          >
+                            <div className="price-schedule-modal-header">
+                              <div>
+                                <span className="price-schedule-eyebrow">
+                                  {listing.sku}
+                                </span>
+                                <h3>
+                                  Időszakos kedvezmény
+                                </h3>
+                                <p>
+                                  {listing.productName}
+                                </p>
+                              </div>
+
+                              <button
+                                className="price-schedule-close"
+                                type="button"
+                                aria-label="Bezárás"
+                                onClick={closePriceScheduleDialog}
+                              >
+                                ×
+                              </button>
+                            </div>
+
+                            <div className="price-schedule-reference-grid">
+                              <div className="price-schedule-reference-card">
+                                <span>
+                                  Normál ár
+                                </span>
+                                <strong>
+                                  {formatMoney(
+                                    listing.desiredPriceMinor,
+                                    listing.currency,
+                                  )}
+                                </strong>
+                              </div>
+
+                              <div className="price-schedule-reference-card">
+                                <span>
+                                  30 napos minimum
+                                </span>
+                                <strong>
+                                  {formatMoney(
+                                    priceHistoryByListing[
+                                      listing.id
+                                    ]?.min30PriceMinor ??
+                                      null,
+                                    listing.currency,
+                                  )}
+                                </strong>
+
+                                {priceHistoryByListing[
+                                  listing.id
+                                ] && (
+                                  <small>
+                                    {priceHistoryByListing[
+                                      listing.id
+                                    ].hasFull30DayWindow
+                                      ? '30 nap teljes'
+                                      : `${priceHistoryByListing[
+                                          listing.id
+                                        ].coverageDayCount}/30 nap historika`}
+                                  </small>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="price-schedule-form">
+                              <label className="price-schedule-field">
+                                <span>
+                                  Kedvezményes ár
+                                </span>
+
+                                <div className="price-schedule-price-input">
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    step="1"
+                                    placeholder="Pl. 16990"
+                                    value={schedulePriceDraft}
+                                    onChange={(event) =>
+                                      setSchedulePriceDraft(
+                                        event.target.value,
+                                      )
+                                    }
+                                  />
+                                  <span>Ft</span>
+                                </div>
+                              </label>
+
+                              <div className="price-schedule-analysis">
+                                <div>
+                                  <span>Kedvezmény</span>
+                                  <strong>
+                                    {formatPriceScheduleDiscount(
+                                      listing.desiredPriceMinor,
+                                      schedulePriceDraft,
+                                    )}
+                                  </strong>
+                                </div>
+
+                                {(() => {
+                                  const control =
+                                    getPriceScheduleControl(
+                                      listing.desiredPriceMinor,
+                                      priceHistoryByListing[
+                                        listing.id
+                                      ]?.min30PriceMinor,
+                                      priceHistoryByListing[
+                                        listing.id
+                                      ]?.hasFull30DayWindow,
+                                      schedulePriceDraft,
+                                    )
+
+                                  return control ? (
+                                    <span
+                                      className={`price-schedule-control price-schedule-control-${control.tone}`}
+                                    >
+                                      {control.label}
+                                    </span>
+                                  ) : null
+                                })()}
+                              </div>
+
+                              <div className="price-schedule-period-grid">
+                                <label className="price-schedule-field">
+                                  <span>Kezdés</span>
+                                  <div className="price-schedule-date-time">
+                                    <input
+                                      type="date"
+                                      disabled={isEditingActivePriceSchedule(listing.id)}
+                                      onClick={(event) =>
+                                        event.currentTarget.showPicker()
+                                      }
+                                      value={scheduleValidFromDraft}
+                                      onChange={(event) =>
+                                        setScheduleValidFromDraft(
+                                          event.target.value,
+                                        )
+                                      }
+                                    />
+                                    <input
+                                      type="time"
+                                      disabled={isEditingActivePriceSchedule(listing.id)}
+                                      onClick={(event) =>
+                                        event.currentTarget.showPicker()
+                                      }
+                                      value={scheduleValidFromTimeDraft}
+                                      onChange={(event) =>
+                                        setScheduleValidFromTimeDraft(
+                                          event.target.value,
+                                        )
+                                      }
+                                    />
+                                  </div>
+                                </label>
+
+                                <label className="price-schedule-field">
+                                  <span>Vége</span>
+                                  <div className="price-schedule-date-time">
+                                    <input
+                                      type="date"
+                                      onClick={(event) =>
+                                        event.currentTarget.showPicker()
+                                      }
+                                      value={scheduleValidToDraft}
+                                      onChange={(event) =>
+                                        setScheduleValidToDraft(
+                                          event.target.value,
+                                        )
+                                      }
+                                    />
+                                    <input
+                                      type="time"
+                                      onClick={(event) =>
+                                        event.currentTarget.showPicker()
+                                      }
+                                      value={scheduleValidToTimeDraft}
+                                      onChange={(event) =>
+                                        setScheduleValidToTimeDraft(
+                                          event.target.value,
+                                        )
+                                      }
+                                    />
+                                  </div>
+                                </label>
+                              </div>
+
+                              {(() => {
+                                const promotionalPrice =
+                                  Number(
+                                    schedulePriceDraft.replace(
+                                      ',',
+                                      '.',
+                                    ),
+                                  )
+
+                                const promotionalPriceMinor =
+                                  Number.isFinite(
+                                    promotionalPrice,
+                                  ) &&
+                                  promotionalPrice > 0
+                                    ? Math.round(
+                                        promotionalPrice * 100,
+                                      )
+                                    : null
+
+                                if (
+                                  promotionalPriceMinor ===
+                                  null
+                                ) {
+                                  return null
+                                }
+
+                                return (
+                                  <div className="price-schedule-flow-summary">
+                                    <strong className="price-schedule-flow-title">
+                                      Árváltás összefoglaló
+                                    </strong>
+
+                                    <div className="price-schedule-flow-row">
+                                      <span>
+                                        Kezdéskor
+                                      </span>
+
+                                      <div className="price-schedule-flow-prices">
+                                        <span>
+                                          <small>
+                                            Normál ár
+                                          </small>
+                                          <strong>
+                                            {formatMoney(
+                                              listing.desiredPriceMinor,
+                                              listing.currency,
+                                            )}
+                                          </strong>
+                                        </span>
+
+                                        <strong className="price-schedule-flow-arrow">
+                                          →
+                                        </strong>
+
+                                        <span>
+                                          <small>
+                                            Kedvezményes ár
+                                          </small>
+                                          <strong>
+                                            {formatMoney(
+                                              promotionalPriceMinor,
+                                              listing.currency,
+                                            )}
+                                          </strong>
+                                        </span>
+                                      </div>
+                                    </div>
+
+                                    <div className="price-schedule-flow-row">
+                                      <span>
+                                        Lejáratkor
+                                      </span>
+
+                                      <div className="price-schedule-flow-prices">
+                                        <span>
+                                          <small>
+                                            Kedvezményes ár
+                                          </small>
+                                          <strong>
+                                            {formatMoney(
+                                              promotionalPriceMinor,
+                                              listing.currency,
+                                            )}
+                                          </strong>
+                                        </span>
+
+                                        <strong className="price-schedule-flow-arrow">
+                                          →
+                                        </strong>
+
+                                        <span>
+                                          <small>
+                                            Visszaáll erre
+                                          </small>
+                                          <strong>
+                                            {formatMoney(
+                                              listing.desiredPriceMinor,
+                                              listing.currency,
+                                            )}
+                                          </strong>
+                                        </span>
+                                      </div>
+                                    </div>
+                                  </div>
+                                )
+                              })()}
+
+                              {priceScheduleError && (
+                                <div className="price-schedule-error">
+                                  {priceScheduleError}
+                                </div>
+                              )}
+
+                              <div className="price-schedule-form-actions">
+                                {editingPriceScheduleId && (
+                                  <button
+                                    className="price-schedule-secondary-button"
+                                    type="button"
+                                    onClick={resetPriceScheduleDraft}
+                                  >
+                                    Új ütemezés
+                                  </button>
+                                )}
+
+                                <button
+                                  className="price-schedule-primary-button"
+                                  type="button"
+                                  disabled={savingPriceSchedule}
+                                  onClick={() =>
+                                    void savePriceSchedule(
+                                      listing,
+                                    )
+                                  }
+                                >
+                                  {savingPriceSchedule
+                                    ? 'Mentés...'
+                                    : editingPriceScheduleId
+                                      ? 'Módosítás mentése'
+                                      : 'Ütemezés mentése'}
+                                </button>
+                              </div>
+                            </div>
+
+                            {(priceSchedulesByListing[
+                              listing.id
+                            ] ?? []).some(
+                              (schedule) =>
+                                schedule.scheduleStatus !==
+                                  'EXPIRED',
+                            ) && (
+                              <div className="price-schedule-existing">
+                                <h4>
+                                  Beállított időszakok
+                                </h4>
+
+                                {(priceSchedulesByListing[
+                                  listing.id
+                                ] ?? [])
+                                  .filter(
+                                    (schedule) =>
+                                      schedule.scheduleStatus !==
+                                        'EXPIRED',
+                                  )
+                                  .map(
+                                    (schedule) => (
+                                    <div
+                                      className="price-schedule-existing-row"
+                                      key={schedule.id}
+                                    >
+                                      <div>
+                                        <div className="price-schedule-existing-main">
+                                          <strong>
+                                            {formatMoney(
+                                              schedule.promotionalPriceMinor,
+                                              listing.currency,
+                                            )}
+                                          </strong>
+                                          <span
+                                            className={`price-schedule-badge price-schedule-badge-${schedule.scheduleStatus.toLowerCase()}`}
+                                          >
+                                            {formatPriceScheduleStatus(
+                                              schedule.scheduleStatus,
+                                            )}
+                                          </span>
+                                        </div>
+
+                                        <small>
+                                          {formatPriceScheduleDateTime(
+                                            schedule.validFrom,
+                                          )}
+                                          {' – '}
+                                          {formatPriceScheduleDateTime(
+                                            schedule.validTo,
+                                          )}
+                                        </small>
+                                      </div>
+
+                                      <div className="price-schedule-existing-actions">
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            editPriceSchedule(
+                                              schedule,
+                                            )
+                                          }
+                                        >
+                                          Szerkesztés
+                                        </button>
+
+                                        <button
+                                          className="price-schedule-delete-button"
+                                          type="button"
+                                          disabled={
+                                            deletingPriceScheduleId ===
+                                              schedule.id
+                                          }
+                                          onClick={() =>
+                                            void deletePriceSchedule(
+                                              schedule,
+                                            )
+                                          }
+                                        >
+                                          {deletingPriceScheduleId ===
+                                          schedule.id
+                                            ? 'Törlés...'
+                                            : 'Törlés'}
+                                        </button>
+                                      </div>
+                                    </div>
+                                  ),
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
                     </td>
 
                     <td className="management-cell">
@@ -1295,7 +3048,12 @@ ${changes.join('\n')}`,
                               value={
                                 desiredStockDrafts[
                                   listing.id
-                                ] ?? ''
+                                ] ??
+                                (listing.desiredStock !== null
+                                  ? String(
+                                      listing.desiredStock,
+                                    )
+                                  : '')
                               }
                               onChange={(event) =>
                                 setDesiredStockDrafts(
@@ -1311,44 +3069,37 @@ ${changes.join('\n')}`,
                             <span>db</span>
                           </div>
 
-                          <button
-                            className="save-stock-button"
-                            type="button"
-                            disabled={
-                              savingDesiredStock ===
-                              listing.id
-                            }
-                            onClick={() =>
-                              void saveDesiredStock(
-                                listing,
-                              )
-                            }
-                          >
-                            {savingDesiredStock ===
-                            listing.id
-                              ? 'Mentés...'
-                              : 'Mentés'}
-                          </button>
+                          
                         </div>
                       </div>
                     </td>
 
                     <td>
-                      {listing.priceMinor ===
-                        listing.desiredPriceMinor &&
-                      listing.stockAvailable ===
-                        listing.desiredStock &&
-                      !hasPublicationDifference(
-                        listing,
-                      ) ? (
-                        <span className="sync-match">
-                          Rendben
-                        </span>
-                      ) : (
-                        <span className="sync-difference">
-                          Eltérés
-                        </span>
-                      )}
+                      <div className="difference-cell-content">
+                        {listing.priceMinor ===
+                          listing.desiredPriceMinor &&
+                        listing.stockAvailable ===
+                          listing.desiredStock &&
+                        !hasPublicationDifference(
+                          listing,
+                        ) ? (
+                          <span className="sync-match">
+                            Rendben
+                          </span>
+                        ) : (
+                          <span className="sync-difference">
+                            Eltérés
+                          </span>
+                        )}
+
+                        {(hasUnsavedDesiredPrice(listing) ||
+                          hasUnsavedDesiredStock(listing) ||
+                          hasUnsavedDesiredStatus(listing)) && (
+                          <span className="unsaved-badge">
+                            Nem mentett
+                          </span>
+                        )}
+                      </div>
                     </td>
 
 
@@ -1415,24 +3166,7 @@ ${changes.join('\n')}`,
                             </option>
                           </select>
 
-                          <button
-                            className="save-price-button"
-                            type="button"
-                            disabled={
-                              savingDesiredStatus ===
-                              listing.id
-                            }
-                            onClick={() =>
-                              void saveDesiredStatus(
-                                listing,
-                              )
-                            }
-                          >
-                            {savingDesiredStatus ===
-                            listing.id
-                              ? 'Mentés...'
-                              : 'Mentés'}
-                          </button>
+                          
                         </div>
                       </div>
                     </td>
@@ -1491,6 +3225,7 @@ ${changes.join('\n')}`,
       </div>
     )
   }
+
 
   return (
     <div className="app-shell">
@@ -1665,3 +3400,10 @@ ${changes.join('\n')}`,
 }
 
 export default HomePage
+
+
+
+
+
+
+

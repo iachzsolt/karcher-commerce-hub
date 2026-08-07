@@ -1,4 +1,4 @@
-import 'dotenv/config'
+﻿import 'dotenv/config'
 import { randomUUID } from 'node:crypto'
 import { serve } from '@hono/node-server'
 import {
@@ -7,6 +7,7 @@ import {
   listingCampaigns,
   listingDesiredStates,
   listingPriceHistory,
+  listingPriceSchedules,
   listingRemoteStates,
   platformAccounts,
   platformListings,
@@ -40,6 +41,86 @@ app.use(
 )
 
 app.route('/auth/allegro', allegroAuth)
+
+const PRICE_SCHEDULE_PROCESS_INTERVAL_MS =
+  60 * 1000
+
+let priceScheduleProcessorInFlight = false
+
+async function processPriceSchedulesAutomatically() {
+  if (priceScheduleProcessorInFlight) {
+    return
+  }
+
+  priceScheduleProcessorInFlight = true
+
+  try {
+    await refreshAllegroSessionIfNeeded()
+
+    const response =
+      await allegroAuth.request(
+        '/process-price-schedules',
+        {
+          method: 'POST',
+        },
+      )
+
+    const result =
+      (await response
+        .json()
+        .catch(() => null)) as
+        | {
+            status?: string
+            checked?: number
+            applied?: number
+            blocked?: number
+            failed?: number
+            skipped?: number
+          }
+        | null
+
+    if (!response.ok) {
+      console.warn(
+        'Automatic price schedule processing failed:',
+        {
+          status: response.status,
+          result,
+        },
+      )
+
+      return
+    }
+
+    if (
+      (result?.applied ?? 0) > 0 ||
+      (result?.failed ?? 0) > 0 ||
+      (result?.blocked ?? 0) > 0
+    ) {
+      console.log(
+        'Automatic price schedule processing:',
+        result,
+      )
+    }
+  } catch (error) {
+    console.error(
+      'Automatic price schedule processor error:',
+      error,
+    )
+  } finally {
+    priceScheduleProcessorInFlight = false
+  }
+}
+
+const priceScheduleProcessorTimer =
+  setInterval(
+    () => {
+      void processPriceSchedulesAutomatically()
+    },
+    PRICE_SCHEDULE_PROCESS_INTERVAL_MS,
+  )
+
+priceScheduleProcessorTimer.unref()
+
 
 const databaseUrl = process.env.DATABASE_URL
 
@@ -2558,6 +2639,842 @@ app.post('/allegro/listings/:id/campaigns', async (context) => {
     )
   }
 })
+app.get(
+  '/allegro/listing-price-schedules',
+  async (context) => {
+    if (!db) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Database is not configured',
+        },
+        500,
+      )
+    }
+
+    try {
+      const listingId =
+        context.req.query('listingId')?.trim()
+
+      const rows = listingId
+        ? await db
+            .select({
+              id: listingPriceSchedules.id,
+              listingId:
+                listingPriceSchedules.listingId,
+
+              promotionalPriceMinor:
+                listingPriceSchedules
+                  .promotionalPriceMinor,
+
+              validFrom:
+                listingPriceSchedules.validFrom,
+
+              validTo:
+                listingPriceSchedules.validTo,
+
+              enabled:
+                listingPriceSchedules.enabled,
+
+              startAppliedAt:
+                listingPriceSchedules
+                  .startAppliedAt,
+
+              endAppliedAt:
+                listingPriceSchedules.endAppliedAt,
+
+              lastError:
+                listingPriceSchedules.lastError,
+
+              createdAt:
+                listingPriceSchedules.createdAt,
+
+              updatedAt:
+                listingPriceSchedules.updatedAt,
+            })
+            .from(listingPriceSchedules)
+            .where(
+              eq(
+                listingPriceSchedules.listingId,
+                listingId,
+              ),
+            )
+        : await db
+            .select({
+              id: listingPriceSchedules.id,
+              listingId:
+                listingPriceSchedules.listingId,
+
+              promotionalPriceMinor:
+                listingPriceSchedules
+                  .promotionalPriceMinor,
+
+              validFrom:
+                listingPriceSchedules.validFrom,
+
+              validTo:
+                listingPriceSchedules.validTo,
+
+              enabled:
+                listingPriceSchedules.enabled,
+
+              startAppliedAt:
+                listingPriceSchedules
+                  .startAppliedAt,
+
+              endAppliedAt:
+                listingPriceSchedules.endAppliedAt,
+
+              lastError:
+                listingPriceSchedules.lastError,
+
+              createdAt:
+                listingPriceSchedules.createdAt,
+
+              updatedAt:
+                listingPriceSchedules.updatedAt,
+            })
+            .from(listingPriceSchedules)
+
+      const now = Date.now()
+
+      const data = rows.map((row) => {
+        let scheduleStatus:
+          | 'SCHEDULED'
+          | 'ACTIVE'
+          | 'EXPIRED'
+          | 'DISABLED'
+
+        if (!row.enabled) {
+          scheduleStatus = 'DISABLED'
+        } else if (
+          now < row.validFrom.getTime()
+        ) {
+          scheduleStatus = 'SCHEDULED'
+        } else if (
+          now <= row.validTo.getTime()
+        ) {
+          scheduleStatus = 'ACTIVE'
+        } else {
+          scheduleStatus = 'EXPIRED'
+        }
+
+        return {
+          ...row,
+          scheduleStatus,
+        }
+      })
+
+      return context.json({
+        status: 'ok',
+        count: data.length,
+        data,
+      })
+    } catch (error) {
+      console.error(
+        'Listing price schedule loading failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Could not load listing price schedules',
+        },
+        500,
+      )
+    }
+  },
+)
+
+
+app.post(
+  '/allegro/listing-price-schedules',
+  async (context) => {
+    if (!db) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Database is not configured',
+        },
+        500,
+      )
+    }
+
+    try {
+      const body = (await context.req
+        .json()
+        .catch(() => null)) as
+        | {
+            listingId?: unknown
+            promotionalPrice?: unknown
+            validFrom?: unknown
+            validTo?: unknown
+            enabled?: unknown
+          }
+        | null
+
+      const listingId =
+        typeof body?.listingId === 'string'
+          ? body.listingId.trim()
+          : ''
+
+      const promotionalPrice = Number(
+        body?.promotionalPrice,
+      )
+
+      const validFrom =
+        typeof body?.validFrom === 'string'
+          ? new Date(body.validFrom)
+          : null
+
+      const validTo =
+        typeof body?.validTo === 'string'
+          ? new Date(body.validTo)
+          : null
+
+      const enabled =
+        body?.enabled === undefined
+          ? true
+          : body.enabled
+
+      if (!listingId) {
+        return context.json(
+          {
+            status: 'error',
+            message: 'listingId is required',
+          },
+          400,
+        )
+      }
+
+      if (
+        !Number.isFinite(promotionalPrice) ||
+        promotionalPrice <= 0
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Promotional price must be greater than zero',
+          },
+          400,
+        )
+      }
+
+      if (
+        !validFrom ||
+        Number.isNaN(validFrom.getTime())
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message: 'Invalid validFrom date',
+          },
+          400,
+        )
+      }
+
+      if (
+        !validTo ||
+        Number.isNaN(validTo.getTime())
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message: 'Invalid validTo date',
+          },
+          400,
+        )
+      }
+
+      if (validFrom >= validTo) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'The end of the promotional period must be later than the start',
+          },
+          400,
+        )
+      }
+
+      if (typeof enabled !== 'boolean') {
+        return context.json(
+          {
+            status: 'error',
+            message: 'enabled must be a boolean',
+          },
+          400,
+        )
+      }
+
+      const [listing] = await db
+        .select({
+          id: platformListings.id,
+
+          marketplace:
+            platformListings.marketplace,
+
+          regularPriceMinor:
+            listingDesiredStates
+              .regularPriceMinor,
+        })
+        .from(platformListings)
+        .leftJoin(
+          listingDesiredStates,
+          eq(
+            listingDesiredStates.listingId,
+            platformListings.id,
+          ),
+        )
+        .where(
+          eq(platformListings.id, listingId),
+        )
+        .limit(1)
+
+      if (!listing) {
+        return context.json(
+          {
+            status: 'error',
+            message: 'Listing was not found',
+          },
+          404,
+        )
+      }
+
+      if (
+        listing.marketplace !== 'allegro-hu'
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Only allegro-hu listings are supported',
+          },
+          400,
+        )
+      }
+
+      if (
+        listing.regularPriceMinor === null
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Regular desired price is missing',
+          },
+          400,
+        )
+      }
+
+      const promotionalPriceMinor =
+        Math.round(promotionalPrice * 100)
+
+      if (
+        promotionalPriceMinor >=
+        listing.regularPriceMinor
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Promotional price must be lower than the regular desired price',
+          },
+          400,
+        )
+      }
+
+      if (enabled) {
+        const existingSchedules =
+          await db
+            .select({
+              id: listingPriceSchedules.id,
+
+              validFrom:
+                listingPriceSchedules.validFrom,
+
+              validTo:
+                listingPriceSchedules.validTo,
+            })
+            .from(listingPriceSchedules)
+            .where(
+              and(
+                eq(
+                  listingPriceSchedules
+                    .listingId,
+                  listingId,
+                ),
+                eq(
+                  listingPriceSchedules.enabled,
+                  true,
+                ),
+              ),
+            )
+
+        const overlapping =
+          existingSchedules.some(
+            (schedule) =>
+              schedule.validTo > new Date() &&
+              validFrom < schedule.validTo &&
+              validTo > schedule.validFrom,
+          )
+
+        if (overlapping) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                'The promotional period overlaps another enabled price schedule',
+            },
+            409,
+          )
+        }
+      }
+
+      const now = new Date()
+
+      const [created] = await db
+        .insert(listingPriceSchedules)
+        .values({
+          listingId,
+
+          promotionalPriceMinor,
+
+          validFrom,
+          validTo,
+
+          enabled,
+
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning()
+
+      return context.json(
+        {
+          status: 'ok',
+          data: created,
+        },
+        201,
+      )
+    } catch (error) {
+      console.error(
+        'Listing price schedule creation failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Could not create listing price schedule',
+        },
+        500,
+      )
+    }
+  },
+)
+
+
+app.patch(
+  '/allegro/listing-price-schedules/:id',
+  async (context) => {
+    if (!db) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Database is not configured',
+        },
+        500,
+      )
+    }
+
+    try {
+      const scheduleId =
+        context.req.param('id')
+
+      const body = (await context.req
+        .json()
+        .catch(() => null)) as
+        | {
+            promotionalPrice?: unknown
+            validFrom?: unknown
+            validTo?: unknown
+            enabled?: unknown
+          }
+        | null
+
+      if (!body) {
+        return context.json(
+          {
+            status: 'error',
+            message: 'Request body is required',
+          },
+          400,
+        )
+      }
+
+      const [existing] = await db
+        .select()
+        .from(listingPriceSchedules)
+        .where(
+          eq(
+            listingPriceSchedules.id,
+            scheduleId,
+          ),
+        )
+        .limit(1)
+
+      if (!existing) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Price schedule was not found',
+          },
+          404,
+        )
+      }
+
+      if (
+        existing.startAppliedAt !== null ||
+        existing.endAppliedAt !== null
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'An already applied schedule cannot be edited',
+          },
+          409,
+        )
+      }
+
+      const promotionalPrice =
+        body.promotionalPrice === undefined
+          ? existing.promotionalPriceMinor /
+            100
+          : Number(body.promotionalPrice)
+
+      const validFrom =
+        body.validFrom === undefined
+          ? existing.validFrom
+          : typeof body.validFrom === 'string'
+            ? new Date(body.validFrom)
+            : null
+
+      const validTo =
+        body.validTo === undefined
+          ? existing.validTo
+          : typeof body.validTo === 'string'
+            ? new Date(body.validTo)
+            : null
+
+      const enabled =
+        body.enabled === undefined
+          ? existing.enabled
+          : body.enabled
+
+      if (
+        !Number.isFinite(promotionalPrice) ||
+        promotionalPrice <= 0
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Promotional price must be greater than zero',
+          },
+          400,
+        )
+      }
+
+      if (
+        !validFrom ||
+        Number.isNaN(validFrom.getTime())
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message: 'Invalid validFrom date',
+          },
+          400,
+        )
+      }
+
+      if (
+        !validTo ||
+        Number.isNaN(validTo.getTime())
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message: 'Invalid validTo date',
+          },
+          400,
+        )
+      }
+
+      if (validFrom >= validTo) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'The end of the promotional period must be later than the start',
+          },
+          400,
+        )
+      }
+
+      if (typeof enabled !== 'boolean') {
+        return context.json(
+          {
+            status: 'error',
+            message: 'enabled must be a boolean',
+          },
+          400,
+        )
+      }
+
+      const [desiredState] = await db
+        .select({
+          regularPriceMinor:
+            listingDesiredStates
+              .regularPriceMinor,
+        })
+        .from(listingDesiredStates)
+        .where(
+          eq(
+            listingDesiredStates.listingId,
+            existing.listingId,
+          ),
+        )
+        .limit(1)
+
+      if (
+        !desiredState ||
+        desiredState.regularPriceMinor ===
+          null
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Regular desired price is missing',
+          },
+          400,
+        )
+      }
+
+      const promotionalPriceMinor =
+        Math.round(promotionalPrice * 100)
+
+      if (
+        promotionalPriceMinor >=
+        desiredState.regularPriceMinor
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Promotional price must be lower than the regular desired price',
+          },
+          400,
+        )
+      }
+
+      if (enabled) {
+        const schedules = await db
+          .select({
+            id: listingPriceSchedules.id,
+
+            validFrom:
+              listingPriceSchedules.validFrom,
+
+            validTo:
+              listingPriceSchedules.validTo,
+          })
+          .from(listingPriceSchedules)
+          .where(
+            and(
+              eq(
+                listingPriceSchedules
+                  .listingId,
+                existing.listingId,
+              ),
+              eq(
+                listingPriceSchedules.enabled,
+                true,
+              ),
+            ),
+          )
+
+        const overlapping =
+          schedules.some(
+            (schedule) =>
+              schedule.id !== scheduleId &&
+              schedule.validTo > new Date() &&
+              validFrom < schedule.validTo &&
+              validTo > schedule.validFrom,
+          )
+
+        if (overlapping) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                'The promotional period overlaps another enabled price schedule',
+            },
+            409,
+          )
+        }
+      }
+
+      const [updated] = await db
+        .update(listingPriceSchedules)
+        .set({
+          promotionalPriceMinor,
+
+          validFrom,
+          validTo,
+
+          enabled,
+
+          lastError: null,
+
+          updatedAt: new Date(),
+        })
+        .where(
+          eq(
+            listingPriceSchedules.id,
+            scheduleId,
+          ),
+        )
+        .returning()
+
+      return context.json({
+        status: 'ok',
+        data: updated,
+      })
+    } catch (error) {
+      console.error(
+        'Listing price schedule update failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Could not update listing price schedule',
+        },
+        500,
+      )
+    }
+  },
+)
+
+
+app.delete(
+  '/allegro/listing-price-schedules/:id',
+  async (context) => {
+    if (!db) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Database is not configured',
+        },
+        500,
+      )
+    }
+
+    try {
+      const scheduleId =
+        context.req.param('id')
+
+      const [existing] = await db
+        .select({
+          id: listingPriceSchedules.id,
+
+          startAppliedAt:
+            listingPriceSchedules
+              .startAppliedAt,
+
+          endAppliedAt:
+            listingPriceSchedules
+              .endAppliedAt,
+        })
+        .from(listingPriceSchedules)
+        .where(
+          eq(
+            listingPriceSchedules.id,
+            scheduleId,
+          ),
+        )
+        .limit(1)
+
+      if (!existing) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Price schedule was not found',
+          },
+          404,
+        )
+      }
+
+      if (
+        existing.startAppliedAt !== null ||
+        existing.endAppliedAt !== null
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'An already applied schedule cannot be deleted',
+          },
+          409,
+        )
+      }
+
+      const [deleted] = await db
+        .delete(listingPriceSchedules)
+        .where(
+          eq(
+            listingPriceSchedules.id,
+            scheduleId,
+          ),
+        )
+        .returning({
+          id: listingPriceSchedules.id,
+        })
+
+      return context.json({
+        status: 'ok',
+        data: deleted,
+      })
+    } catch (error) {
+      console.error(
+        'Listing price schedule deletion failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Could not delete listing price schedule',
+        },
+        500,
+      )
+    }
+  },
+)
+
 app.patch('/allegro/listings/:id/desired-price', async (context) => {
   if (!db) {
     return context.json(
