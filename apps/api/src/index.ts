@@ -348,9 +348,32 @@ app.get('/allegro/listing-price-history-summary', async (context) => {
         30 * 24 * 60 * 60 * 1000,
     )
 
+    const expectedDayKeys =
+      new Set<string>()
+
+    for (
+      let dayOffset = 0;
+      dayOffset < 30;
+      dayOffset++
+    ) {
+      const date = new Date(
+        now.getTime() -
+          dayOffset *
+            24 *
+            60 *
+            60 *
+            1000,
+      )
+
+      expectedDayKeys.add(
+        date.toISOString().slice(0, 10),
+      )
+    }
+
     const [
       thirtyDayRows,
       historyStartRows,
+      observationRows,
     ] = await Promise.all([
       db
         .select({
@@ -390,6 +413,22 @@ app.get('/allegro/listing-price-history-summary', async (context) => {
         .groupBy(
           listingPriceHistory.listingId,
         ),
+
+      db
+        .select({
+          listingId:
+            listingPriceHistory.listingId,
+
+          observedAt:
+            listingPriceHistory.observedAt,
+        })
+        .from(listingPriceHistory)
+        .where(
+          gte(
+            listingPriceHistory.observedAt,
+            thirtyDaysAgo,
+          ),
+        ),
     ])
 
     const historyStartByListing =
@@ -399,6 +438,34 @@ app.get('/allegro/listing-price-history-summary', async (context) => {
           row.historyStartedAt,
         ]),
       )
+
+    const observedDaysByListing =
+      new Map<string, Set<string>>()
+
+    for (const row of observationRows) {
+      const dayKey =
+        new Date(row.observedAt)
+          .toISOString()
+          .slice(0, 10)
+
+      if (!expectedDayKeys.has(dayKey)) {
+        continue
+      }
+
+      const existingDays =
+        observedDaysByListing.get(
+          row.listingId,
+        )
+
+      if (existingDays) {
+        existingDays.add(dayKey)
+      } else {
+        observedDaysByListing.set(
+          row.listingId,
+          new Set([dayKey]),
+        )
+      }
+    }
 
     const data = thirtyDayRows.map((row) => {
       const historyStartedValue =
@@ -410,6 +477,17 @@ app.get('/allegro/listing-price-history-summary', async (context) => {
         historyStartedValue
           ? new Date(historyStartedValue)
           : null
+
+      const coverageDayCount =
+        observedDaysByListing.get(
+          row.listingId,
+        )?.size ?? 0
+
+      const missingDayCount =
+        Math.max(
+          0,
+          30 - coverageDayCount,
+        )
 
       return {
         listingId: row.listingId,
@@ -426,16 +504,16 @@ app.get('/allegro/listing-price-history-summary', async (context) => {
             row.observationCount,
           ),
 
+        coverageDayCount,
+        missingDayCount,
+
         historyStartedAt:
           historyStartedAt
             ? historyStartedAt.toISOString()
             : null,
 
         hasFull30DayWindow:
-          historyStartedAt
-            ? historyStartedAt <=
-              thirtyDaysAgo
-            : false,
+          coverageDayCount === 30,
       }
     })
 

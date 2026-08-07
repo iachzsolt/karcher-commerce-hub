@@ -41,6 +41,8 @@ type PriceHistorySummary = {
   listingId: string
   min30PriceMinor: number | null
   observationCount: number
+  coverageDayCount: number
+  missingDayCount: number
   historyStartedAt: string | null
   hasFull30DayWindow: boolean
 }
@@ -1961,7 +1963,7 @@ function AllegroCampaignsPage() {
                                     >
                                       {priceHistory.hasFull30DayWindow
                                         ? '30 nap teljes'
-                                        : 'Részleges historika'}
+                                        : `${priceHistory.coverageDayCount}/30 nap historika`}
                                     </span>
                                   )}
 
