@@ -21,6 +21,7 @@ type CampaignPeriod = {
 
 type AllegroCampaign = {
   id: string
+  source: 'BADGE' | 'ALLE_DISCOUNT'
   name: string
   marketplace: {
     id: string
@@ -37,6 +38,21 @@ type AllegroCampaign = {
   stockReservationIsRequired: boolean
 }
 
+type AlleDiscountCampaign = {
+  id: string
+  name: string
+  type?: string
+  marketplace?: {
+    id: string
+  }
+  application?: CampaignPeriod
+  publication?: CampaignPeriod
+  visibility?: CampaignPeriod
+}
+
+type AlleDiscountEligibleOffer = {
+  id: string
+}
 type PriceHistorySummary = {
   listingId: string
   min30PriceMinor: number | null
@@ -486,6 +502,22 @@ function AllegroCampaignsPage() {
   ] = useState<string | null>(null)
 
   const [
+    alleDiscountEligibleOfferIds,
+    setAlleDiscountEligibleOfferIds,
+  ] = useState<Set<string> | null>(null)
+
+  const [
+    ,
+    setAlleDiscountEligibilityLoading,
+  ] = useState(false)
+
+  const selectedCampaign =
+    campaigns.find(
+      (campaign) =>
+        campaign.id === selectedCampaignId,
+    ) ?? null
+
+  const [
     selectedListingIds,
     setSelectedListingIds,
   ] = useState<string[]>([])
@@ -545,10 +577,20 @@ function AllegroCampaignsPage() {
           listing.id,
         )
 
+      const matchesCampaignEligibility =
+        selectedCampaign?.source !==
+          'ALLE_DISCOUNT' ||
+        (
+          alleDiscountEligibleOfferIds?.has(
+            listing.offerId,
+          ) ?? false
+        )
+
       return (
         matchesSearch &&
         matchesStatus &&
-        matchesSelection
+        matchesSelection &&
+        matchesCampaignEligibility
       )
     })
 
@@ -556,8 +598,10 @@ function AllegroCampaignsPage() {
     filteredListings
       .filter(
         (listing) =>
+          selectedCampaign?.source !==
+            'ALLE_DISCOUNT' &&
           listing.publicationStatus ===
-          'ACTIVE',
+            'ACTIVE',
       )
       .map((listing) => listing.id)
 
@@ -664,11 +708,15 @@ function AllegroCampaignsPage() {
     try {
       const [
         campaignsResponse,
+        alleDiscountResponse,
         listingsResponse,
         priceHistoryResponse,
       ] = await Promise.all([
         fetch(
           'http://localhost:3000/auth/allegro/campaigns',
+        ),
+        fetch(
+          'http://localhost:3000/auth/allegro/alle-discount/campaigns',
         ),
         fetch(
           'http://localhost:3000/allegro/listings',
@@ -680,6 +728,9 @@ function AllegroCampaignsPage() {
 
       const campaignResult =
         await campaignsResponse.json()
+
+      const alleDiscountResult =
+        await alleDiscountResponse.json()
 
       const listingResult =
         await listingsResponse.json()
@@ -708,9 +759,95 @@ function AllegroCampaignsPage() {
         )
       }
 
-      setCampaigns(
-        campaignResult.data?.badgeCampaigns ?? [],
-      )
+      const badgeCampaigns =
+        (
+          campaignResult.data?.badgeCampaigns ??
+          []
+        ).map(
+          (
+            campaign: Omit<
+              AllegroCampaign,
+              'source'
+            >,
+          ) => ({
+            ...campaign,
+            source: 'BADGE' as const,
+          }),
+        )
+
+      const alleDiscountCampaigns =
+        alleDiscountResponse.ok
+          ? (
+              (
+                alleDiscountResult.data
+                  ?.alleDiscountCampaigns ??
+                []
+              ) as AlleDiscountCampaign[]
+            )
+              .filter(
+                (campaign) =>
+                  campaign.marketplace?.id ===
+                  'allegro-hu',
+              )
+              .map(
+                (campaign): AllegroCampaign => ({
+                  id: campaign.id,
+                  name: campaign.name,
+                  source: 'ALLE_DISCOUNT',
+                  type:
+                    campaign.type ?? 'DISCOUNT',
+
+                  marketplace: {
+                    id:
+                      campaign.marketplace?.id ??
+                      'allegro-hu',
+                  },
+
+                  eligibility: {
+                    eligible: true,
+                    refusalReasons: [],
+                  },
+
+                  application:
+                    campaign.application ?? {
+                      type: 'ALWAYS',
+                      from: null,
+                      to: null,
+                    },
+
+                  publication:
+                    campaign.publication ?? {
+                      type: 'ALWAYS',
+                      from: null,
+                      to: null,
+                    },
+
+                  visibility:
+                    campaign.visibility ?? {
+                      type: 'ALWAYS',
+                      from: null,
+                      to: null,
+                    },
+
+                  regulationsLink: null,
+
+                  stockReservationIsRequired:
+                    false,
+                }),
+              )
+          : []
+
+      if (!alleDiscountResponse.ok) {
+        console.warn(
+          'AlleDiscount campaigns could not be loaded:',
+          alleDiscountResult,
+        )
+      }
+
+      setCampaigns([
+        ...badgeCampaigns,
+        ...alleDiscountCampaigns,
+      ])
 
       setListings(
         listingResult.data ?? [],
@@ -852,7 +989,6 @@ function AllegroCampaignsPage() {
       setSelectedCampaignId(null)
       setSelectedListingIds([])
       setCampaignPriceDrafts({})
-    setBulkDiscountPercent('')
       setBulkDiscountPercent('')
       setValidFromDrafts({})
       setValidToDrafts({})
@@ -864,8 +1000,15 @@ function AllegroCampaignsPage() {
       setBulkValidToTime('23:59')
       setPreparationMessage(null)
       setPreparationStatuses({})
+      setAlleDiscountEligibleOfferIds(null)
+      setAlleDiscountEligibilityLoading(false)
       return
     }
+
+    const campaign =
+      campaigns.find(
+        (item) => item.id === campaignId,
+      )
 
     setSelectedCampaignId(campaignId)
     setSelectedListingIds([])
@@ -881,6 +1024,88 @@ function AllegroCampaignsPage() {
     setBulkValidToTime('23:59')
     setPreparationMessage(null)
     setPreparationStatuses({})
+    setAlleDiscountEligibleOfferIds(null)
+
+    if (
+      campaign?.source ===
+      'ALLE_DISCOUNT'
+    ) {
+      setAlleDiscountEligibilityLoading(true)
+
+      try {
+        setPreparationMessage(
+          'Beküldhető ajánlatok ellenőrzése…',
+        )
+
+        const response = await fetch(
+          `http://localhost:3000/auth/allegro/alle-discount/${encodeURIComponent(
+            campaign.id,
+          )}/eligible-offers?meetsConditions=true`,
+        )
+
+        const result =
+          await response.json()
+
+        if (!response.ok) {
+          throw new Error(
+            result.message ??
+              'Nem sikerült ellenőrizni a kampány ajánlatait.',
+          )
+        }
+
+        const eligibleOffers =
+          (
+            result.data?.eligibleOffers ??
+            []
+          ) as AlleDiscountEligibleOffer[]
+
+        const offerIds =
+          new Set(
+            eligibleOffers.map(
+              (offer) => offer.id,
+            ),
+          )
+
+        setAlleDiscountEligibleOfferIds(
+          offerIds,
+        )
+
+        const localEligibleCount =
+          listings.filter(
+            (listing) =>
+              offerIds.has(
+                listing.offerId,
+              ),
+          ).length
+
+        setPreparationMessage(
+          localEligibleCount === 0
+            ? 'Ehhez a kampányhoz jelenleg nincs beküldhető ajánlat.'
+            : `${localEligibleCount} beküldhető ajánlat található ehhez a kampányhoz.`,
+        )
+      } catch (loadError) {
+        console.error(
+          'AlleDiscount eligibility loading failed:',
+          loadError,
+        )
+
+        setAlleDiscountEligibleOfferIds(
+          new Set(),
+        )
+
+        setPreparationMessage(
+          loadError instanceof Error
+            ? loadError.message
+            : 'Nem sikerült ellenőrizni a kampány ajánlatait.',
+        )
+      } finally {
+        setAlleDiscountEligibilityLoading(
+          false,
+        )
+      }
+
+      return
+    }
 
     try {
       await loadPreparations(campaignId)
@@ -895,7 +1120,6 @@ function AllegroCampaignsPage() {
       )
     }
   }
-
   function selectAllFilteredListings() {
     setSelectedListingIds(
       (current) =>
@@ -1399,6 +1623,7 @@ function AllegroCampaignsPage() {
             campaign.application.type !== 'NEVER'
 
           const canSubmit =
+            campaign.source === 'BADGE' &&
             campaign.eligibility.eligible &&
             manualApplication
 
@@ -1427,9 +1652,12 @@ function AllegroCampaignsPage() {
                           : 'campaign-eligibility campaign-ineligible'
                       }
                     >
-                      {campaign.eligibility.eligible
-                        ? 'Jogosult'
-                        : 'Nem jogosult'}
+                      {campaign.source ===
+                      'ALLE_DISCOUNT'
+                        ? 'Ajánlatszintű ellenőrzés'
+                        : campaign.eligibility.eligible
+                          ? 'Jogosult'
+                          : 'Nem jogosult'}
                     </span>
                   </div>
 
@@ -1477,7 +1705,8 @@ function AllegroCampaignsPage() {
                 </div>
               </div>
 
-              {!campaign.eligibility.eligible &&
+              {campaign.source === 'BADGE' &&
+                !campaign.eligibility.eligible &&
                 campaign.eligibility.refusalReasons.length >
                   0 && (
                   <div className="campaign-refusal">
@@ -1911,8 +2140,10 @@ function AllegroCampaignsPage() {
                                   type="checkbox"
                                   checked={checked}
                                   disabled={
+                                    campaign.source ===
+                                      'ALLE_DISCOUNT' ||
                                     listing.publicationStatus !==
-                                    'ACTIVE'
+                                      'ACTIVE'
                                   }
                                   onChange={() =>
                                     toggleListing(
