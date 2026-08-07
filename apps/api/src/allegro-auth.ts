@@ -1254,6 +1254,370 @@ export async function getAllegroBadgeCampaigns(
       data.badgeCampaigns ?? [],
   }
 }
+export type AllegroAlleDiscountCampaign = {
+  id: string
+  name: string
+
+  type?:
+    | 'DISCOUNT'
+    | 'SOURCING'
+    | string
+
+  marketplace?: {
+    id: string
+  }
+
+  visibility?: {
+    type: string
+    from: string | null
+    to: string | null
+  }
+
+  application?: {
+    type: string
+    from: string | null
+    to: string | null
+  }
+
+  publication?: {
+    type: string
+    from: string | null
+    to: string | null
+  }
+}
+
+export type AllegroAlleDiscountCampaignsPayload = {
+  alleDiscountCampaigns:
+    AllegroAlleDiscountCampaign[]
+}
+
+type AllegroAlleDiscountMoney = {
+  amount: string
+  currency: string
+}
+
+export type AllegroAlleDiscountEligibleOffer = {
+  id: string
+
+  product?: {
+    id: string
+  }
+
+  basePrice?: AllegroAlleDiscountMoney
+
+  alleDiscount?: {
+    campaignConditions?: {
+      meetsConditions: boolean
+      violations: unknown[]
+    }
+
+    requiredMerchantPrice?:
+      | AllegroAlleDiscountMoney
+      | null
+
+    minimumGuaranteedDiscount?: {
+      percentage: string
+    } | null
+  }
+}
+
+export type AllegroAlleDiscountEligibleOffersPayload = {
+  eligibleOffers:
+    AllegroAlleDiscountEligibleOffer[]
+
+  count: number
+  totalCount: number
+}
+
+export async function getAllegroAlleDiscountCampaigns(
+  campaignId?: string,
+): Promise<AllegroAlleDiscountCampaignsPayload> {
+  const apiUrl =
+    process.env.ALLEGRO_API_URL
+
+  if (!apiUrl) {
+    throw new Error(
+      'ALLEGRO_API_URL is missing',
+    )
+  }
+
+  await refreshAllegroSessionIfNeeded()
+
+  if (!currentSession) {
+    throw new Error(
+      'Allegro session is not available',
+    )
+  }
+
+  const searchParams =
+    new URLSearchParams()
+
+  if (campaignId) {
+    searchParams.set(
+      'campaignId',
+      campaignId,
+    )
+  }
+
+  const query =
+    searchParams.toString()
+
+  const response = await fetch(
+    `${apiUrl}/sale/alle-discount/campaigns${
+      query ? `?${query}` : ''
+    }`,
+    {
+      headers: {
+        Authorization:
+          `Bearer ${currentSession.accessToken}`,
+
+        Accept:
+          'application/vnd.allegro.public.v1+json',
+
+        'Accept-Language':
+          'hu-HU',
+      },
+    },
+  )
+
+  const responseText =
+    await response.text()
+
+  if (!response.ok) {
+    throw new Error(
+      `Allegro AlleDiscount campaign loading failed (${response.status}): ${responseText}`,
+    )
+  }
+
+  return JSON.parse(
+    responseText,
+  ) as AllegroAlleDiscountCampaignsPayload
+}
+
+export async function getAllegroAlleDiscountEligibleOffers(
+  input: {
+    campaignId: string
+    meetsConditions?: boolean
+    offerId?: string
+  },
+): Promise<AllegroAlleDiscountEligibleOffersPayload> {
+  const apiUrl =
+    process.env.ALLEGRO_API_URL
+
+  if (!apiUrl) {
+    throw new Error(
+      'ALLEGRO_API_URL is missing',
+    )
+  }
+
+  await refreshAllegroSessionIfNeeded()
+
+  if (!currentSession) {
+    throw new Error(
+      'Allegro session is not available',
+    )
+  }
+
+  const eligibleOffers:
+    AllegroAlleDiscountEligibleOffer[] = []
+
+  const limit = 200
+  let offset = 0
+  let totalCount = 0
+
+  for (;;) {
+    const searchParams =
+      new URLSearchParams()
+
+    searchParams.set(
+      'limit',
+      String(limit),
+    )
+
+    searchParams.set(
+      'offset',
+      String(offset),
+    )
+
+    if (
+      input.meetsConditions !== undefined
+    ) {
+      searchParams.set(
+        'meetsConditions',
+        String(
+          input.meetsConditions,
+        ),
+      )
+    }
+
+    if (input.offerId) {
+      searchParams.set(
+        'offerId',
+        input.offerId,
+      )
+    }
+
+    const response = await fetch(
+      `${apiUrl}/sale/alle-discount/${encodeURIComponent(
+        input.campaignId,
+      )}/eligible-offers?${searchParams.toString()}`,
+      {
+        headers: {
+          Authorization:
+            `Bearer ${currentSession.accessToken}`,
+
+          Accept:
+            'application/vnd.allegro.public.v1+json',
+
+          'Accept-Language':
+            'hu-HU',
+        },
+      },
+    )
+
+    const responseText =
+      await response.text()
+
+    if (!response.ok) {
+      throw new Error(
+        `Allegro AlleDiscount eligible offers loading failed (${response.status}): ${responseText}`,
+      )
+    }
+
+    const page =
+      JSON.parse(
+        responseText,
+      ) as AllegroAlleDiscountEligibleOffersPayload
+
+    const pageOffers =
+      page.eligibleOffers ?? []
+
+    eligibleOffers.push(
+      ...pageOffers,
+    )
+
+    totalCount =
+      Number(
+        page.totalCount ??
+          eligibleOffers.length,
+      )
+
+    if (
+      input.offerId ||
+      pageOffers.length === 0 ||
+      eligibleOffers.length >= totalCount
+    ) {
+      break
+    }
+
+    offset += pageOffers.length
+  }
+
+  return {
+    eligibleOffers,
+    count:
+      eligibleOffers.length,
+    totalCount,
+  }
+}
+
+allegroAuth.get(
+  '/alle-discount/campaigns',
+  async (context) => {
+    try {
+      const campaignId =
+        context.req.query(
+          'campaignId',
+        )
+
+      const data =
+        await getAllegroAlleDiscountCampaigns(
+          campaignId,
+        )
+
+      return context.json({
+        status: 'ok',
+        data,
+      })
+    } catch (error) {
+      console.error(
+        'AlleDiscount campaign loading failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Could not load AlleDiscount campaigns',
+        },
+        500,
+      )
+    }
+  },
+)
+
+allegroAuth.get(
+  '/alle-discount/:campaignId/eligible-offers',
+  async (context) => {
+    try {
+      const campaignId =
+        context.req.param(
+          'campaignId',
+        )
+
+      const meetsConditionsQuery =
+        context.req.query(
+          'meetsConditions',
+        )
+
+      const offerId =
+        context.req.query(
+          'offerId',
+        )
+
+      const meetsConditions =
+        meetsConditionsQuery === undefined
+          ? true
+          : meetsConditionsQuery ===
+            'true'
+
+      const data =
+        await getAllegroAlleDiscountEligibleOffers(
+          {
+            campaignId,
+            meetsConditions,
+            offerId,
+          },
+        )
+
+      return context.json({
+        status: 'ok',
+        campaignId,
+        meetsConditions,
+        data,
+      })
+    } catch (error) {
+      console.error(
+        'AlleDiscount eligible offers loading failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Could not load eligible AlleDiscount offers',
+        },
+        500,
+      )
+    }
+  },
+)
 allegroAuth.get('/campaigns', async (context) => {
   if (!currentSession) {
     return context.json(
