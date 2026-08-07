@@ -566,6 +566,11 @@ function AllegroCampaignsPage() {
   ] = useState(false)
 
   const [
+    showBadgeEligibleOnly,
+    setShowBadgeEligibleOnly,
+  ] = useState(true)
+
+  const [
     listingPage,
     setListingPage,
   ] = useState(1)
@@ -608,7 +613,7 @@ function AllegroCampaignsPage() {
           listing.offerId
         ]
 
-      const matchesCampaignEligibility =
+      const matchesAlleDiscountEligibility =
         selectedCampaign?.source !==
           'ALLE_DISCOUNT' ||
         (
@@ -621,11 +626,24 @@ function AllegroCampaignsPage() {
           )
         )
 
+      const matchesBadgeEligibility =
+        selectedCampaign?.source !==
+          'BADGE' ||
+        !showBadgeEligibleOnly ||
+        (
+          listing.publicationStatus ===
+            'ACTIVE' &&
+          listing.marketplace ===
+            selectedCampaign.marketplace.id &&
+          listing.priceMinor !== null
+        )
+
       return (
         matchesSearch &&
         matchesStatus &&
         matchesSelection &&
-        matchesCampaignEligibility
+        matchesAlleDiscountEligibility &&
+        matchesBadgeEligibility
       )
     })
 
@@ -636,7 +654,16 @@ function AllegroCampaignsPage() {
           selectedCampaign?.source !==
             'ALLE_DISCOUNT' &&
           listing.publicationStatus ===
-            'ACTIVE',
+            'ACTIVE' &&
+          (
+            selectedCampaign?.source !==
+              'BADGE' ||
+            (
+              listing.marketplace ===
+                selectedCampaign.marketplace.id &&
+              listing.priceMinor !== null
+            )
+          ),
       )
       .map((listing) => listing.id)
 
@@ -1949,6 +1976,31 @@ function AllegroCampaignsPage() {
                     </label>
 
                     {campaign.source ===
+                      'BADGE' && (
+                      <label
+                        className="campaign-selected-filter"
+                        title="Aktív, megfelelő marketplace-en lévő, ismert aktuális árral rendelkező ajánlatok"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={
+                            showBadgeEligibleOnly
+                          }
+                          onChange={(event) => {
+                            setShowBadgeEligibleOnly(
+                              event.target.checked,
+                            )
+                            setListingPage(1)
+                          }}
+                        />
+
+                        <span>
+                          Csak előszűrt
+                        </span>
+                      </label>
+                    )}
+
+                    {campaign.source ===
                       'ALLE_DISCOUNT' && (
                       <label className="campaign-selected-filter">
                         <input
@@ -2180,6 +2232,11 @@ function AllegroCampaignsPage() {
                           <th>Aktuális ár</th>
 
                           {campaign.source ===
+                            'BADGE' && (
+                            <th>Előszűrés</th>
+                          )}
+
+                          {campaign.source ===
                             'ALLE_DISCOUNT' && (
                             <th>Kampányfeltétel</th>
                           )}
@@ -2259,6 +2316,34 @@ function AllegroCampaignsPage() {
                                 )
                               : null
 
+                          const badgePrecheckReasons =
+                            campaign.source === 'BADGE'
+                              ? [
+                                  ...(listing.publicationStatus !==
+                                  'ACTIVE'
+                                    ? ['Nem aktív ajánlat']
+                                    : []),
+
+                                  ...(listing.marketplace !==
+                                  campaign.marketplace.id
+                                    ? [
+                                        `Más marketplace: ${listing.marketplace}`,
+                                      ]
+                                    : []),
+
+                                  ...(listing.priceMinor ===
+                                  null
+                                    ? [
+                                        'Nincs ismert aktuális ár',
+                                      ]
+                                    : []),
+                                ]
+                              : []
+
+                          const badgePrecheckEligible =
+                            badgePrecheckReasons.length ===
+                            0
+
                           return (
                             <tr key={listing.id}>
                               <td>
@@ -2269,7 +2354,17 @@ function AllegroCampaignsPage() {
                                     campaign.source ===
                                       'ALLE_DISCOUNT' ||
                                     listing.publicationStatus !==
-                                      'ACTIVE'
+                                      'ACTIVE' ||
+                                    (
+                                      campaign.source ===
+                                        'BADGE' &&
+                                      (
+                                        listing.marketplace !==
+                                          campaign.marketplace.id ||
+                                        listing.priceMinor ===
+                                          null
+                                      )
+                                    )
                                   }
                                   onChange={() =>
                                     toggleListing(
@@ -2299,6 +2394,39 @@ function AllegroCampaignsPage() {
                                   listing.currency,
                                 )}
                               </td>
+
+                              {campaign.source ===
+                                'BADGE' && (
+                                <td>
+                                  <div className="campaign-condition-cell">
+                                    <span
+                                      className={
+                                        badgePrecheckEligible
+                                          ? 'campaign-eligibility campaign-eligible'
+                                          : 'campaign-eligibility campaign-ineligible'
+                                      }
+                                    >
+                                      {badgePrecheckEligible
+                                        ? '✓ Előszűrt'
+                                        : '✕ Nem megfelelő'}
+                                    </span>
+
+                                    {!badgePrecheckEligible && (
+                                      <div className="campaign-condition-violations">
+                                        {badgePrecheckReasons.map(
+                                          (reason) => (
+                                            <span
+                                              key={`${listing.id}-${reason}`}
+                                            >
+                                              {reason}
+                                            </span>
+                                          ),
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                </td>
+                              )}
 
                               {campaign.source ===
                                 'ALLE_DISCOUNT' && (
