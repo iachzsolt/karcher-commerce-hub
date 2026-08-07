@@ -1,10 +1,12 @@
-﻿import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Hono } from 'hono'
 import { and, desc, eq } from 'drizzle-orm'
 import { decryptSecret, encryptSecret } from './token-crypto.js'
 import {
   createDatabase,
   listingCampaigns,
+
+  listingAcceptedStates,
   listingDesiredStates,
   listingPriceHistory,
   listingPriceSchedules,
@@ -4402,6 +4404,9 @@ allegroAuth.post(
             listingId:
               listingPriceSchedules.listingId,
 
+            promotionalPriceMinor:
+              listingPriceSchedules.promotionalPriceMinor,
+
             validFrom:
               listingPriceSchedules.validFrom,
 
@@ -4653,6 +4658,140 @@ allegroAuth.post(
           continue
         }
 
+        /*
+        if (response.status === 202) {
+          skipped += 1
+
+          results.push({
+            scheduleId: schedule.id,
+            listingId: schedule.listingId,
+            action: shouldStart
+              ? 'START'
+              : 'END',
+            status: 'PENDING',
+            message:
+              responseData?.message ??
+              'Allegro price change is still being processed',
+          })
+
+          continue
+        }
+
+         * Sikeresen kiment egy automatikus Commerce Hub ár.
+         *
+         * Ez nem külső Allegro-változás, ezért az új árat
+         * automatikusan elfogadott állapotként tároljuk.
+         *
+         * Emellett minden ilyen ármozgás bekerül a tartós
+         * árhistorikába is.
+         */
+        const [scheduledState] =
+          await db
+            .select({
+              regularPriceMinor:
+                listingDesiredStates
+                  .regularPriceMinor,
+
+              stockAvailable:
+                listingRemoteStates
+                  .stockAvailable,
+
+              publicationStatus:
+                listingRemoteStates
+                  .publicationStatus,
+            })
+            .from(listingDesiredStates)
+            .leftJoin(
+              listingRemoteStates,
+              eq(
+                listingRemoteStates.listingId,
+                listingDesiredStates.listingId,
+              ),
+            )
+            .where(
+              eq(
+                listingDesiredStates.listingId,
+                schedule.listingId,
+              ),
+            )
+            .limit(1)
+
+        if (!scheduledState) {
+          throw new Error(
+            `Desired state missing for scheduled listing ${schedule.listingId}`,
+          )
+        }
+
+        const appliedPriceMinor =
+          shouldStart
+            ? schedule.promotionalPriceMinor
+            : scheduledState.regularPriceMinor
+
+        if (appliedPriceMinor === null) {
+          throw new Error(
+            `Applied price is missing for scheduled listing ${schedule.listingId}`,
+          )
+        }
+
+        await db
+          .insert(listingAcceptedStates)
+          .values({
+            listingId:
+              schedule.listingId,
+
+            acceptedPriceMinor:
+              appliedPriceMinor,
+
+            acceptedStockAvailable:
+              scheduledState.stockAvailable,
+
+            acceptedPublicationStatus:
+              scheduledState
+                .publicationStatus ??
+              'UNKNOWN',
+
+            acceptedAt: now,
+            updatedAt: now,
+          })
+          .onConflictDoUpdate({
+            target:
+              listingAcceptedStates.listingId,
+
+            set: {
+              acceptedPriceMinor:
+                appliedPriceMinor,
+
+              acceptedAt: now,
+              updatedAt: now,
+            },
+          })
+
+        await db
+          .insert(listingPriceHistory)
+          .values({
+            listingId:
+              schedule.listingId,
+
+            priceMinor:
+              appliedPriceMinor,
+
+            basePriceMinor:
+              scheduledState.regularPriceMinor,
+
+            priceType:
+              shouldStart
+                ? 'SCHEDULED_PROMOTION'
+                : 'REGULAR',
+
+            externalCampaignId: null,
+
+            currency: 'HUF',
+
+            source:
+              'COMMERCE_HUB_SCHEDULE',
+
+            observedAt: now,
+          })
         if (shouldStart) {
           await db
             .update(listingPriceSchedules)

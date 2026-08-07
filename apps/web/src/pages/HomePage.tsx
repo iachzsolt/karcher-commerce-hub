@@ -771,12 +771,6 @@ function HomePage({
     useState(false)
   const [bulkSavingDesiredChanges, setBulkSavingDesiredChanges] = useState(false)
   const [discardingDesiredChanges, setDiscardingDesiredChanges] = useState(false)
-
-  const [
-    acceptingListingId,
-    setAcceptingListingId,
-  ] = useState<string | null>(null)
-
   const [syncingWholeListingId, setSyncingWholeListingId] =
     useState<string | null>(null)
 
@@ -958,6 +952,8 @@ function HomePage({
         (await listingsResponse.json()) as AllegroListingResponse
 
       setAllegroListings(listingsData.data)
+
+      await loadPriceSchedules()
 
 
 
@@ -1311,26 +1307,23 @@ function HomePage({
     return draft !== storedStatus
   }
 
+  const isAppliedPriceScheduleActive = (
+    schedule: ListingPriceSchedule,
+  ) =>
+    schedule.enabled &&
+    schedule.startAppliedAt !== null &&
+    schedule.endAppliedAt === null
+
   const getEffectiveDesiredPriceMinor = (
     listing: AllegroListing,
   ) => {
-    const now = Date.now()
-
     const activeSchedule =
       (
         priceSchedulesByListing[listing.id] ??
         []
       )
         .filter(
-          (schedule) =>
-            schedule.enabled &&
-            schedule.endAppliedAt === null &&
-            new Date(
-              schedule.validFrom,
-            ).getTime() <= now &&
-            new Date(
-              schedule.validTo,
-            ).getTime() >= now,
+          isAppliedPriceScheduleActive,
         )
         .sort(
           (left, right) =>
@@ -1347,7 +1340,6 @@ function HomePage({
       listing.desiredPriceMinor
     )
   }
-
   const hasPriceDifference = (
     listing: AllegroListing,
   ) => {
@@ -1369,10 +1361,7 @@ function HomePage({
           listing.id
         ] ?? []
       ).find(
-        (schedule) =>
-          schedule.enabled &&
-          schedule.scheduleStatus ===
-            'ACTIVE',
+        isAppliedPriceScheduleActive,
       ) ?? null
 
     const expectedPriceMinor =
@@ -1385,7 +1374,6 @@ function HomePage({
       expectedPriceMinor
     )
   }
-
   const hasAcceptedStockDifference = (
     listing: AllegroListing,
   ) =>
@@ -1397,7 +1385,6 @@ function HomePage({
   ) =>
     listing.publicationStatus !==
     listing.acceptedPublicationStatus
-
   const hasAcceptedDifference = (
     listing: AllegroListing,
   ) =>
@@ -1998,168 +1985,6 @@ Hibás: ${failed}`,
       )
     } finally {
       setDiscardingDesiredChanges(false)
-    }
-  }
-
-  const acceptCurrentListingState = async (
-    listing: AllegroListing,
-  ) => {
-    const changes: string[] = []
-
-    if (
-      hasAcceptedPriceDifference(listing)
-    ) {
-      changes.push(
-        `Ár: ${formatMoney(
-          listing.acceptedPriceMinor,
-          listing.currency,
-        )} → ${formatMoney(
-          listing.priceMinor,
-          listing.currency,
-        )}`,
-      )
-    }
-
-    if (
-      hasAcceptedStockDifference(listing)
-    ) {
-      changes.push(
-        `Készlet: ${
-          listing.acceptedStockAvailable ??
-          0
-        } db → ${
-          listing.stockAvailable ?? 0
-        } db`,
-      )
-    }
-
-    if (
-      hasAcceptedPublicationDifference(
-        listing,
-      )
-    ) {
-      changes.push(
-        `Státusz: ${formatListingStatus(
-          listing.acceptedPublicationStatus ??
-            'UNKNOWN',
-        )} → ${formatListingStatus(
-          listing.publicationStatus,
-        )}`,
-      )
-    }
-
-    const confirmed = window.confirm(
-      `Elfogadod az Allegro jelenlegi állapotát?
-
-${changes.join('\n')}
-
-Aktív kedvezmény esetén a normál alapár nem módosul.`,
-    )
-
-    if (!confirmed) {
-      return
-    }
-
-    setAcceptingListingId(listing.id)
-
-    try {
-      const response = await fetch(
-        `http://localhost:3000/allegro/listings/${listing.id}/accept-current-state`,
-        {
-          method: 'POST',
-        },
-      )
-
-      const result =
-        (await response.json()) as {
-          status: string
-          message?: string
-        }
-
-      if (!response.ok) {
-        throw new Error(
-          result.message ??
-            'A változás elfogadása sikertelen.',
-        )
-      }
-
-      const listingsResponse = await fetch(
-        'http://localhost:3000/allegro/listings',
-      )
-
-      if (!listingsResponse.ok) {
-        throw new Error(
-          'Nem sikerült újratölteni az ajánlatokat.',
-        )
-      }
-
-      const listingsData =
-        (await listingsResponse.json()) as
-          AllegroListingResponse
-
-      setAllegroListings(
-        listingsData.data,
-      )
-
-      const refreshedListing =
-        listingsData.data.find(
-          (item) =>
-            item.id === listing.id,
-        )
-
-      if (refreshedListing) {
-        setDesiredPriceDraftsState(
-          (previous) => ({
-            ...previous,
-            [listing.id]:
-              refreshedListing.desiredPriceMinor !==
-              null
-                ? String(
-                    refreshedListing.desiredPriceMinor /
-                      100,
-                  )
-                : '',
-          }),
-        )
-
-        setDesiredStockDraftsState(
-          (previous) => ({
-            ...previous,
-            [listing.id]:
-              refreshedListing.desiredStock !==
-              null
-                ? String(
-                    refreshedListing.desiredStock,
-                  )
-                : '',
-          }),
-        )
-
-        setDesiredStatusDraftsState(
-          (previous) => ({
-            ...previous,
-            [listing.id]:
-              refreshedListing
-                .desiredPublicationStatus ===
-              'ACTIVE'
-                ? 'ACTIVE'
-                : 'INACTIVE',
-          }),
-        )
-      }
-    } catch (error) {
-      console.error(
-        'Accept current Allegro state failed:',
-        error,
-      )
-
-      window.alert(
-        error instanceof Error
-          ? error.message
-          : 'A változás elfogadása sikertelen.',
-      )
-    } finally {
-      setAcceptingListingId(null)
     }
   }
 
@@ -3007,8 +2832,7 @@ ${changes.join('\n')}`,
                                 )}
                               </span>
 
-                              {relevantSchedule.scheduleStatus ===
-                                'ACTIVE' && (
+                              {isAppliedPriceScheduleActive(relevantSchedule) && (
                                 <span className="price-schedule-active-badge">
                                   <span className="price-schedule-active-dot" />
                                   Aktív kedvezmény
@@ -3542,30 +3366,9 @@ ${changes.join('\n')}`,
                             Rendben
                           </span>
                         ) : (
-                          <>
-                            <span className="sync-difference">
-                              Eltérés
-                            </span>
-
-                            <button
-                              className="accept-change-button"
-                              type="button"
-                              disabled={
-                                acceptingListingId ===
-                                listing.id
-                              }
-                              onClick={() =>
-                                void acceptCurrentListingState(
-                                  listing,
-                                )
-                              }
-                            >
-                              {acceptingListingId ===
-                              listing.id
-                                ? 'Elfogadás...'
-                                : 'Változás elfogadása'}
-                            </button>
-                          </>
+                          <span className="sync-difference">
+                            Eltérés
+                          </span>
                         )}
 
                         {(hasUnsavedDesiredPrice(listing) ||
