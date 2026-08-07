@@ -1127,6 +1127,26 @@ app.post(
         }
 
         if (
+          preparation.applicationStatus !==
+            'PREPARED' ||
+          preparation.campaignStatus !==
+            'PREPARED'
+        ) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                `Preparation cannot be scheduled from its current state: ${listingId}`,
+              applicationStatus:
+                preparation.applicationStatus,
+              campaignStatus:
+                preparation.campaignStatus,
+            },
+            409,
+          )
+        }
+
+        if (
           preparation.desiredPriceMinor === null ||
           !preparation.validFrom ||
           !preparation.validTo
@@ -1169,12 +1189,33 @@ app.post(
             updatedAt: now,
           })
           .where(
-            eq(
-              listingCampaigns.id,
-              preparation.id,
+            and(
+              eq(
+                listingCampaigns.id,
+                preparation.id,
+              ),
+              eq(
+                listingCampaigns.applicationStatus,
+                'PREPARED',
+              ),
+              eq(
+                listingCampaigns.campaignStatus,
+                'PREPARED',
+              ),
             ),
           )
           .returning()
+
+        if (!updated) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                `Preparation state changed before scheduling: ${listingId}`,
+            },
+            409,
+          )
+        }
 
         scheduled.push(updated)
       }
