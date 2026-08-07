@@ -1,0 +1,2 @@
+ALTER TABLE "listing_campaigns" ADD COLUMN "finish_retry_after" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "listing_campaigns" ADD COLUMN "finish_retry_count" integer DEFAULT 0 NOT NULL;

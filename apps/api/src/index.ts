@@ -15,7 +15,7 @@ import {
   products,
 } from '@karcher-commerce-hub/database'
 import { neon } from '@neondatabase/serverless'
-import { and, count, eq, gte, min } from 'drizzle-orm'
+import { and, count, eq, gte, min, or } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import {
@@ -2693,6 +2693,12 @@ app.post(
             finishOperationId:
               listingCampaigns.finishOperationId,
 
+            finishRetryAfter:
+              listingCampaigns.finishRetryAfter,
+
+            finishRetryCount:
+              listingCampaigns.finishRetryCount,
+
             offerId:
               platformListings.externalListingId,
           })
@@ -2810,6 +2816,40 @@ app.post(
           new Date()
 
         if (
+          preparation.campaignStatus ===
+            'FINISH_FAILED' &&
+          preparation.finishRetryCount >= 5
+        ) {
+          results.push({
+            listingId,
+            offerId:
+              preparation.offerId,
+            status: 'FAILED',
+            error:
+              'Maximum campaign finish retry count reached',
+          })
+
+          continue
+        }
+
+        if (
+          preparation.finishRetryAfter &&
+          finishingAt <
+            preparation.finishRetryAfter
+        ) {
+          results.push({
+            listingId,
+            offerId:
+              preparation.offerId,
+            status: 'NOT_DUE',
+            error:
+              `Finish retry scheduled for: ${preparation.finishRetryAfter.toISOString()}`,
+          })
+
+          continue
+        }
+
+        if (
           finishingAt <
           preparation.validTo
         ) {
@@ -2832,6 +2872,8 @@ app.post(
               'FINISHING',
 
             finishError: null,
+
+            finishRetryAfter: null,
 
             updatedAt:
               finishingAt,
@@ -2871,6 +2913,21 @@ app.post(
 
                 finishError:
                   errorText,
+
+                finishRetryCount:
+                  preparation.finishRetryCount + 1,
+
+                finishRetryAfter:
+                  preparation.finishRetryCount + 1 >= 5
+                    ? null
+                    : new Date(
+                        Date.now() +
+                          [5, 15, 30, 60][
+                            preparation.finishRetryCount
+                          ] *
+                            60 *
+                            1000,
+                      ),
 
                 lastSyncedAt:
                   new Date(),
@@ -2924,6 +2981,21 @@ app.post(
                 finishError:
                   errorText,
 
+                finishRetryCount:
+                  preparation.finishRetryCount + 1,
+
+                finishRetryAfter:
+                  preparation.finishRetryCount + 1 >= 5
+                    ? null
+                    : new Date(
+                        Date.now() +
+                          [5, 15, 30, 60][
+                            preparation.finishRetryCount
+                          ] *
+                            60 *
+                            1000,
+                      ),
+
                 lastSyncedAt:
                   new Date(),
 
@@ -2960,8 +3032,8 @@ app.post(
 
               finishError: null,
 
-              retryAfter: null,
-              retryCount: 0,
+              finishRetryAfter: null,
+              finishRetryCount: 0,
 
               lastSyncedAt:
                 new Date(),
@@ -2997,6 +3069,21 @@ app.post(
 
               finishError:
                 errorText,
+
+              finishRetryCount:
+                preparation.finishRetryCount + 1,
+
+              finishRetryAfter:
+                preparation.finishRetryCount + 1 >= 5
+                  ? null
+                  : new Date(
+                      Date.now() +
+                        [5, 15, 30, 60][
+                          preparation.finishRetryCount
+                        ] *
+                          60 *
+                          1000,
+                    ),
 
               lastSyncedAt:
                 new Date(),
@@ -3295,6 +3382,12 @@ async function processPendingCampaignFinishOperations() {
 
         campaignStatus:
           listingCampaigns.campaignStatus,
+
+        finishRetryAfter:
+          listingCampaigns.finishRetryAfter,
+
+        finishRetryCount:
+          listingCampaigns.finishRetryCount,
       })
       .from(listingCampaigns)
       .where(
@@ -3335,8 +3428,8 @@ async function processPendingCampaignFinishOperations() {
 
               finishError: null,
 
-              retryAfter: null,
-              retryCount: 0,
+              finishRetryAfter: null,
+              finishRetryCount: 0,
 
               lastSyncedAt:
                 new Date(),
@@ -3492,12 +3585,24 @@ async function processDueCampaignFinishes() {
 
         campaignStatus:
           listingCampaigns.campaignStatus,
+
+        finishRetryAfter:
+          listingCampaigns.finishRetryAfter,
+
+        finishRetryCount:
+          listingCampaigns.finishRetryCount,
       })
       .from(listingCampaigns)
       .where(
-        eq(
-          listingCampaigns.campaignStatus,
-          'ACTIVE',
+        or(
+          eq(
+            listingCampaigns.campaignStatus,
+            'ACTIVE',
+          ),
+          eq(
+            listingCampaigns.campaignStatus,
+            'FINISH_FAILED',
+          ),
         ),
       )
 
@@ -3507,7 +3612,18 @@ async function processDueCampaignFinishes() {
           row.applicationStatus ===
             'PROCESSED' &&
           row.validTo !== null &&
-          row.validTo <= now,
+          row.validTo <= now &&
+          (
+            row.campaignStatus ===
+              'ACTIVE' ||
+            (
+              row.campaignStatus ===
+                'FINISH_FAILED' &&
+              row.finishRetryCount < 5 &&
+              row.finishRetryAfter !== null &&
+              row.finishRetryAfter <= now
+            )
+          ),
       )
 
     if (dueRows.length === 0) {

@@ -550,6 +550,19 @@ export const listingCampaigns = pgTable(
       'finish_error',
     ),
 
+    finishRetryAfter: timestamp(
+      'finish_retry_after',
+      {
+        withTimezone: true,
+      },
+    ),
+
+    finishRetryCount: integer(
+      'finish_retry_count',
+    )
+      .notNull()
+      .default(0),
+
     retryAfter: timestamp('retry_after', {
       withTimezone: true,
     }),
