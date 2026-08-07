@@ -2750,3 +2750,46 @@ textarea {
   gap: 3px;
 }
 
+
+.accept-change-button {
+  margin-top: 6px;
+  padding: 5px 8px;
+  border: 1px solid #b9b9b9;
+  border-radius: 6px;
+  background: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.accept-change-button:hover:not(:disabled) {
+  background: #f5f5f5;
+}
+
+.accept-change-button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.price-schedule-active-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: fit-content;
+  margin-top: 5px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: #eaf6ea;
+  color: #237523;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.price-schedule-active-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: 0 0 auto;
+}
+

@@ -1,10 +1,11 @@
-﻿import 'dotenv/config'
+import 'dotenv/config'
 import { randomUUID } from 'node:crypto'
 import { serve } from '@hono/node-server'
 import {
   createDatabase,
   campaigns,
   listingCampaigns,
+  listingAcceptedStates,
   listingDesiredStates,
   listingPriceHistory,
   listingPriceSchedules,
@@ -346,6 +347,17 @@ app.get('/allegro/listings', async (context) => {
 
         autoStockSync:
           listingDesiredStates.autoStockSync,
+        acceptedPriceMinor:
+          listingAcceptedStates.acceptedPriceMinor,
+
+        acceptedStockAvailable:
+          listingAcceptedStates.acceptedStockAvailable,
+
+        acceptedPublicationStatus:
+          listingAcceptedStates.acceptedPublicationStatus,
+
+        acceptedAt:
+          listingAcceptedStates.acceptedAt,
       })
       .from(platformListings)
       .innerJoin(
@@ -380,6 +392,13 @@ app.get('/allegro/listings', async (context) => {
           platformListings.id,
         ),
       )
+      .leftJoin(
+        listingAcceptedStates,
+        eq(
+          listingAcceptedStates.listingId,
+          platformListings.id,
+        ),
+      )
       .where(
         and(
           eq(platforms.code, 'ALLEGRO'),
@@ -410,6 +429,362 @@ app.get('/allegro/listings', async (context) => {
     )
   }
 })
+
+app.post(
+  '/allegro/listings/:id/accept-current-state',
+  async (context) => {
+    if (!db) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Database is not configured',
+        },
+        500,
+      )
+    }
+
+    try {
+      const listingId =
+        context.req.param('id')
+
+      const now = new Date()
+
+      const [row] = await db
+        .select({
+          listingId:
+            platformListings.id,
+
+          priceMinor:
+            listingRemoteStates.priceMinor,
+
+          stockAvailable:
+            listingRemoteStates.stockAvailable,
+
+          publicationStatus:
+            listingRemoteStates.publicationStatus,
+
+          desiredStateId:
+            listingDesiredStates.id,
+
+          desiredPriceMinor:
+            listingDesiredStates.regularPriceMinor,
+
+          desiredStock:
+            listingDesiredStates.desiredStock,
+
+          desiredPublicationStatus:
+            listingDesiredStates.desiredPublicationStatus,
+          acceptedPriceMinor:
+            listingAcceptedStates.acceptedPriceMinor,
+
+          acceptedStockAvailable:
+            listingAcceptedStates.acceptedStockAvailable,
+
+          acceptedPublicationStatus:
+            listingAcceptedStates.acceptedPublicationStatus,
+        })
+        .from(platformListings)
+        .leftJoin(
+          listingRemoteStates,
+          eq(
+            listingRemoteStates.listingId,
+            platformListings.id,
+          ),
+        )
+        .leftJoin(
+          listingDesiredStates,
+          eq(
+            listingDesiredStates.listingId,
+            platformListings.id,
+          ),
+        )
+        .leftJoin(
+          listingAcceptedStates,
+          eq(
+            listingAcceptedStates.listingId,
+            platformListings.id,
+          ),
+        )
+        .where(
+          eq(
+            platformListings.id,
+            listingId,
+          ),
+        )
+        .limit(1)
+
+      if (!row) {
+        return context.json(
+          {
+            status: 'error',
+            message: 'Listing was not found',
+          },
+          404,
+        )
+      }
+
+      if (!row.desiredStateId) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Desired state was not found for the listing',
+          },
+          409,
+        )
+      }
+
+
+      // Aktív Commerce Hub időzített kedvezmény
+
+      const scheduleRows = await db
+        .select({
+          enabled:
+            listingPriceSchedules.enabled,
+
+          validFrom:
+            listingPriceSchedules.validFrom,
+
+          validTo:
+            listingPriceSchedules.validTo,
+
+          startAppliedAt:
+            listingPriceSchedules.startAppliedAt,
+
+          endAppliedAt:
+            listingPriceSchedules.endAppliedAt,
+        })
+        .from(listingPriceSchedules)
+        .where(
+          eq(
+            listingPriceSchedules.listingId,
+            listingId,
+          ),
+        )
+
+      const hasActivePriceSchedule =
+        scheduleRows.some(
+          (schedule) =>
+            schedule.enabled &&
+            schedule.startAppliedAt !== null &&
+            schedule.endAppliedAt === null &&
+            schedule.validFrom <= now &&
+            schedule.validTo >= now,
+        )
+
+
+      // Aktív hivatalos Allegro kampány
+
+      const campaignRows = await db
+        .select({
+          campaignType:
+            listingCampaigns.campaignType,
+
+          campaignStatus:
+            listingCampaigns.campaignStatus,
+
+          validFrom:
+            listingCampaigns.validFrom,
+
+          validTo:
+            listingCampaigns.validTo,
+        })
+        .from(listingCampaigns)
+        .where(
+          eq(
+            listingCampaigns.listingId,
+            listingId,
+          ),
+        )
+
+      const hasActiveAllegroCampaign =
+        campaignRows.some(
+          (campaign) =>
+            campaign.campaignType ===
+              'DISCOUNT' &&
+            campaign.campaignStatus ===
+              'ACTIVE' &&
+            (
+              !campaign.validFrom ||
+              campaign.validFrom <= now
+            ) &&
+            (
+              !campaign.validTo ||
+              campaign.validTo >= now
+            ),
+        )
+
+      const priceProtected =
+        hasActivePriceSchedule ||
+        hasActiveAllegroCampaign
+      const priceChangedSinceAccepted =
+        row.priceMinor !==
+        row.acceptedPriceMinor
+
+      const stockChangedSinceAccepted =
+        row.stockAvailable !==
+        row.acceptedStockAvailable
+
+      const publicationChangedSinceAccepted =
+        row.publicationStatus !==
+        row.acceptedPublicationStatus
+
+
+      // Allegro státusz -> kívánt státusz
+
+      let nextDesiredPublicationStatus =
+        row.desiredPublicationStatus ??
+        'UNKNOWN'
+
+      if (
+        row.publicationStatus === 'ACTIVE' ||
+        row.publicationStatus ===
+          'ACTIVATING'
+      ) {
+        nextDesiredPublicationStatus =
+          'ACTIVE'
+      } else if (
+        row.publicationStatus ===
+          'INACTIVE' ||
+        row.publicationStatus === 'ENDED'
+      ) {
+        nextDesiredPublicationStatus =
+          'INACTIVE'
+      }
+
+
+      // Normál változás elfogadásakor a desired state
+      // követi az Allegrót.
+      // Aktív kedvezménynél az alapár védett.
+
+      await db
+        .update(listingDesiredStates)
+        .set({
+          ...(
+            priceChangedSinceAccepted &&
+            !priceProtected
+              ? {
+                  regularPriceMinor:
+                    row.priceMinor,
+                }
+              : {}
+          ),
+
+          ...(
+            stockChangedSinceAccepted
+              ? {
+                  desiredStock:
+                    row.stockAvailable,
+                }
+              : {}
+          ),
+
+          ...(
+            publicationChangedSinceAccepted
+              ? {
+                  desiredPublicationStatus:
+                    nextDesiredPublicationStatus,
+                }
+              : {}
+          ),
+
+          updatedBy:
+            'COMMERCE_HUB_ACCEPT',
+
+          updatedAt: now,
+        })
+        .where(
+          eq(
+            listingDesiredStates.listingId,
+            listingId,
+          ),
+        )
+
+      // Aktuális Allegro állapot elfogadása
+
+      const acceptedPublicationStatus =
+        row.publicationStatus ??
+        'UNKNOWN'
+
+      await db
+        .insert(listingAcceptedStates)
+        .values({
+          listingId,
+
+          acceptedPriceMinor:
+            row.priceMinor,
+
+          acceptedStockAvailable:
+            row.stockAvailable,
+
+          acceptedPublicationStatus,
+
+          acceptedAt: now,
+          updatedAt: now,
+        })
+        .onConflictDoUpdate({
+          target:
+            listingAcceptedStates.listingId,
+
+          set: {
+            acceptedPriceMinor:
+              row.priceMinor,
+
+            acceptedStockAvailable:
+              row.stockAvailable,
+
+            acceptedPublicationStatus,
+
+            acceptedAt: now,
+            updatedAt: now,
+          },
+        })
+
+
+      return context.json({
+        status: 'ok',
+
+        data: {
+          listingId,
+
+          acceptedPriceMinor:
+            row.priceMinor,
+
+          acceptedStockAvailable:
+            row.stockAvailable,
+
+          acceptedPublicationStatus,
+
+          acceptedAt:
+            now.toISOString(),
+
+          priceProtected,
+
+          priceProtectionReason:
+            hasActiveAllegroCampaign
+              ? 'ALLEGRO_CAMPAIGN'
+              : hasActivePriceSchedule
+                ? 'PRICE_SCHEDULE'
+                : null,
+        },
+      })
+    } catch (error) {
+      console.error(
+        'Accept Allegro listing state failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Could not accept the current Allegro listing state',
+        },
+        500,
+      )
+    }
+  },
+)
 
 app.get('/allegro/listing-price-history-summary', async (context) => {
   if (!db) {
@@ -3474,6 +3849,281 @@ app.delete(
     }
   },
 )
+
+app.post(
+  '/allegro/listings/discard-desired-differences',
+  async (context) => {
+    if (!db) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Database is not configured',
+        },
+        500,
+      )
+    }
+
+    try {
+      const now = new Date()
+
+      const rows = await db
+        .select({
+          listingId:
+            platformListings.id,
+
+          priceMinor:
+            listingRemoteStates.priceMinor,
+
+          stockAvailable:
+            listingRemoteStates.stockAvailable,
+
+          publicationStatus:
+            listingRemoteStates
+              .publicationStatus,
+
+          desiredPriceMinor:
+            listingDesiredStates
+              .regularPriceMinor,
+
+          desiredStock:
+            listingDesiredStates.desiredStock,
+
+          desiredPublicationStatus:
+            listingDesiredStates
+              .desiredPublicationStatus,
+
+          priceLocked:
+            listingDesiredStates.priceLocked,
+        })
+        .from(platformListings)
+        .leftJoin(
+          listingRemoteStates,
+          eq(
+            listingRemoteStates.listingId,
+            platformListings.id,
+          ),
+        )
+        .innerJoin(
+          listingDesiredStates,
+          eq(
+            listingDesiredStates.listingId,
+            platformListings.id,
+          ),
+        )
+        .where(
+          eq(
+            platformListings.marketplace,
+            'allegro-hu',
+          ),
+        )
+
+      const scheduleRows = await db
+        .select({
+          listingId:
+            listingPriceSchedules.listingId,
+
+          validFrom:
+            listingPriceSchedules.validFrom,
+
+          validTo:
+            listingPriceSchedules.validTo,
+
+          enabled:
+            listingPriceSchedules.enabled,
+        })
+        .from(listingPriceSchedules)
+        .where(
+          eq(
+            listingPriceSchedules.enabled,
+            true,
+          ),
+        )
+
+      const activeScheduleListingIds =
+        new Set(
+          scheduleRows
+            .filter(
+              (schedule) =>
+                schedule.enabled &&
+                schedule.validFrom <= now &&
+                schedule.validTo >= now,
+            )
+            .map(
+              (schedule) =>
+                schedule.listingId,
+            ),
+        )
+
+      const campaignRows = await db
+        .select({
+          listingId:
+            listingCampaigns.listingId,
+
+          validFrom:
+            listingCampaigns.validFrom,
+
+          validTo:
+            listingCampaigns.validTo,
+        })
+        .from(listingCampaigns)
+        .where(
+          and(
+            eq(
+              listingCampaigns.campaignType,
+              'DISCOUNT',
+            ),
+            eq(
+              listingCampaigns.campaignStatus,
+              'ACTIVE',
+            ),
+          ),
+        )
+
+      const activeCampaignListingIds =
+        new Set(
+          campaignRows
+            .filter(
+              (campaign) =>
+                (
+                  !campaign.validFrom ||
+                  campaign.validFrom <= now
+                ) &&
+                (
+                  !campaign.validTo ||
+                  campaign.validTo >= now
+                ),
+            )
+            .map(
+              (campaign) =>
+                campaign.listingId,
+            ),
+        )
+
+      let updated = 0
+      let protectedPrices = 0
+
+      for (const row of rows) {
+        const priceProtected =
+          activeScheduleListingIds.has(
+            row.listingId,
+          ) ||
+          activeCampaignListingIds.has(
+            row.listingId,
+          )
+
+        let nextPublicationStatus =
+          row.desiredPublicationStatus
+
+        if (
+          row.publicationStatus === 'ACTIVE' ||
+          row.publicationStatus ===
+            'ACTIVATING'
+        ) {
+          nextPublicationStatus = 'ACTIVE'
+        } else if (
+          row.publicationStatus ===
+            'INACTIVE' ||
+          row.publicationStatus === 'ENDED'
+        ) {
+          nextPublicationStatus = 'INACTIVE'
+        }
+
+        const nextPriceMinor =
+          priceProtected
+            ? row.desiredPriceMinor
+            : (
+                row.priceMinor ??
+                row.desiredPriceMinor
+              )
+
+        const nextStock =
+          row.stockAvailable ??
+          row.desiredStock
+
+        const priceChanged =
+          nextPriceMinor !==
+          row.desiredPriceMinor
+
+        const stockChanged =
+          nextStock !== row.desiredStock
+
+        const publicationChanged =
+          nextPublicationStatus !==
+          row.desiredPublicationStatus
+
+        if (
+          priceProtected &&
+          row.priceMinor !==
+            row.desiredPriceMinor
+        ) {
+          protectedPrices += 1
+        }
+
+        if (
+          !priceChanged &&
+          !stockChanged &&
+          !publicationChanged
+        ) {
+          continue
+        }
+
+        await db
+          .update(listingDesiredStates)
+          .set({
+            regularPriceMinor:
+              nextPriceMinor,
+
+            desiredStock:
+              nextStock,
+
+            desiredPublicationStatus:
+              nextPublicationStatus,
+
+            priceLocked:
+              priceProtected
+                ? row.priceLocked
+                : false,
+
+            stockLocked: false,
+
+            updatedBy:
+              'COMMERCE_HUB_DISCARD',
+
+            updatedAt: now,
+          })
+          .where(
+            eq(
+              listingDesiredStates.listingId,
+              row.listingId,
+            ),
+          )
+
+        updated += 1
+      }
+
+      return context.json({
+        status: 'ok',
+        updated,
+        protectedPrices,
+      })
+    } catch (error) {
+      console.error(
+        'Discarding desired differences failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Could not discard desired differences',
+        },
+        500,
+      )
+    }
+  },
+)
+
 
 app.patch('/allegro/listings/:id/desired-price', async (context) => {
   if (!db) {

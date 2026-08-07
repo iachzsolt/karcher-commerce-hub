@@ -1,4 +1,4 @@
-﻿import {
+import {
   boolean,
   index,
   integer,
@@ -441,6 +441,48 @@ export const listingDesiredStates = pgTable(
   ],
 )
 
+export const listingAcceptedStates = pgTable(
+  'listing_accepted_states',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+
+    listingId: uuid('listing_id')
+      .notNull()
+      .references(() => platformListings.id),
+
+    acceptedPriceMinor: integer(
+      'accepted_price_minor',
+    ),
+
+    acceptedStockAvailable: integer(
+      'accepted_stock_available',
+    ),
+
+    acceptedPublicationStatus:
+      listingStatusEnum(
+        'accepted_publication_status',
+      )
+        .notNull()
+        .default('UNKNOWN'),
+
+    acceptedAt: timestamp('accepted_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp('updated_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex(
+      'listing_accepted_state_unique',
+    ).on(table.listingId),
+  ],
+)
 export const listingPriceSchedules = pgTable(
   'listing_price_schedules',
   {

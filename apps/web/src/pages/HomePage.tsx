@@ -1,5 +1,5 @@
-﻿import { useEffect, useState } from 'react'
-import '../App.css'
+import { useEffect, useState } from 'react'
+import '../CommerceHub.css'
 
 type HealthResponse = {
   status: string
@@ -71,6 +71,19 @@ type AllegroListing = {
 
   autoPriceSync: boolean | null
   autoStockSync: boolean | null
+
+  acceptedPriceMinor: number | null
+  acceptedStockAvailable: number | null
+
+  acceptedPublicationStatus:
+    | 'ACTIVE'
+    | 'ACTIVATING'
+    | 'INACTIVE'
+    | 'ENDED'
+    | 'UNKNOWN'
+    | null
+
+  acceptedAt: string | null
 }
 
 type PlatformResponse = {
@@ -626,7 +639,7 @@ function HomePage({
     })
   }
 
-  const [savingDesiredPrice, setSavingDesiredPrice] =
+  const [, setSavingDesiredPrice] =
     useState<string | null>(null)
 
   const [
@@ -675,7 +688,7 @@ function HomePage({
     })
   }
 
-  const [savingDesiredStock, setSavingDesiredStock] =
+  const [, setSavingDesiredStock] =
     useState<string | null>(null)
 
   const [
@@ -735,7 +748,7 @@ function HomePage({
     })
   }
 
-  const [savingDesiredStatus, setSavingDesiredStatus] =
+  const [, setSavingDesiredStatus] =
     useState<string | null>(null)
 
   const [listingSearch, setListingSearch] =
@@ -757,6 +770,12 @@ function HomePage({
   const [bulkSyncing, setBulkSyncing] =
     useState(false)
   const [bulkSavingDesiredChanges, setBulkSavingDesiredChanges] = useState(false)
+  const [discardingDesiredChanges, setDiscardingDesiredChanges] = useState(false)
+
+  const [
+    acceptingListingId,
+    setAcceptingListingId,
+  ] = useState<string | null>(null)
 
   const [syncingWholeListingId, setSyncingWholeListingId] =
     useState<string | null>(null)
@@ -1292,16 +1311,124 @@ function HomePage({
     return draft !== storedStatus
   }
 
+  const getEffectiveDesiredPriceMinor = (
+    listing: AllegroListing,
+  ) => {
+    const now = Date.now()
+
+    const activeSchedule =
+      (
+        priceSchedulesByListing[listing.id] ??
+        []
+      )
+        .filter(
+          (schedule) =>
+            schedule.enabled &&
+            schedule.endAppliedAt === null &&
+            new Date(
+              schedule.validFrom,
+            ).getTime() <= now &&
+            new Date(
+              schedule.validTo,
+            ).getTime() >= now,
+        )
+        .sort(
+          (left, right) =>
+            new Date(
+              right.validFrom,
+            ).getTime() -
+            new Date(
+              left.validFrom,
+            ).getTime(),
+        )[0] ?? null
+
+    return (
+      activeSchedule?.promotionalPriceMinor ??
+      listing.desiredPriceMinor
+    )
+  }
+
+  const hasPriceDifference = (
+    listing: AllegroListing,
+  ) => {
+    const effectiveDesiredPriceMinor =
+      getEffectiveDesiredPriceMinor(listing)
+
+    return (
+      effectiveDesiredPriceMinor !== null &&
+      listing.priceMinor !==
+        effectiveDesiredPriceMinor
+    )
+  }
+  const hasAcceptedPriceDifference = (
+    listing: AllegroListing,
+  ) => {
+    const activePriceSchedule =
+      (
+        priceSchedulesByListing[
+          listing.id
+        ] ?? []
+      ).find(
+        (schedule) =>
+          schedule.enabled &&
+          schedule.scheduleStatus ===
+            'ACTIVE',
+      ) ?? null
+
+    const expectedPriceMinor =
+      activePriceSchedule
+        ?.promotionalPriceMinor ??
+      listing.acceptedPriceMinor
+
+    return (
+      listing.priceMinor !==
+      expectedPriceMinor
+    )
+  }
+
+  const hasAcceptedStockDifference = (
+    listing: AllegroListing,
+  ) =>
+    listing.stockAvailable !==
+    listing.acceptedStockAvailable
+
+  const hasAcceptedPublicationDifference = (
+    listing: AllegroListing,
+  ) =>
+    listing.publicationStatus !==
+    listing.acceptedPublicationStatus
+
+  const hasAcceptedDifference = (
+    listing: AllegroListing,
+  ) =>
+    hasAcceptedPriceDifference(listing) ||
+    hasAcceptedStockDifference(listing) ||
+    hasAcceptedPublicationDifference(listing)
+
   const changedListingsCount =
     allegroListings.filter(
       (listing) =>
-        (listing.desiredPriceMinor !== null &&
-          listing.priceMinor !==
-            listing.desiredPriceMinor) ||
+        hasPriceDifference(listing) ||
         (listing.desiredStock !== null &&
           listing.stockAvailable !==
             listing.desiredStock) ||
         hasPublicationDifference(listing),
+    ).length
+  const selectedChangedListingsCount =
+    allegroListings.filter(
+      (listing) =>
+        selectedListingIds.includes(
+          listing.id,
+        ) &&
+        (
+          hasPriceDifference(listing) ||
+          (
+            listing.desiredStock !== null &&
+            listing.stockAvailable !==
+              listing.desiredStock
+          ) ||
+          hasPublicationDifference(listing)
+        ),
     ).length
   const unsavedDesiredListings =
     allegroListings.filter(
@@ -1720,6 +1847,323 @@ Hibás: ${failed}`,
     }
   }
 
+  const discardDesiredDifferences = async () => {
+    const confirmed = window.confirm(
+      [
+        'Biztosan elveted az összes nem szinkronizált módosítást?',
+        '',
+        'A kívánt ár-, készlet- és státuszértékek visszaállnak a jelenlegi Allegro-állapotra.',
+        '',
+        'Az Allegrón semmi nem változik.',
+      ].join('\n'),
+    )
+
+    if (!confirmed) {
+      return
+    }
+
+    setDiscardingDesiredChanges(true)
+
+    try {
+      const response = await fetch(
+        'http://localhost:3000/allegro/listings/discard-desired-differences',
+        {
+          method: 'POST',
+        },
+      )
+
+      const result = (await response.json()) as {
+        status: string
+        updated?: number
+        protectedPrices?: number
+        message?: string
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          result.message ??
+            'A módosítások elvetése sikertelen.',
+        )
+      }
+
+      const listingsResponse = await fetch(
+        'http://localhost:3000/allegro/listings',
+      )
+
+      if (!listingsResponse.ok) {
+        throw new Error(
+          'Nem sikerült újratölteni az ajánlatokat.',
+        )
+      }
+
+      const listingsData =
+        (await listingsResponse.json()) as
+          AllegroListingResponse
+
+      setAllegroListings(
+        listingsData.data,
+      )
+
+      setDesiredPriceDraftsState(
+        Object.fromEntries(
+          listingsData.data.map(
+            (listing) => [
+              listing.id,
+              listing.desiredPriceMinor !== null
+                ? String(
+                    listing.desiredPriceMinor / 100,
+                  )
+                : '',
+            ],
+          ),
+        ),
+      )
+
+      setDesiredStockDraftsState(
+        Object.fromEntries(
+          listingsData.data.map(
+            (listing) => [
+              listing.id,
+              listing.desiredStock !== null
+                ? String(
+                    listing.desiredStock,
+                  )
+                : '',
+            ],
+          ),
+        ),
+      )
+
+      setDesiredStatusDraftsState(
+        Object.fromEntries(
+          listingsData.data.map(
+            (listing) => [
+              listing.id,
+              listing.desiredPublicationStatus ===
+                'ACTIVE'
+                ? 'ACTIVE'
+                : listing.desiredPublicationStatus ===
+                    'INACTIVE'
+                  ? 'INACTIVE'
+                  : listing.publicationStatus ===
+                        'ACTIVE' ||
+                      listing.publicationStatus ===
+                        'ACTIVATING'
+                    ? 'ACTIVE'
+                    : 'INACTIVE',
+            ],
+          ),
+        ) as Record<
+          string,
+          'ACTIVE' | 'INACTIVE'
+        >,
+      )
+
+      try {
+        window.sessionStorage.removeItem(
+          'commerce-hub:allegro:unsaved-price-drafts-v2',
+        )
+
+        window.sessionStorage.removeItem(
+          'commerce-hub:allegro:unsaved-stock-drafts-v2',
+        )
+
+        window.sessionStorage.removeItem(
+          'commerce-hub:allegro:unsaved-status-drafts-v2',
+        )
+      } catch {
+        // A sessionStorage hibája nem akadályozza a műveletet.
+      }
+
+      setSelectedListingIds([])
+
+      const protectedMessage =
+        (result.protectedPrices ?? 0) > 0
+          ? `\n\n${result.protectedPrices} aktív kedvezményes vagy kampányár normál kívánt ára érintetlen maradt.`
+          : ''
+
+      window.alert(
+        `${result.updated ?? 0} ajánlat módosítása elvetve.${protectedMessage}`,
+      )
+    } catch (error) {
+      console.error(
+        'Discard desired differences failed:',
+        error,
+      )
+
+      window.alert(
+        error instanceof Error
+          ? error.message
+          : 'A módosítások elvetése sikertelen.',
+      )
+    } finally {
+      setDiscardingDesiredChanges(false)
+    }
+  }
+
+  const acceptCurrentListingState = async (
+    listing: AllegroListing,
+  ) => {
+    const changes: string[] = []
+
+    if (
+      hasAcceptedPriceDifference(listing)
+    ) {
+      changes.push(
+        `Ár: ${formatMoney(
+          listing.acceptedPriceMinor,
+          listing.currency,
+        )} → ${formatMoney(
+          listing.priceMinor,
+          listing.currency,
+        )}`,
+      )
+    }
+
+    if (
+      hasAcceptedStockDifference(listing)
+    ) {
+      changes.push(
+        `Készlet: ${
+          listing.acceptedStockAvailable ??
+          0
+        } db → ${
+          listing.stockAvailable ?? 0
+        } db`,
+      )
+    }
+
+    if (
+      hasAcceptedPublicationDifference(
+        listing,
+      )
+    ) {
+      changes.push(
+        `Státusz: ${formatListingStatus(
+          listing.acceptedPublicationStatus ??
+            'UNKNOWN',
+        )} → ${formatListingStatus(
+          listing.publicationStatus,
+        )}`,
+      )
+    }
+
+    const confirmed = window.confirm(
+      `Elfogadod az Allegro jelenlegi állapotát?
+
+${changes.join('\n')}
+
+Aktív kedvezmény esetén a normál alapár nem módosul.`,
+    )
+
+    if (!confirmed) {
+      return
+    }
+
+    setAcceptingListingId(listing.id)
+
+    try {
+      const response = await fetch(
+        `http://localhost:3000/allegro/listings/${listing.id}/accept-current-state`,
+        {
+          method: 'POST',
+        },
+      )
+
+      const result =
+        (await response.json()) as {
+          status: string
+          message?: string
+        }
+
+      if (!response.ok) {
+        throw new Error(
+          result.message ??
+            'A változás elfogadása sikertelen.',
+        )
+      }
+
+      const listingsResponse = await fetch(
+        'http://localhost:3000/allegro/listings',
+      )
+
+      if (!listingsResponse.ok) {
+        throw new Error(
+          'Nem sikerült újratölteni az ajánlatokat.',
+        )
+      }
+
+      const listingsData =
+        (await listingsResponse.json()) as
+          AllegroListingResponse
+
+      setAllegroListings(
+        listingsData.data,
+      )
+
+      const refreshedListing =
+        listingsData.data.find(
+          (item) =>
+            item.id === listing.id,
+        )
+
+      if (refreshedListing) {
+        setDesiredPriceDraftsState(
+          (previous) => ({
+            ...previous,
+            [listing.id]:
+              refreshedListing.desiredPriceMinor !==
+              null
+                ? String(
+                    refreshedListing.desiredPriceMinor /
+                      100,
+                  )
+                : '',
+          }),
+        )
+
+        setDesiredStockDraftsState(
+          (previous) => ({
+            ...previous,
+            [listing.id]:
+              refreshedListing.desiredStock !==
+              null
+                ? String(
+                    refreshedListing.desiredStock,
+                  )
+                : '',
+          }),
+        )
+
+        setDesiredStatusDraftsState(
+          (previous) => ({
+            ...previous,
+            [listing.id]:
+              refreshedListing
+                .desiredPublicationStatus ===
+              'ACTIVE'
+                ? 'ACTIVE'
+                : 'INACTIVE',
+          }),
+        )
+      }
+    } catch (error) {
+      console.error(
+        'Accept current Allegro state failed:',
+        error,
+      )
+
+      window.alert(
+        error instanceof Error
+          ? error.message
+          : 'A változás elfogadása sikertelen.',
+      )
+    } finally {
+      setAcceptingListingId(null)
+    }
+  }
+
+
   const normalizedListingSearch =
     listingSearch.trim().toLowerCase()
 
@@ -1747,13 +2191,7 @@ Hibás: ${failed}`,
   const searchedDifferentListingsCount =
     searchedAllegroListings.filter(
       (listing) =>
-        (listing.desiredPriceMinor !== null &&
-          listing.priceMinor !==
-            listing.desiredPriceMinor) ||
-        (listing.desiredStock !== null &&
-          listing.stockAvailable !==
-            listing.desiredStock) ||
-        hasPublicationDifference(listing),
+        hasAcceptedDifference(listing),
     ).length
 
   const searchedUnsavedListingsCount =
@@ -1787,14 +2225,8 @@ Hibás: ${failed}`,
     searchedAllegroListings.filter((listing) => {
       switch (listingFilter) {
         case 'DIFFERENT':
-          return (
-            (listing.desiredPriceMinor !== null &&
-              listing.priceMinor !==
-                listing.desiredPriceMinor) ||
-            (listing.desiredStock !== null &&
-              listing.stockAvailable !==
-                listing.desiredStock) ||
-            hasPublicationDifference(listing)
+          return hasAcceptedDifference(
+            listing,
           )
 
         case 'UNSAVED':
@@ -1868,9 +2300,7 @@ Hibás: ${failed}`,
       (listing) =>
         selectedListingIds.includes(listing.id) &&
         (
-          (listing.desiredPriceMinor !== null &&
-            listing.priceMinor !==
-              listing.desiredPriceMinor) ||
+          hasPriceDifference(listing) ||
           (listing.desiredStock !== null &&
             listing.stockAvailable !==
               listing.desiredStock) ||
@@ -1956,9 +2386,11 @@ Folyamatban: ${data.pending ?? 0}`,
   const syncWholeListingToAllegro = async (
     listing: AllegroListing,
   ) => {
+    const effectiveDesiredPriceMinor =
+      getEffectiveDesiredPriceMinor(listing)
+
     const priceChanged =
-      listing.desiredPriceMinor !== null &&
-      listing.priceMinor !== listing.desiredPriceMinor
+      hasPriceDifference(listing)
 
     const stockChanged =
       listing.desiredStock !== null &&
@@ -1983,7 +2415,7 @@ Folyamatban: ${data.pending ?? 0}`,
           listing.priceMinor,
           listing.currency,
         )} → ${formatMoney(
-          listing.desiredPriceMinor,
+          effectiveDesiredPriceMinor,
           listing.currency,
         )}`,
       )
@@ -2387,6 +2819,25 @@ ${changes.join('\n')}`,
                 </button>
 
                 <button
+                  className="bulk-sync-button bulk-discard-button"
+                  type="button"
+                  disabled={
+                    (changedListingsCount === 0 &&
+                      unsavedDesiredChangesCount === 0) ||
+                    bulkSavingDesiredChanges ||
+                    bulkSyncing ||
+                    discardingDesiredChanges
+                  }
+                  onClick={() =>
+                    void discardDesiredDifferences()
+                  }
+                >
+                  {discardingDesiredChanges
+                    ? 'Elvetés...'
+                    : 'Módosítások elvetése'}
+                </button>
+
+                <button
                   className="bulk-sync-button"
                   type="button"
                   disabled={
@@ -2555,6 +3006,14 @@ ${changes.join('\n')}`,
                                   relevantSchedule.validTo,
                                 )}
                               </span>
+
+                              {relevantSchedule.scheduleStatus ===
+                                'ACTIVE' && (
+                                <span className="price-schedule-active-badge">
+                                  <span className="price-schedule-active-dot" />
+                                  Aktív kedvezmény
+                                </span>
+                              )}
                             </div>
                           ) : null
                         })()}
@@ -3076,20 +3535,37 @@ ${changes.join('\n')}`,
 
                     <td>
                       <div className="difference-cell-content">
-                        {listing.priceMinor ===
-                          listing.desiredPriceMinor &&
-                        listing.stockAvailable ===
-                          listing.desiredStock &&
-                        !hasPublicationDifference(
+                        {!hasAcceptedDifference(
                           listing,
                         ) ? (
                           <span className="sync-match">
                             Rendben
                           </span>
                         ) : (
-                          <span className="sync-difference">
-                            Eltérés
-                          </span>
+                          <>
+                            <span className="sync-difference">
+                              Eltérés
+                            </span>
+
+                            <button
+                              className="accept-change-button"
+                              type="button"
+                              disabled={
+                                acceptingListingId ===
+                                listing.id
+                              }
+                              onClick={() =>
+                                void acceptCurrentListingState(
+                                  listing,
+                                )
+                              }
+                            >
+                              {acceptingListingId ===
+                              listing.id
+                                ? 'Elfogadás...'
+                                : 'Változás elfogadása'}
+                            </button>
+                          </>
                         )}
 
                         {(hasUnsavedDesiredPrice(listing) ||
@@ -3181,8 +3657,7 @@ ${changes.join('\n')}`,
                         className="row-sync-button"
                         type="button"
                         disabled={
-                          (listing.priceMinor ===
-                            listing.desiredPriceMinor &&
+                          (!hasPriceDifference(listing) &&
                             listing.stockAvailable ===
                               listing.desiredStock &&
                             !hasPublicationDifference(
@@ -3400,10 +3875,3 @@ ${changes.join('\n')}`,
 }
 
 export default HomePage
-
-
-
-
-
-
-

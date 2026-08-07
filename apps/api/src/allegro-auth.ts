@@ -4446,6 +4446,16 @@ allegroAuth.post(
 
       for (const schedule of schedules) {
         if (schedule.endAppliedAt !== null) {
+          // Cleanup completed price schedule
+          await db
+            .delete(listingPriceSchedules)
+            .where(
+              eq(
+                listingPriceSchedules.id,
+                schedule.id,
+              ),
+            )
+
           skipped += 1
 
           results.push({
