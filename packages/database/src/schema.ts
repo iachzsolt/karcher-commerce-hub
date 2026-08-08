@@ -714,3 +714,262 @@ export const listingCampaigns = pgTable(
     ),
   ],
 )
+
+/* ============================================================
+   COMMERCE HUB DATA CONNECTIONS
+   ============================================================ */
+
+export const dataConnections = pgTable(
+  'data_connections',
+  {
+    id: uuid('id')
+      .defaultRandom()
+      .primaryKey(),
+
+    name: text('name')
+      .notNull(),
+
+    sourceType: text('source_type')
+      .notNull(),
+
+    purpose: text('purpose')
+      .notNull()
+      .default('INVENTORY'),
+
+    isActive: boolean('is_active')
+      .notNull()
+      .default(false),
+
+    status: text('status')
+      .notNull()
+      .default('NOT_CONFIGURED'),
+
+    lastSuccessfulAt: timestamp(
+      'last_successful_at',
+      {
+        withTimezone: true,
+      },
+    ),
+
+    lastError: text('last_error'),
+
+    createdAt: timestamp('created_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp('updated_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index(
+      'data_connections_purpose_index',
+    ).on(table.purpose),
+
+    index(
+      'data_connections_source_type_index',
+    ).on(table.sourceType),
+
+    index(
+      'data_connections_active_index',
+    ).on(table.isActive),
+  ],
+)
+
+
+export const inventoryConnectionConfigs = pgTable(
+  'inventory_connection_configs',
+  {
+    id: uuid('id')
+      .defaultRandom()
+      .primaryKey(),
+
+    connectionId: uuid('connection_id')
+      .notNull()
+      .references(() => dataConnections.id),
+
+    spreadsheetId: text('spreadsheet_id')
+      .notNull(),
+
+    spreadsheetUrl: text('spreadsheet_url'),
+
+    sheetName: text('sheet_name')
+      .notNull(),
+
+    headerRow: integer('header_row')
+      .notNull()
+      .default(1),
+
+    skuSourceField: text('sku_source_field')
+      .notNull(),
+
+    stockSourceField: text('stock_source_field')
+      .notNull(),
+
+    createdAt: timestamp('created_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp('updated_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex(
+      'inventory_connection_config_unique',
+    ).on(table.connectionId),
+  ],
+)
+
+
+export const inventoryImportRuns = pgTable(
+  'inventory_import_runs',
+  {
+    id: uuid('id')
+      .defaultRandom()
+      .primaryKey(),
+
+    connectionId: uuid('connection_id')
+      .notNull()
+      .references(() => dataConnections.id),
+
+    status: text('status')
+      .notNull()
+      .default('RUNNING'),
+
+    rowsRead: integer('rows_read')
+      .notNull()
+      .default(0),
+
+    rowsImported: integer('rows_imported')
+      .notNull()
+      .default(0),
+
+    rowsNormalizedToZero: integer(
+      'rows_normalized_to_zero',
+    )
+      .notNull()
+      .default(0),
+
+    duplicateSkuCount: integer(
+      'duplicate_sku_count',
+    )
+      .notNull()
+      .default(0),
+
+    changedItemCount: integer(
+      'changed_item_count',
+    )
+      .notNull()
+      .default(0),
+
+    sourceFingerprint: text(
+      'source_fingerprint',
+    ),
+
+    error: text('error'),
+
+    startedAt: timestamp('started_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    finishedAt: timestamp('finished_at', {
+      withTimezone: true,
+    }),
+
+    createdAt: timestamp('created_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index(
+      'inventory_import_runs_connection_index',
+    ).on(table.connectionId),
+
+    index(
+      'inventory_import_runs_started_index',
+    ).on(table.startedAt),
+  ],
+)
+
+
+export const inventorySourceItems = pgTable(
+  'inventory_source_items',
+  {
+    id: uuid('id')
+      .defaultRandom()
+      .primaryKey(),
+
+    connectionId: uuid('connection_id')
+      .notNull()
+      .references(() => dataConnections.id),
+
+    sku: text('sku')
+      .notNull(),
+
+    stock: integer('stock')
+      .notNull()
+      .default(0),
+
+    sourceStockValue: text(
+      'source_stock_value',
+    ),
+
+    normalizedToZero: boolean(
+      'normalized_to_zero',
+    )
+      .notNull()
+      .default(false),
+
+    lastImportRunId: uuid(
+      'last_import_run_id',
+    )
+      .references(() => inventoryImportRuns.id),
+
+    observedAt: timestamp('observed_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    createdAt: timestamp('created_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp('updated_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex(
+      'inventory_source_item_unique',
+    ).on(
+      table.connectionId,
+      table.sku,
+    ),
+
+    index(
+      'inventory_source_items_sku_index',
+    ).on(table.sku),
+
+    index(
+      'inventory_source_items_connection_index',
+    ).on(table.connectionId),
+  ],
+)
