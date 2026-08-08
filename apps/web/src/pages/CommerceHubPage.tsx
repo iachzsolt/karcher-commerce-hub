@@ -1,3 +1,4 @@
+import DataConnectionsSettings from '../components/DataConnectionsSettings'
 import { Link } from 'react-router-dom'
 
 import CommerceHubTopbar from '../components/CommerceHubTopbar'
@@ -226,72 +227,7 @@ function SettingsSection() {
         </div>
       </section>
 
-      <section className="hub-section">
-        <div className="hub-section-heading">
-          <div>
-            <h3>Adatkapcsolatok</h3>
-
-            <p>
-              Külső adatforrások csatlakoztatása
-              a Commerce Hubhoz.
-            </p>
-          </div>
-
-          <button
-            className="hub-primary-button"
-            type="button"
-            disabled
-            title="A Google Sheets kapcsolatot a következő lépésben építjük meg."
-          >
-            + Új adatkapcsolat
-          </button>
-        </div>
-
-        <div className="connection-flow-placeholder">
-          <div className="connection-node connection-node-source">
-            <span className="connection-node-icon">
-              +
-            </span>
-
-            <strong>Adatforrás</strong>
-
-            <span>
-              Google Sheets, API, CSV…
-            </span>
-          </div>
-
-          <div className="connection-cable">
-            <span className="connection-plug" />
-            <span className="connection-line" />
-            <span className="connection-arrow">
-              ›
-            </span>
-          </div>
-
-          <div className="connection-node connection-node-hub">
-            <span className="connection-node-logo">
-              CH
-            </span>
-
-            <strong>Commerce Hub</strong>
-
-            <span>
-              Adatfogadás és validáció
-            </span>
-          </div>
-        </div>
-
-        <div className="hub-empty-state">
-          <strong>
-            Még nincs adatkapcsolat
-          </strong>
-
-          <p>
-            Elsőként a Google Sheets
-            készletforrást fogjuk bekötni.
-          </p>
-        </div>
-      </section>
+      <DataConnectionsSettings />
     </>
   )
 }

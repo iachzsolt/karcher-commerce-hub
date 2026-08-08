@@ -1198,7 +1198,7 @@ dataConnectionsApi.post(
             dataConnections,
           )
           .set({
-            status: 'ACTIVE',
+            status: 'READY',
             lastSuccessfulAt:
               now,
             lastError: null,
@@ -1408,7 +1408,7 @@ dataConnectionsApi.post(
           dataConnections,
         )
         .set({
-          status: 'ACTIVE',
+          status: 'READY',
           lastSuccessfulAt:
             now,
           lastError: null,
@@ -1482,6 +1482,99 @@ dataConnectionsApi.post(
   },
 )
 
+
+/* ============================================================
+   ACTIVATE INVENTORY SOURCE
+   ============================================================ */
+
+dataConnectionsApi.post(
+  '/:connectionId/activate',
+  async (context) => {
+    const database =
+      requireDatabase()
+
+    const connectionId =
+      context.req.param(
+        'connectionId',
+      )
+
+    const [connection] =
+      await database
+        .select()
+        .from(dataConnections)
+        .where(
+          and(
+            eq(
+              dataConnections.id,
+              connectionId,
+            ),
+            eq(
+              dataConnections.purpose,
+              'INVENTORY',
+            ),
+          ),
+        )
+        .limit(1)
+
+    if (!connection) {
+      return context.json(
+        {
+          error:
+            'Készlet adatkapcsolat nem található.',
+        },
+        404,
+      )
+    }
+
+    if (
+      connection.status !== 'READY' &&
+      connection.status !== 'ACTIVE'
+    ) {
+      return context.json(
+        {
+          error:
+            'Csak sikeresen tesztelt adatkapcsolat állítható be aktív készletforrásként.',
+        },
+        409,
+      )
+    }
+
+    const now =
+      new Date()
+
+    await database
+      .update(dataConnections)
+      .set({
+        isActive: false,
+        updatedAt: now,
+      })
+      .where(
+        eq(
+          dataConnections.purpose,
+          'INVENTORY',
+        ),
+      )
+
+    const [activated] =
+      await database
+        .update(dataConnections)
+        .set({
+          isActive: true,
+          updatedAt: now,
+        })
+        .where(
+          eq(
+            dataConnections.id,
+            connectionId,
+          ),
+        )
+        .returning()
+
+    return context.json({
+      connection: activated,
+    })
+  },
+)
 
 /* ============================================================
    CURRENT IMPORTED INVENTORY
