@@ -20,6 +20,7 @@ import { neon } from '@neondatabase/serverless'
 import { and, count, eq, gte, min, or } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
+import { dataConnectionsApi } from './data-connections.js'
 import {
   allegroAuth,
   finishOfferAllegroCampaign,
@@ -42,6 +43,7 @@ app.use(
 )
 
 app.route('/auth/allegro', allegroAuth)
+app.route('/data-connections', dataConnectionsApi)
 
 const PRICE_SCHEDULE_PROCESS_INTERVAL_MS =
   60 * 1000
