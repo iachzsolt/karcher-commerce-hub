@@ -4503,3 +4503,805 @@ textarea {
 
   background: #fffef1;
 }
+/* ============================================================
+   DATA CONNECTION SCHEDULE UI
+   ============================================================ */
+
+.schedule-panel {
+  padding: 20px 22px;
+
+  border-top: 1px solid #ededed;
+
+  background: #fcfcfc;
+}
+
+.schedule-panel-loading {
+  color: #777777;
+
+  font-size: 11px;
+}
+
+.schedule-panel-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+
+  gap: 24px;
+
+  margin-bottom: 18px;
+}
+
+.schedule-eyebrow,
+.schedule-field-label {
+  display: block;
+
+  color: #777777;
+
+  font-size: 9px;
+  font-weight: 850;
+
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.schedule-panel-heading h5 {
+  margin: 4px 0;
+
+  font-size: 14px;
+}
+
+.schedule-panel-heading p {
+  max-width: 520px;
+
+  margin: 0;
+
+  color: #777777;
+
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.schedule-switch {
+  display: flex;
+  align-items: center;
+
+  gap: 8px;
+
+  cursor: pointer;
+}
+
+.schedule-switch input {
+  display: none;
+}
+
+.schedule-switch > span {
+  position: relative;
+
+  width: 34px;
+  height: 19px;
+
+  border-radius: 999px;
+
+  background: #d2d2d2;
+
+  transition: background 120ms ease;
+}
+
+.schedule-switch > span::after {
+  content: '';
+
+  position: absolute;
+
+  top: 3px;
+  left: 3px;
+
+  width: 13px;
+  height: 13px;
+
+  border-radius: 50%;
+
+  background: #ffffff;
+
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.18);
+
+  transition:
+    transform 120ms ease;
+}
+
+.schedule-switch input:checked + span {
+  background: #111111;
+}
+
+.schedule-switch
+input:checked + span::after {
+  transform:
+    translateX(15px);
+}
+
+.schedule-switch strong {
+  font-size: 10px;
+}
+
+.schedule-info-note {
+  margin-bottom: 14px;
+  padding: 9px 11px;
+
+  border-left: 3px solid #ffee00;
+
+  background: #fffef0;
+
+  color: #656000;
+
+  font-size: 10px;
+}
+
+.schedule-mode-grid {
+  display: grid;
+
+  grid-template-columns:
+    repeat(2, minmax(0, 1fr));
+
+  gap: 10px;
+
+  margin-bottom: 16px;
+}
+
+.schedule-mode-card {
+  display: grid;
+
+  gap: 3px;
+
+  padding: 12px 14px;
+
+  border: 1px solid #dddddd;
+  border-radius: 9px;
+
+  background: #ffffff;
+
+  text-align: left;
+
+  cursor: pointer;
+}
+
+.schedule-mode-card strong {
+  font-size: 11px;
+}
+
+.schedule-mode-card span {
+  color: #777777;
+
+  font-size: 9px;
+}
+
+.schedule-mode-card-active {
+  border-color: #d8cc00;
+
+  background: #fffef1;
+
+  box-shadow:
+    inset 0 -2px 0 #ffee00;
+}
+
+.schedule-config-block {
+  margin-bottom: 15px;
+}
+
+.schedule-times {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+
+  gap: 7px;
+
+  margin-top: 7px;
+}
+
+.schedule-time-chip {
+  display: inline-flex;
+  align-items: center;
+
+  gap: 7px;
+
+  padding: 7px 9px;
+
+  border: 1px solid #d8d8d8;
+  border-radius: 7px;
+
+  background: #ffffff;
+
+  font-size: 10px;
+  font-weight: 750;
+
+  cursor: pointer;
+}
+
+.schedule-time-chip b {
+  color: #999999;
+
+  font-size: 12px;
+}
+
+.schedule-time-add {
+  display: inline-flex;
+
+  gap: 5px;
+}
+
+.schedule-time-add input,
+.schedule-time-add button,
+.schedule-interval-field select {
+  min-height: 32px;
+
+  box-sizing: border-box;
+
+  padding: 6px 9px;
+
+  border: 1px solid #d8d8d8;
+  border-radius: 7px;
+
+  background: #ffffff;
+
+  color: #222222;
+
+  font: inherit;
+  font-size: 10px;
+}
+
+.schedule-time-add button {
+  font-weight: 750;
+
+  cursor: pointer;
+}
+
+.schedule-interval-field {
+  display: grid;
+
+  max-width: 260px;
+
+  gap: 7px;
+}
+
+.schedule-weekday-option {
+  display: inline-flex;
+  align-items: flex-start;
+
+  gap: 8px;
+
+  margin-bottom: 16px;
+
+  cursor: pointer;
+}
+
+.schedule-weekday-option input {
+  margin-top: 2px;
+}
+
+.schedule-weekday-option > span {
+  display: grid;
+
+  gap: 2px;
+
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.schedule-weekday-option small {
+  color: #888888;
+
+  font-size: 9px;
+  font-weight: 400;
+}
+
+.schedule-runtime-grid {
+  display: grid;
+
+  grid-template-columns:
+    repeat(3, minmax(0, 1fr));
+
+  border: 1px solid #e2e2e2;
+  border-radius: 9px;
+
+  background: #ffffff;
+
+  overflow: hidden;
+}
+
+.schedule-runtime-grid > div {
+  padding: 11px 13px;
+
+  border-right: 1px solid #ededed;
+}
+
+.schedule-runtime-grid > div:last-child {
+  border-right: 0;
+}
+
+.schedule-runtime-grid span {
+  display: block;
+
+  margin-bottom: 4px;
+
+  color: #888888;
+
+  font-size: 8px;
+  font-weight: 800;
+
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.schedule-runtime-grid strong {
+  font-size: 10px;
+}
+
+.schedule-footer {
+  display: flex;
+  justify-content: flex-end;
+
+  margin-top: 14px;
+}
+
+
+@media (max-width: 800px) {
+  .schedule-panel-heading {
+    flex-direction: column;
+  }
+
+  .schedule-mode-grid,
+  .schedule-runtime-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .schedule-runtime-grid > div {
+    border-right: 0;
+    border-bottom: 1px solid #ededed;
+  }
+
+  .schedule-runtime-grid > div:last-child {
+    border-bottom: 0;
+  }
+}
+/* ============================================================
+   SCHEDULE COMPACT POLISH
+   ============================================================ */
+
+.schedule-panel {
+  padding: 14px 18px;
+}
+
+.schedule-panel-heading {
+  margin-bottom: 12px;
+}
+
+.schedule-panel-heading p {
+  line-height: 1.35;
+}
+
+.schedule-mode-grid {
+  gap: 8px;
+  margin-bottom: 11px;
+}
+
+.schedule-mode-card {
+  padding: 9px 11px;
+}
+
+.schedule-config-block {
+  margin-bottom: 10px;
+}
+
+.schedule-times {
+  gap: 6px;
+  margin-top: 5px;
+}
+
+.schedule-time-chip {
+  padding: 6px 8px;
+}
+
+.schedule-add-time-button {
+  min-height: 30px;
+
+  padding: 5px 9px;
+
+  border: 1px solid #d8d8d8;
+  border-radius: 7px;
+
+  background: #ffffff;
+
+  color: #222222;
+
+  font: inherit;
+  font-size: 10px;
+  font-weight: 750;
+
+  cursor: pointer;
+}
+
+.schedule-add-time-button:hover {
+  background: #f7f7f7;
+}
+
+.schedule-time-add-open {
+  display: inline-flex;
+  align-items: center;
+
+  gap: 5px;
+}
+
+.schedule-time-add-open input,
+.schedule-time-add-open button {
+  min-height: 30px;
+}
+
+.schedule-time-add-open button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.schedule-time-cancel {
+  color: #777777 !important;
+
+  background: transparent !important;
+
+  border-color: transparent !important;
+}
+
+.schedule-weekday-option {
+  margin-bottom: 10px;
+}
+
+.schedule-runtime-grid > div {
+  padding: 9px 11px;
+}
+
+.schedule-footer {
+  margin-top: 10px;
+}
+
+.schedule-footer .hub-primary-button {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+/* ============================================================
+   SCHEDULE ULTRA COMPACT V2
+   ============================================================ */
+
+.schedule-panel-v2 {
+  padding: 12px 16px 13px;
+}
+
+.schedule-v2-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  gap: 20px;
+
+  margin-bottom: 10px;
+}
+
+.schedule-v2-title {
+  display: grid;
+  gap: 1px;
+}
+
+.schedule-v2-title-line {
+  display: flex;
+  align-items: center;
+
+  gap: 8px;
+}
+
+.schedule-v2-title > strong {
+  font-size: 12px;
+}
+
+.schedule-v2-title > small {
+  color: #888888;
+
+  font-size: 9px;
+}
+
+.schedule-save-state {
+  font-size: 8px;
+  font-weight: 800;
+}
+
+.schedule-save-saved {
+  color: #418251;
+}
+
+.schedule-save-saving {
+  color: #777777;
+}
+
+.schedule-save-error {
+  color: #a13333;
+}
+
+.schedule-v2-error {
+  margin-bottom: 8px;
+
+  padding: 7px 9px;
+
+  border: 1px solid #efcccc;
+  border-radius: 6px;
+
+  background: #fff7f7;
+
+  color: #9b3131;
+
+  font-size: 9px;
+}
+
+.schedule-v2-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+
+  gap: 8px;
+
+  min-height: 32px;
+}
+
+.schedule-v2-mode {
+  display: inline-flex;
+
+  padding: 2px;
+
+  border: 1px solid #dddddd;
+  border-radius: 7px;
+
+  background: #f5f5f5;
+}
+
+.schedule-v2-mode button {
+  padding: 6px 9px;
+
+  border: 0;
+  border-radius: 5px;
+
+  background: transparent;
+
+  color: #666666;
+
+  font: inherit;
+  font-size: 9px;
+  font-weight: 750;
+
+  cursor: pointer;
+}
+
+.schedule-v2-mode button.active {
+  background: #ffffff;
+
+  color: #111111;
+
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.schedule-v2-times {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+
+  gap: 5px;
+}
+
+.schedule-panel-v2
+.schedule-time-chip {
+  min-height: 28px;
+
+  padding: 5px 7px;
+
+  font-size: 9px;
+}
+
+.schedule-panel-v2
+.schedule-add-time-button {
+  min-height: 28px;
+
+  padding: 5px 8px;
+
+  font-size: 9px;
+}
+
+.schedule-panel-v2
+.schedule-time-add-open input,
+.schedule-panel-v2
+.schedule-time-add-open button {
+  min-height: 28px;
+  height: 28px;
+}
+
+.schedule-v2-interval {
+  min-height: 29px;
+
+  padding: 5px 8px;
+
+  border: 1px solid #d8d8d8;
+  border-radius: 7px;
+
+  background: #ffffff;
+
+  font: inherit;
+  font-size: 9px;
+}
+
+.schedule-v2-weekdays {
+  display: inline-flex;
+  align-items: center;
+
+  gap: 5px;
+
+  margin-left: auto;
+
+  font-size: 9px;
+  font-weight: 700;
+
+  cursor: pointer;
+}
+
+.schedule-v2-weekdays input {
+  margin: 0;
+}
+
+.schedule-v2-runtime {
+  display: flex;
+  align-items: center;
+
+  gap: 10px;
+
+  margin-top: 9px;
+  padding-top: 8px;
+
+  border-top: 1px solid #e8e8e8;
+
+  color: #888888;
+
+  font-size: 8px;
+}
+
+.schedule-v2-runtime > span {
+  display: inline-flex;
+  align-items: center;
+
+  gap: 5px;
+
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-weight: 750;
+}
+
+.schedule-v2-runtime strong {
+  color: #222222;
+
+  font-size: 9px;
+  letter-spacing: 0;
+
+  text-transform: none;
+}
+
+.schedule-v2-runtime i {
+  width: 1px;
+  height: 12px;
+
+  background: #dddddd;
+}
+
+.schedule-v2-runtime small {
+  margin-left: auto;
+
+  color: #999999;
+
+  font-size: 8px;
+}
+
+.schedule-panel-v2
+.schedule-switch {
+  flex: 0 0 auto;
+}
+
+.schedule-panel-v2
+.schedule-switch strong {
+  font-size: 9px;
+}
+
+
+/* a régi nagy footer már nem használatos */
+
+.schedule-panel-v2
+.schedule-footer {
+  display: none;
+}
+
+
+@media (max-width: 800px) {
+  .schedule-v2-header {
+    align-items: flex-start;
+  }
+
+  .schedule-v2-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .schedule-v2-weekdays {
+    margin-left: 0;
+  }
+
+  .schedule-v2-runtime {
+    align-items: flex-start;
+    flex-direction: column;
+
+    gap: 4px;
+  }
+
+  .schedule-v2-runtime i {
+    display: none;
+  }
+
+  .schedule-v2-runtime small {
+    margin-left: 0;
+  }
+}
+/* ============================================================
+   SCHEDULE COLLAPSED STATE
+   ============================================================ */
+
+.schedule-panel-v2 {
+  transition:
+    padding 140ms ease,
+    background 140ms ease;
+}
+
+.schedule-v2-expanded {
+  margin-top: 8px;
+
+  animation:
+    schedule-expand 140ms ease-out;
+}
+
+.schedule-v2-expanded
+.schedule-v2-runtime {
+  margin-top: 8px;
+}
+
+/* Kikapcsolva csak a fejléc marad */
+.schedule-panel-v2:not(:has(.schedule-v2-expanded)) {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.schedule-panel-v2:not(:has(.schedule-v2-expanded))
+.schedule-v2-header {
+  margin-bottom: 0;
+}
+
+.schedule-panel-v2:not(:has(.schedule-v2-expanded))
+.schedule-v2-title > small {
+  display: none;
+}
+
+@keyframes schedule-expand {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+/* ============================================================
+   REMOVE ACTIVE CONNECTION SIDE ACCENT
+   ============================================================ */
+
+.data-connection-card-active {
+  box-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.025);
+}

@@ -1,3 +1,4 @@
+import DataConnectionSchedulePanel from './DataConnectionSchedulePanel'
 import {
   useEffect,
   useState,
@@ -1446,6 +1447,15 @@ function DataConnectionsSettings() {
                       }
                     </div>
                   )}
+
+                  <DataConnectionSchedulePanel
+                    connectionId={
+                      connection.id
+                    }
+                    isActive={
+                      connection.isActive
+                    }
+                  />
 
                   <div className="connection-card-actions">
                     {!connection.isActive && (
