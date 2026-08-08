@@ -1,3 +1,4 @@
+import CommerceHubTopbar from '../components/CommerceHubTopbar'
 import HomePage from './HomePage'
 import AllegroCampaignsPage from './AllegroCampaignsPage'
 
@@ -45,20 +46,7 @@ function AllegroSettings() {
 function AllegroPage() {
   return (
     <div className="app-shell">
-      <header className="topbar">
-        <div className="brand">
-          <div className="brand-mark" />
-
-          <div>
-            <p className="eyebrow">KÄRCHER</p>
-            <h1>Commerce Hub</h1>
-          </div>
-        </div>
-
-        <div className="environment-badge">
-          Allegro
-        </div>
-      </header>
+      <CommerceHubTopbar />
 
       <main className="content">
         <section className="allegro-module-header">
