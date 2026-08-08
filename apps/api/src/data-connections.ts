@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import {
   createDatabase,
   dataConnections,
+  dataConnectionSchedules,
   inventoryConnectionConfigs,
   inventoryImportRuns,
   inventorySourceItems,
@@ -11,6 +12,7 @@ import {
   and,
   desc,
   eq,
+  lte,
   isNull,
   ne,
   or,
@@ -536,6 +538,710 @@ async function getConnection(
   return result ?? null
 }
 
+
+/* ============================================================
+   DATA CONNECTION REFRESH SCHEDULES
+   ============================================================ */
+
+type RefreshScheduleMode =
+  | 'DAILY_TIMES'
+  | 'INTERVAL'
+
+type RefreshScheduleSettings = {
+  mode: RefreshScheduleMode
+  intervalMinutes: number | null
+  dailyTimes: string[]
+  timeZone: string
+  weekdaysOnly: boolean
+}
+
+function normalizeDailyTimes(
+  value: unknown,
+) {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  const valid =
+    value
+      .map((item) =>
+        String(item).trim(),
+      )
+      .filter((item) =>
+        /^([01]\d|2[0-3]):[0-5]\d$/.test(
+          item,
+        ),
+      )
+
+  return [
+    ...new Set(valid),
+  ].sort()
+}
+
+function parseDailyTimesJson(
+  value: string,
+) {
+  try {
+    return normalizeDailyTimes(
+      JSON.parse(value),
+    )
+  } catch {
+    return []
+  }
+}
+
+function getLocalScheduleParts(
+  date: Date,
+  timeZone: string,
+) {
+  const formatter =
+    new Intl.DateTimeFormat(
+      'en-GB',
+      {
+        timeZone,
+        weekday: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      },
+    )
+
+  const parts =
+    formatter.formatToParts(
+      date,
+    )
+
+  const values =
+    Object.fromEntries(
+      parts.map((part) => [
+        part.type,
+        part.value,
+      ]),
+    )
+
+  return {
+    weekday:
+      values.weekday ?? '',
+    time:
+      `${values.hour ?? '00'}:${values.minute ?? '00'}`,
+  }
+}
+
+function isWeekend(
+  date: Date,
+  timeZone: string,
+) {
+  const { weekday } =
+    getLocalScheduleParts(
+      date,
+      timeZone,
+    )
+
+  return (
+    weekday === 'Sat' ||
+    weekday === 'Sun'
+  )
+}
+
+function calculateNextRunAt(
+  settings: RefreshScheduleSettings,
+  from = new Date(),
+) {
+  if (
+    settings.mode ===
+    'INTERVAL'
+  ) {
+    const minutes =
+      settings.intervalMinutes
+
+    if (
+      minutes === null ||
+      minutes < 1
+    ) {
+      return null
+    }
+
+    let candidate =
+      new Date(
+        from.getTime() +
+          minutes * 60 * 1000,
+      )
+
+    /*
+     * Weekdays-only interval schedules
+     * pause through Saturday/Sunday.
+     */
+    while (
+      settings.weekdaysOnly &&
+      isWeekend(
+        candidate,
+        settings.timeZone,
+      )
+    ) {
+      candidate =
+        new Date(
+          candidate.getTime() +
+            60 * 60 * 1000,
+        )
+    }
+
+    return candidate
+  }
+
+  if (
+    settings.dailyTimes.length === 0
+  ) {
+    return null
+  }
+
+  /*
+   * Starting from the next whole minute,
+   * find the first configured local time.
+   *
+   * Intl handles Europe/Budapest DST
+   * conversion for us.
+   */
+  let candidate =
+    new Date(
+      Math.floor(
+        from.getTime() / 60000,
+      ) *
+        60000 +
+        60000,
+    )
+
+  const maxMinutes =
+    8 * 24 * 60
+
+  for (
+    let offset = 0;
+    offset < maxMinutes;
+    offset += 1
+  ) {
+    const local =
+      getLocalScheduleParts(
+        candidate,
+        settings.timeZone,
+      )
+
+    const allowedDay =
+      !settings.weekdaysOnly ||
+      (
+        local.weekday !== 'Sat' &&
+        local.weekday !== 'Sun'
+      )
+
+    if (
+      allowedDay &&
+      settings.dailyTimes.includes(
+        local.time,
+      )
+    ) {
+      return candidate
+    }
+
+    candidate =
+      new Date(
+        candidate.getTime() +
+          60 * 1000,
+      )
+  }
+
+  return null
+}
+
+
+dataConnectionsApi.get(
+  '/:connectionId/schedule',
+  async (context) => {
+    const database =
+      requireDatabase()
+
+    const connectionId =
+      context.req.param(
+        'connectionId',
+      )
+
+    const [schedule] =
+      await database
+        .select()
+        .from(
+          dataConnectionSchedules,
+        )
+        .where(
+          eq(
+            dataConnectionSchedules
+              .connectionId,
+            connectionId,
+          ),
+        )
+        .limit(1)
+
+    if (!schedule) {
+      return context.json({
+        connectionId,
+        enabled: false,
+        mode: 'DAILY_TIMES',
+        intervalMinutes: null,
+        dailyTimes: [],
+        timeZone:
+          'Europe/Budapest',
+        weekdaysOnly: true,
+        lastRunAt: null,
+        nextRunAt: null,
+      })
+    }
+
+    return context.json({
+      connectionId,
+      enabled:
+        schedule.enabled,
+      mode:
+        schedule.mode,
+      intervalMinutes:
+        schedule.intervalMinutes,
+      dailyTimes:
+        parseDailyTimesJson(
+          schedule.dailyTimesJson,
+        ),
+      timeZone:
+        schedule.timeZone,
+      weekdaysOnly:
+        schedule.weekdaysOnly,
+      lastRunAt:
+        schedule.lastRunAt,
+      nextRunAt:
+        schedule.nextRunAt,
+    })
+  },
+)
+
+
+dataConnectionsApi.put(
+  '/:connectionId/schedule',
+  async (context) => {
+    const database =
+      requireDatabase()
+
+    const connectionId =
+      context.req.param(
+        'connectionId',
+      )
+
+    const body =
+      (await context.req
+        .json()
+        .catch(() => null)) as
+        | {
+            enabled?: boolean
+            mode?: string
+            intervalMinutes?:
+              number | null
+            dailyTimes?: unknown
+            weekdaysOnly?: boolean
+          }
+        | null
+
+    const [connection] =
+      await database
+        .select()
+        .from(dataConnections)
+        .where(
+          eq(
+            dataConnections.id,
+            connectionId,
+          ),
+        )
+        .limit(1)
+
+    if (!connection) {
+      return context.json(
+        {
+          error:
+            'Adatkapcsolat nem található.',
+        },
+        404,
+      )
+    }
+
+    const enabled =
+      body?.enabled === true
+
+    if (
+      enabled &&
+      !connection.isActive
+    ) {
+      return context.json(
+        {
+          error:
+            'Automatikus frissítés csak az aktív készletforráson kapcsolható be.',
+        },
+        409,
+      )
+    }
+
+    const mode:
+      RefreshScheduleMode =
+      body?.mode === 'INTERVAL'
+        ? 'INTERVAL'
+        : 'DAILY_TIMES'
+
+    const dailyTimes =
+      normalizeDailyTimes(
+        body?.dailyTimes,
+      )
+
+    const rawInterval =
+      Number(
+        body?.intervalMinutes,
+      )
+
+    const intervalMinutes =
+      Number.isFinite(
+        rawInterval,
+      )
+        ? Math.floor(rawInterval)
+        : null
+
+    if (
+      enabled &&
+      mode === 'DAILY_TIMES' &&
+      dailyTimes.length === 0
+    ) {
+      return context.json(
+        {
+          error:
+            'Adj meg legalább egy napi frissítési időpontot.',
+        },
+        400,
+      )
+    }
+
+    if (
+      enabled &&
+      mode === 'INTERVAL' &&
+      (
+        intervalMinutes === null ||
+        intervalMinutes < 15 ||
+        intervalMinutes > 1440
+      )
+    ) {
+      return context.json(
+        {
+          error:
+            'Az intervallum 15 és 1440 perc között lehet.',
+        },
+        400,
+      )
+    }
+
+    const settings:
+      RefreshScheduleSettings = {
+      mode,
+      intervalMinutes:
+        mode === 'INTERVAL'
+          ? intervalMinutes
+          : null,
+      dailyTimes:
+        mode === 'DAILY_TIMES'
+          ? dailyTimes
+          : [],
+      timeZone:
+        'Europe/Budapest',
+      weekdaysOnly:
+        body?.weekdaysOnly ??
+        true,
+    }
+
+    const now =
+      new Date()
+
+    const nextRunAt =
+      enabled
+        ? calculateNextRunAt(
+            settings,
+            now,
+          )
+        : null
+
+    if (
+      enabled &&
+      !nextRunAt
+    ) {
+      return context.json(
+        {
+          error:
+            'A következő frissítési időpont nem számítható ki.',
+        },
+        400,
+      )
+    }
+
+    const [saved] =
+      await database
+        .insert(
+          dataConnectionSchedules,
+        )
+        .values({
+          connectionId,
+          enabled,
+          mode,
+          intervalMinutes:
+            settings.intervalMinutes,
+          dailyTimesJson:
+            JSON.stringify(
+              settings.dailyTimes,
+            ),
+          timeZone:
+            settings.timeZone,
+          weekdaysOnly:
+            settings.weekdaysOnly,
+          nextRunAt,
+          updatedAt: now,
+        })
+        .onConflictDoUpdate({
+          target:
+            dataConnectionSchedules
+              .connectionId,
+          set: {
+            enabled,
+            mode,
+            intervalMinutes:
+              settings.intervalMinutes,
+            dailyTimesJson:
+              JSON.stringify(
+                settings.dailyTimes,
+              ),
+            timeZone:
+              settings.timeZone,
+            weekdaysOnly:
+              settings.weekdaysOnly,
+            nextRunAt,
+            updatedAt: now,
+          },
+        })
+        .returning()
+
+    return context.json({
+      connectionId,
+      enabled:
+        saved?.enabled ?? enabled,
+      mode:
+        saved?.mode ?? mode,
+      intervalMinutes:
+        saved?.intervalMinutes ??
+        settings.intervalMinutes,
+      dailyTimes:
+        parseDailyTimesJson(
+          saved?.dailyTimesJson ??
+            JSON.stringify(
+              settings.dailyTimes,
+            ),
+        ),
+      timeZone:
+        saved?.timeZone ??
+        settings.timeZone,
+      weekdaysOnly:
+        saved?.weekdaysOnly ??
+        settings.weekdaysOnly,
+      lastRunAt:
+        saved?.lastRunAt ??
+        null,
+      nextRunAt:
+        saved?.nextRunAt ??
+        nextRunAt,
+    })
+  },
+)
+
+
+let refreshScheduleProcessorRunning =
+  false
+
+export async function processDueDataConnectionSchedules() {
+  if (
+    refreshScheduleProcessorRunning
+  ) {
+    return
+  }
+
+  if (!db) {
+    return
+  }
+
+  refreshScheduleProcessorRunning =
+    true
+
+  try {
+    const now =
+      new Date()
+
+    const dueSchedules =
+      await db
+        .select({
+          schedule:
+            dataConnectionSchedules,
+          connection:
+            dataConnections,
+        })
+        .from(
+          dataConnectionSchedules,
+        )
+        .innerJoin(
+          dataConnections,
+          eq(
+            dataConnections.id,
+            dataConnectionSchedules
+              .connectionId,
+          ),
+        )
+        .where(
+          and(
+            eq(
+              dataConnectionSchedules
+                .enabled,
+              true,
+            ),
+            lte(
+              dataConnectionSchedules
+                .nextRunAt,
+              now,
+            ),
+            eq(
+              dataConnections.isActive,
+              true,
+            ),
+          ),
+        )
+
+    for (
+      const item of dueSchedules
+    ) {
+      const startedAt =
+        new Date()
+
+      const settings:
+        RefreshScheduleSettings = {
+        mode:
+          item.schedule.mode ===
+          'INTERVAL'
+            ? 'INTERVAL'
+            : 'DAILY_TIMES',
+
+        intervalMinutes:
+          item.schedule
+            .intervalMinutes,
+
+        dailyTimes:
+          parseDailyTimesJson(
+            item.schedule
+              .dailyTimesJson,
+          ),
+
+        timeZone:
+          item.schedule
+            .timeZone,
+
+        weekdaysOnly:
+          item.schedule
+            .weekdaysOnly,
+      }
+
+      try {
+        const response =
+          await dataConnectionsApi
+            .request(
+              `/${item.connection.id}/import`,
+              {
+                method: 'POST',
+              },
+            )
+
+        const result =
+          (await response
+            .json()
+            .catch(() => null)) as
+            | {
+                status?: string
+                rowsImported?: number
+                changedItemCount?: number
+                error?: string
+              }
+            | null
+
+        if (!response.ok) {
+          console.warn(
+            'Automatic inventory refresh failed:',
+            {
+              connectionId:
+                item.connection.id,
+              connectionName:
+                item.connection.name,
+              status:
+                response.status,
+              result,
+            },
+          )
+        } else {
+          console.log(
+            'Automatic inventory refresh completed:',
+            {
+              connectionId:
+                item.connection.id,
+              connectionName:
+                item.connection.name,
+              status:
+                result?.status,
+              rowsImported:
+                result?.rowsImported ??
+                0,
+              changedItemCount:
+                result
+                  ?.changedItemCount ??
+                0,
+            },
+          )
+        }
+      } catch (error) {
+        console.error(
+          'Automatic inventory refresh error:',
+          {
+            connectionId:
+              item.connection.id,
+            error,
+          },
+        )
+      } finally {
+        const nextRunAt =
+          calculateNextRunAt(
+            settings,
+            new Date(),
+          )
+
+        await db
+          .update(
+            dataConnectionSchedules,
+          )
+          .set({
+            lastRunAt:
+              startedAt,
+            nextRunAt,
+            updatedAt:
+              new Date(),
+          })
+          .where(
+            eq(
+              dataConnectionSchedules.id,
+              item.schedule.id,
+            ),
+          )
+      }
+    }
+  } finally {
+    refreshScheduleProcessorRunning =
+      false
+  }
+}
 
 /* ============================================================
    LIST CONNECTIONS

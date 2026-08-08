@@ -20,7 +20,10 @@ import { neon } from '@neondatabase/serverless'
 import { and, count, eq, gte, min, or } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
-import { dataConnectionsApi } from './data-connections.js'
+import {
+  dataConnectionsApi,
+  processDueDataConnectionSchedules,
+} from './data-connections.js'
 import {
   allegroAuth,
   finishOfferAllegroCampaign,
@@ -5998,7 +6001,27 @@ async function startServer() {
 
   void runAutomaticAllegroSync()
 
-  const campaignSubmissionTimer =
+  const dataConnectionScheduleTimer =
+  setInterval(() => {
+    void processDueDataConnectionSchedules()
+      .catch((error) => {
+        console.error(
+          'Data connection schedule processor failed:',
+          error,
+        )
+      })
+  }, 60 * 1000)
+
+dataConnectionScheduleTimer.unref()
+
+void processDueDataConnectionSchedules()
+  .catch((error) => {
+    console.error(
+      'Initial data connection schedule processing failed:',
+      error,
+    )
+  })
+const campaignSubmissionTimer =
     setInterval(() => {
       void processDueCampaignSubmissions()
     }, 60 * 1000)
