@@ -973,3 +973,87 @@ export const inventorySourceItems = pgTable(
     ).on(table.connectionId),
   ],
 )
+
+/* ============================================================
+   DATA CONNECTION SCHEDULES
+   ============================================================ */
+
+export const dataConnectionSchedules = pgTable(
+  'data_connection_schedules',
+  {
+    id: uuid('id')
+      .defaultRandom()
+      .primaryKey(),
+
+    connectionId: uuid('connection_id')
+      .notNull()
+      .references(() => dataConnections.id),
+
+    enabled: boolean('enabled')
+      .notNull()
+      .default(false),
+
+    mode: text('mode')
+      .notNull()
+      .default('DAILY_TIMES'),
+
+    intervalMinutes: integer(
+      'interval_minutes',
+    ),
+
+    dailyTimesJson: text(
+      'daily_times_json',
+    )
+      .notNull()
+      .default('[]'),
+
+    timeZone: text('time_zone')
+      .notNull()
+      .default('Europe/Budapest'),
+
+    weekdaysOnly: boolean(
+      'weekdays_only',
+    )
+      .notNull()
+      .default(true),
+
+    lastRunAt: timestamp(
+      'last_run_at',
+      {
+        withTimezone: true,
+      },
+    ),
+
+    nextRunAt: timestamp(
+      'next_run_at',
+      {
+        withTimezone: true,
+      },
+    ),
+
+    createdAt: timestamp('created_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp('updated_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex(
+      'data_connection_schedule_unique',
+    ).on(table.connectionId),
+
+    index(
+      'data_connection_schedule_enabled_index',
+    ).on(table.enabled),
+
+    index(
+      'data_connection_schedule_next_run_index',
+    ).on(table.nextRunAt),
+  ],
+)
