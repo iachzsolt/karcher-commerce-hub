@@ -11,6 +11,8 @@ import {
   and,
   desc,
   eq,
+  isNull,
+  ne,
   or,
   sql,
 } from 'drizzle-orm'
@@ -1011,6 +1013,68 @@ dataConnectionsApi.post(
         )
 
       if (
+        analysis.rowsImported === 0
+      ) {
+        const message =
+          'A forrás nem tartalmaz használható cikkszámot.'
+
+        const now =
+          new Date()
+
+        await database
+          .update(
+            inventoryImportRuns,
+          )
+          .set({
+            status: 'FAILED',
+            rowsRead:
+              analysis.rowsRead,
+            rowsImported: 0,
+            rowsNormalizedToZero:
+              analysis
+                .rowsNormalizedToZero,
+            duplicateSkuCount:
+              analysis
+                .duplicateSkuCount,
+            changedItemCount: 0,
+            sourceFingerprint:
+              analysis.fingerprint,
+            error: message,
+            finishedAt: now,
+          })
+          .where(
+            eq(
+              inventoryImportRuns.id,
+              run.id,
+            ),
+          )
+
+        await database
+          .update(dataConnections)
+          .set({
+            status: 'ERROR',
+            lastError: message,
+            updatedAt: now,
+          })
+          .where(
+            eq(
+              dataConnections.id,
+              connectionId,
+            ),
+          )
+
+        return context.json(
+          {
+            status: 'FAILED',
+            error: message,
+            rowsRead:
+              analysis.rowsRead,
+            rowsImported: 0,
+          },
+          422,
+        )
+      }
+      if (
         analysis
           .duplicateSkuCount > 0
       ) {
@@ -1191,13 +1255,32 @@ dataConnectionsApi.post(
           ),
         )
 
-      const changedItemCount =
+      const currentSkuSet =
+        new Set(
+          analysis.items.map(
+            (item) => item.sku,
+          ),
+        )
+
+      const updatedOrAddedItemCount =
         analysis.items.filter(
           (item) =>
             existingBySku.get(
               item.sku,
             ) !== item.stock,
         ).length
+
+      const removedItemCount =
+        existingItems.filter(
+          (item) =>
+            !currentSkuSet.has(
+              item.sku,
+            ),
+        ).length
+
+      const changedItemCount =
+        updatedOrAddedItemCount +
+        removedItemCount
 
       const chunkSize = 200
 
@@ -1263,6 +1346,37 @@ dataConnectionsApi.post(
           })
       }
 
+      /*
+       * Remove items that are not part of the new full snapshot.
+       *
+       * Every item seen in this import has already been upserted
+       * with lastImportRunId = run.id. Anything else belongs to
+       * an older snapshot and must no longer remain active.
+       */
+      await database
+        .delete(
+          inventorySourceItems,
+        )
+        .where(
+          and(
+            eq(
+              inventorySourceItems
+                .connectionId,
+              connectionId,
+            ),
+            or(
+              isNull(
+                inventorySourceItems
+                  .lastImportRunId,
+              ),
+              ne(
+                inventorySourceItems
+                  .lastImportRunId,
+                run.id,
+              ),
+            ),
+          ),
+        )
       await database
         .update(
           inventoryImportRuns,
@@ -1317,6 +1431,7 @@ dataConnectionsApi.post(
           analysis
             .rowsNormalizedToZero,
         changedItemCount,
+        removedItemCount,
       })
     } catch (error) {
       const message =
