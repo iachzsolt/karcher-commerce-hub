@@ -412,6 +412,10 @@ export const listingDesiredStates = pgTable(
       .notNull()
       .default(false),
 
+    stockAutoPaused: boolean('stock_auto_paused')
+      .notNull()
+      .default(false),
+
     autoPriceSync: boolean('auto_price_sync')
       .notNull()
       .default(false),

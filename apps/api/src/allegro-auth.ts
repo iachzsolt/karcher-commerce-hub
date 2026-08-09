@@ -3087,7 +3087,7 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
       continue
     }
 
-    if (task.status === 'FAILED') {
+    if (task.status === 'FAIL' || task.status === 'FAILED') {
       return context.json(
         {
           status: 'error',
@@ -3383,7 +3383,7 @@ allegroAuth.post('/push-status/:listingId', async (context) => {
       continue
     }
 
-    if (task.status === 'FAILED') {
+    if (task.status === 'FAIL' || task.status === 'FAILED') {
       return context.json(
         {
           status: 'error',

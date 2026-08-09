@@ -1,0 +1,1 @@
+ALTER TABLE "listing_desired_states" ADD COLUMN "stock_auto_paused" boolean DEFAULT false NOT NULL;

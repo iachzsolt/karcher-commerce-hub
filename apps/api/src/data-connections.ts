@@ -2397,6 +2397,14 @@ dataConnectionsApi.get(
           publicationStatus:
             listingRemoteStates
               .publicationStatus,
+
+      stockAutoPaused:
+        listingDesiredStates
+          .stockAutoPaused,
+
+      desiredPublicationStatus:
+        listingDesiredStates
+          .desiredPublicationStatus,
         })
         .from(
           platformListings,
@@ -2503,6 +2511,8 @@ dataConnectionsApi.get(
                 offerId: listing.offerId,
                 listingName: listing.listingName,
                 publicationStatus: listing.publicationStatus,
+                stockAutoPaused: listing.stockAutoPaused ?? false,
+                desiredPublicationStatus: listing.desiredPublicationStatus ?? 'UNKNOWN',
 
                 sourceStock: null,
                 sourceMissing: true,
@@ -2532,6 +2542,8 @@ dataConnectionsApi.get(
               offerId: listing.offerId,
               listingName: listing.listingName,
               publicationStatus: listing.publicationStatus,
+              stockAutoPaused: listing.stockAutoPaused ?? false,
+              desiredPublicationStatus: listing.desiredPublicationStatus ?? 'UNKNOWN',
 
               sourceStock: null,
               sourceMissing: true,
@@ -2570,6 +2582,8 @@ dataConnectionsApi.get(
               publicationStatus:
                 listing
                   .publicationStatus,
+              stockAutoPaused: listing.stockAutoPaused ?? false,
+              desiredPublicationStatus: listing.desiredPublicationStatus ?? 'UNKNOWN',
 
               sourceStock:
                 source.stock,
@@ -2618,6 +2632,8 @@ dataConnectionsApi.get(
               publicationStatus:
                 listing
                   .publicationStatus,
+              stockAutoPaused: listing.stockAutoPaused ?? false,
+              desiredPublicationStatus: listing.desiredPublicationStatus ?? 'UNKNOWN',
 
               sourceStock:
                 source.stock,
@@ -2660,6 +2676,8 @@ dataConnectionsApi.get(
             publicationStatus:
               listing
                 .publicationStatus,
+            stockAutoPaused: listing.stockAutoPaused ?? false,
+            desiredPublicationStatus: listing.desiredPublicationStatus ?? 'UNKNOWN',
 
             sourceStock:
                 source.stock,
