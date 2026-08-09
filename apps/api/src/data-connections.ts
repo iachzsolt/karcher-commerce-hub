@@ -2492,37 +2492,66 @@ dataConnectionsApi.get(
             )?.length ?? 1
 
           if (!source) {
+            /*
+             * Manuálisan rögzített készlet esetén
+             * a hiányzó forrásadat sem írhatja felül.
+             */
+            if (listing.stockLocked) {
+              return {
+                sku: listing.sku,
+                listingId: listing.listingId,
+                offerId: listing.offerId,
+                listingName: listing.listingName,
+                publicationStatus: listing.publicationStatus,
+
+                sourceStock: null,
+                sourceMissing: true,
+                targetStock: listing.desiredStock,
+
+                remoteStock: listing.remoteStock,
+                desiredStock: listing.desiredStock,
+
+                stockLocked: true,
+                autoStockSync: listing.autoStockSync ?? false,
+                duplicateOfferCount,
+
+                reason: 'MANUAL_LOCK',
+                status: 'LOCKED',
+              }
+            }
+
+            /*
+             * Nincs SKU a készletforrásban:
+             * nincs igazolt eladható készlet, ezért a cél 0.
+             */
+            const targetStock = 0
+
             return {
-              sku:
-                listing.sku,
-              listingId:
-                listing.listingId,
-              offerId:
-                listing.offerId,
-              listingName:
-                listing.listingName,
-              publicationStatus:
-                listing
-                  .publicationStatus,
+              sku: listing.sku,
+              listingId: listing.listingId,
+              offerId: listing.offerId,
+              listingName: listing.listingName,
+              publicationStatus: listing.publicationStatus,
 
               sourceStock: null,
-              remoteStock:
-                listing.remoteStock,
-              desiredStock:
-                listing.desiredStock,
+              sourceMissing: true,
+              targetStock,
 
-              stockLocked:
-                listing.stockLocked ??
-                false,
+              remoteStock: listing.remoteStock,
+              desiredStock: listing.desiredStock,
 
-              autoStockSync:
-                listing.autoStockSync ??
-                false,
-
+              stockLocked: false,
+              autoStockSync: listing.autoStockSync ?? false,
               duplicateOfferCount,
 
+              reason: 'MISSING_SOURCE',
+
               status:
-                'MISSING_SOURCE',
+                listing.remoteStock === null
+                  ? 'REMOTE_STOCK_UNKNOWN'
+                  : listing.remoteStock === targetStock
+                    ? 'NO_CHANGE'
+                    : 'CHANGE_NEEDED',
             }
           }
 
@@ -2544,6 +2573,14 @@ dataConnectionsApi.get(
 
               sourceStock:
                 source.stock,
+
+              sourceMissing: false,
+
+              targetStock:
+                listing.stockLocked
+                  ? listing.desiredStock
+                  : source.stock,
+
               remoteStock:
                 listing.remoteStock,
               desiredStock:
@@ -2556,6 +2593,9 @@ dataConnectionsApi.get(
                 false,
 
               duplicateOfferCount,
+
+              reason:
+                'MANUAL_LOCK',
 
               status:
                 'LOCKED',
@@ -2581,6 +2621,14 @@ dataConnectionsApi.get(
 
               sourceStock:
                 source.stock,
+
+              sourceMissing: false,
+
+              targetStock:
+                listing.stockLocked
+                  ? listing.desiredStock
+                  : source.stock,
+
               remoteStock: null,
               desiredStock:
                 listing.desiredStock,
@@ -2592,6 +2640,8 @@ dataConnectionsApi.get(
                 false,
 
               duplicateOfferCount,
+
+              reason: null,
 
               status:
                 'REMOTE_STOCK_UNKNOWN',
@@ -2612,8 +2662,16 @@ dataConnectionsApi.get(
                 .publicationStatus,
 
             sourceStock:
-              source.stock,
-            remoteStock:
+                source.stock,
+
+              sourceMissing: false,
+
+              targetStock:
+                listing.stockLocked
+                  ? listing.desiredStock
+                  : source.stock,
+
+              remoteStock:
               listing.remoteStock,
             desiredStock:
               listing.desiredStock,
@@ -2626,7 +2684,9 @@ dataConnectionsApi.get(
 
             duplicateOfferCount,
 
-            status:
+            reason: null,
+
+              status:
               source.stock ===
               listing.remoteStock
                 ? 'NO_CHANGE'
@@ -2706,12 +2766,20 @@ dataConnectionsApi.get(
               'LOCKED',
           ).length,
 
-        missingSourceCount:
-          rows.filter(
-            (row) =>
-              row.status ===
-              'MISSING_SOURCE',
-          ).length,
+    missingSourceCount:
+      rows.filter(
+        (row) =>
+          'sourceMissing' in row &&
+          row.sourceMissing === true,
+      ).length,
+
+    missingSourceChangeNeededCount:
+      rows.filter(
+        (row) =>
+          'sourceMissing' in row &&
+          row.sourceMissing === true &&
+          row.status === 'CHANGE_NEEDED',
+      ).length,
 
         remoteStockUnknownCount:
           rows.filter(
@@ -2850,37 +2918,10 @@ dataConnectionsApi.post(
       const row of preview.rows
     ) {
       /*
-       * Nincs benne a forrásban:
-       * az Allegro ajánlathoz nem nyúlunk.
-       */
-      if (
-        row.status ===
-          'MISSING_SOURCE' ||
-        row.sourceStock === null
-      ) {
-        missingSource += 1
-
-        results.push({
-          sku:
-            row.sku,
-          listingId:
-            row.listingId,
-          offerId:
-            row.offerId,
-          previousDesiredStock:
-            row.desiredStock,
-          newDesiredStock:
-            null,
-          status:
-            'MISSING_SOURCE',
-        })
-
-        continue
-      }
-
-      /*
-       * Manuális készletzár:
-       * az automatika nem írhatja felül.
+       * 1. Manuálisan rögzített készlet.
+       *
+       * Ez minden automatikus készletforrásnál
+       * magasabb prioritású.
        */
       if (row.stockLocked) {
         locked += 1
@@ -2895,7 +2936,7 @@ dataConnectionsApi.post(
           previousDesiredStock:
             row.desiredStock,
           newDesiredStock:
-            row.sourceStock,
+            row.desiredStock,
           status:
             'LOCKED',
         })
@@ -2904,8 +2945,9 @@ dataConnectionsApi.post(
       }
 
       /*
-       * Ugyanaz a SKU több Allegro ajánlaton:
-       * egyelőre safety okból kihagyjuk.
+       * 2. Ugyanaz a SKU több Allegro ajánlaton.
+       *
+       * Ezt egyelőre nem automatizáljuk.
        */
       if (
         row.duplicateOfferCount > 1
@@ -2922,7 +2964,7 @@ dataConnectionsApi.post(
           previousDesiredStock:
             row.desiredStock,
           newDesiredStock:
-            row.sourceStock,
+            row.sourceStock ?? 0,
           status:
             'DUPLICATE_SKU_SKIPPED',
         })
@@ -2930,6 +2972,110 @@ dataConnectionsApi.post(
         continue
       }
 
+      /*
+       * 3. A SKU nincs az aktív készletforrásban.
+       *
+       * Ebben az esetben nincs igazolt eladható
+       * készletünk, ezért a biztonságos célérték 0.
+       */
+      if (
+        row.status ===
+          'MISSING_SOURCE' ||
+        row.sourceStock === null
+      ) {
+        missingSource += 1
+
+        if (
+          row.desiredStock === 0
+        ) {
+          unchanged += 1
+
+          results.push({
+            sku:
+              row.sku,
+            listingId:
+              row.listingId,
+            offerId:
+              row.offerId,
+            previousDesiredStock:
+              row.desiredStock,
+            newDesiredStock:
+              0,
+            status:
+              'MISSING_SOURCE_ZERO_NO_CHANGE',
+          })
+
+          continue
+        }
+
+        const [updatedRow] =
+          await database
+            .update(
+              listingDesiredStates,
+            )
+            .set({
+              desiredStock:
+                0,
+
+              updatedBy:
+                'COMMERCE_HUB_INVENTORY',
+
+              updatedAt:
+                new Date(),
+            })
+            .where(
+              eq(
+                listingDesiredStates
+                  .listingId,
+                row.listingId,
+              ),
+            )
+            .returning({
+              listingId:
+                listingDesiredStates
+                  .listingId,
+            })
+
+        if (!updatedRow) {
+          missingDesiredState += 1
+
+          results.push({
+            sku:
+              row.sku,
+            listingId:
+              row.listingId,
+            offerId:
+              row.offerId,
+            previousDesiredStock:
+              row.desiredStock,
+            newDesiredStock:
+              0,
+            status:
+              'MISSING_DESIRED_STATE',
+          })
+
+          continue
+        }
+
+        updated += 1
+
+        results.push({
+          sku:
+            row.sku,
+          listingId:
+            row.listingId,
+          offerId:
+            row.offerId,
+          previousDesiredStock:
+            row.desiredStock,
+          newDesiredStock:
+            0,
+          status:
+            'MISSING_SOURCE_ZERO_APPLIED',
+        })
+
+        continue
+      }
       /*
        * Ha az Allegro aktuális készletét nem ismerjük,
        * egyelőre szintén nem automatizálunk.
