@@ -26,6 +26,7 @@ import {
 } from 'drizzle-orm'
 import { JWT } from 'google-auth-library'
 import { Hono } from 'hono'
+import { allegroAuth } from './allegro-auth.js'
 
 const dataConnectionsApi = new Hono()
 
@@ -3340,6 +3341,526 @@ dataConnectionsApi.get(
     return context.json({
       run: latestRun,
       data: items,
+    })
+  },
+)
+
+
+/* ============================================================
+   SYNC INVENTORY STOCK TO ALLEGRO
+   MANUAL + EXPLICIT CONFIRMATION
+   ============================================================ */
+
+dataConnectionsApi.post(
+  '/:connectionId/sync-stock-to-allegro',
+  async (context) => {
+    const database = requireDatabase()
+    const connectionId = context.req.param('connectionId')
+
+    const body =
+      (await context.req.json().catch(() => null)) as
+        | {
+            confirm?: boolean
+            listingIds?: string[]
+          }
+        | null
+
+    if (body?.confirm !== true) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Explicit confirm=true is required',
+        },
+        400,
+      )
+    }
+
+    /*
+     * Először a forrás alapján frissítjük a desiredStock értékeket.
+     * Ez még önmagában nem ír az Allegróra.
+     */
+    const applyResponse =
+      await dataConnectionsApi.request(
+        '/' + connectionId + '/apply-stock-desired',
+        { method: 'POST' },
+      )
+
+    const applyDetails =
+      await applyResponse.json().catch(() => null)
+
+    if (!applyResponse.ok) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Could not apply inventory desired stock',
+          details: applyDetails,
+        },
+        409,
+      )
+    }
+
+    /* Friss preview már az alkalmazott desiredStock alapján. */
+    const previewResponse =
+      await dataConnectionsApi.request(
+        '/' + connectionId + '/allegro-stock-preview',
+        { method: 'GET' },
+      )
+
+    if (!previewResponse.ok) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Could not load stock sync preview',
+        },
+        502,
+      )
+    }
+
+    const preview =
+      (await previewResponse.json()) as {
+        connection: {
+          id: string
+          isActive: boolean
+        }
+        rows: Array<{
+          sku: string
+          listingId: string
+          offerId: string | null
+          targetStock: number | null
+          remoteStock: number | null
+          desiredStock: number | null
+          stockLocked: boolean
+          stockAutoPaused: boolean
+          publicationStatus: string | null
+          desiredPublicationStatus: string
+          duplicateOfferCount: number
+        }>
+      }
+
+    if (!preview.connection.isActive) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Only the active inventory source can be synced',
+        },
+        409,
+      )
+    }
+
+    const requestedIds =
+      new Set(
+        (body.listingIds ?? []).map(String),
+      )
+
+    const rows =
+      requestedIds.size > 0
+        ? preview.rows.filter((row) =>
+            requestedIds.has(row.listingId),
+          )
+        : preview.rows
+
+    if (rows.length > 100) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Maximum 100 listings per stock sync run',
+          count: rows.length,
+        },
+        409,
+      )
+    }
+
+    const results: Array<Record<string, unknown>> = []
+
+    let attempted = 0
+    let stockUpdated = 0
+    let autoPaused = 0
+    let reactivated = 0
+    let unchanged = 0
+    let skipped = 0
+    let pending = 0
+    let failed = 0
+
+    const postAllegro = async (path: string) => {
+      const response =
+        await allegroAuth.request(
+          path,
+          { method: 'POST' },
+        )
+
+      const details =
+        (await response.json().catch(() => null)) as
+          | {
+              status?: string
+              message?: string
+            }
+          | null
+
+      return { response, details }
+    }
+
+    for (const row of rows) {
+
+      if (row.stockLocked) {
+        skipped += 1
+        results.push({
+          sku: row.sku,
+          listingId: row.listingId,
+          action: 'SKIP',
+          status: 'STOCK_LOCKED',
+        })
+        continue
+      }
+
+      if (row.duplicateOfferCount > 1) {
+        skipped += 1
+        results.push({
+          sku: row.sku,
+          listingId: row.listingId,
+          action: 'SKIP',
+          status: 'DUPLICATE_SKU',
+        })
+        continue
+      }
+
+      if (row.targetStock === null) {
+        skipped += 1
+        results.push({
+          sku: row.sku,
+          listingId: row.listingId,
+          action: 'SKIP',
+          status: 'TARGET_STOCK_UNKNOWN',
+        })
+        continue
+      }
+
+      const remoteEnded =
+        row.publicationStatus === 'ENDED' ||
+        row.publicationStatus === 'INACTIVE'
+
+      const remoteActive =
+        row.publicationStatus === 'ACTIVE' ||
+        row.publicationStatus === 'ACTIVATING'
+
+      /* ======================================================
+         TARGET STOCK = 0
+         Allegro quantity=0 nem használható, ezért END.
+         ====================================================== */
+
+      if (row.targetStock === 0) {
+
+        if (row.stockAutoPaused && remoteEnded) {
+          unchanged += 1
+          results.push({
+            sku: row.sku,
+            listingId: row.listingId,
+            action: 'NONE',
+            status: 'ALREADY_AUTO_PAUSED',
+          })
+          continue
+        }
+
+        if (!row.stockAutoPaused && remoteEnded) {
+          skipped += 1
+          results.push({
+            sku: row.sku,
+            listingId: row.listingId,
+            action: 'SKIP',
+            status: 'MANUAL_INACTIVE',
+          })
+          continue
+        }
+
+        if (!remoteActive) {
+          skipped += 1
+          results.push({
+            sku: row.sku,
+            listingId: row.listingId,
+            action: 'SKIP',
+            status: 'UNSUPPORTED_PUBLICATION_STATE',
+            publicationStatus: row.publicationStatus,
+          })
+          continue
+        }
+
+        await database
+          .update(listingDesiredStates)
+          .set({
+            desiredPublicationStatus: 'INACTIVE',
+            updatedBy: 'COMMERCE_HUB_INVENTORY',
+            updatedAt: new Date(),
+          })
+          .where(
+            eq(
+              listingDesiredStates.listingId,
+              row.listingId,
+            ),
+          )
+
+        attempted += 1
+
+        const push =
+          await postAllegro(
+            '/push-status/' +
+              encodeURIComponent(row.listingId),
+          )
+
+        if (push.response.status === 202) {
+          pending += 1
+          results.push({
+            sku: row.sku,
+            listingId: row.listingId,
+            action: 'END',
+            status: 'PENDING',
+            details: push.details,
+          })
+          continue
+        }
+
+        if (!push.response.ok || push.details?.status !== 'ok') {
+          failed += 1
+          results.push({
+            sku: row.sku,
+            listingId: row.listingId,
+            action: 'END',
+            status: 'FAILED',
+            details: push.details,
+          })
+          continue
+        }
+
+        await database
+          .update(listingDesiredStates)
+          .set({
+            stockAutoPaused: true,
+            updatedBy: 'COMMERCE_HUB_INVENTORY',
+            updatedAt: new Date(),
+          })
+          .where(
+            eq(
+              listingDesiredStates.listingId,
+              row.listingId,
+            ),
+          )
+
+        autoPaused += 1
+
+        results.push({
+          sku: row.sku,
+          listingId: row.listingId,
+          action: 'END',
+          status: 'SUCCESS',
+        })
+
+        continue
+      }
+
+      /* ======================================================
+         TARGET STOCK > 0
+         ====================================================== */
+
+      if (!row.stockAutoPaused && remoteEnded) {
+        skipped += 1
+        results.push({
+          sku: row.sku,
+          listingId: row.listingId,
+          action: 'SKIP',
+          status: 'MANUAL_INACTIVE',
+        })
+        continue
+      }
+
+      if (row.remoteStock === null) {
+        skipped += 1
+        results.push({
+          sku: row.sku,
+          listingId: row.listingId,
+          action: 'SKIP',
+          status: 'REMOTE_STOCK_UNKNOWN',
+        })
+        continue
+      }
+
+      let stockChanged = false
+
+      if (row.remoteStock !== row.targetStock) {
+        attempted += 1
+
+        const push =
+          await postAllegro(
+            '/push-stock/' +
+              encodeURIComponent(row.listingId),
+          )
+
+        if (push.response.status === 202) {
+          pending += 1
+          results.push({
+            sku: row.sku,
+            listingId: row.listingId,
+            action: 'STOCK_UPDATE',
+            status: 'PENDING',
+            fromStock: row.remoteStock,
+            toStock: row.targetStock,
+            details: push.details,
+          })
+          continue
+        }
+
+        if (!push.response.ok || push.details?.status !== 'ok') {
+          failed += 1
+          results.push({
+            sku: row.sku,
+            listingId: row.listingId,
+            action: 'STOCK_UPDATE',
+            status: 'FAILED',
+            fromStock: row.remoteStock,
+            toStock: row.targetStock,
+            details: push.details,
+          })
+          continue
+        }
+
+        stockChanged = true
+        stockUpdated += 1
+      }
+
+      if (row.stockAutoPaused) {
+
+        await database
+          .update(listingDesiredStates)
+          .set({
+            desiredPublicationStatus: 'ACTIVE',
+            updatedBy: 'COMMERCE_HUB_INVENTORY',
+            updatedAt: new Date(),
+          })
+          .where(
+            eq(
+              listingDesiredStates.listingId,
+              row.listingId,
+            ),
+          )
+
+        attempted += 1
+
+        const push =
+          await postAllegro(
+            '/push-status/' +
+              encodeURIComponent(row.listingId),
+          )
+
+        if (push.response.status === 202) {
+          pending += 1
+          results.push({
+            sku: row.sku,
+            listingId: row.listingId,
+            action: 'ACTIVATE',
+            status: 'PENDING',
+            stockUpdated: stockChanged,
+            details: push.details,
+          })
+          continue
+        }
+
+        if (!push.response.ok || push.details?.status !== 'ok') {
+          failed += 1
+          results.push({
+            sku: row.sku,
+            listingId: row.listingId,
+            action: 'ACTIVATE',
+            status: 'FAILED',
+            stockUpdated: stockChanged,
+            details: push.details,
+          })
+          continue
+        }
+
+        await database
+          .update(listingDesiredStates)
+          .set({
+            stockAutoPaused: false,
+            updatedBy: 'COMMERCE_HUB_INVENTORY',
+            updatedAt: new Date(),
+          })
+          .where(
+            eq(
+              listingDesiredStates.listingId,
+              row.listingId,
+            ),
+          )
+
+        reactivated += 1
+
+        results.push({
+          sku: row.sku,
+          listingId: row.listingId,
+          action: stockChanged
+            ? 'STOCK_UPDATE_AND_ACTIVATE'
+            : 'ACTIVATE',
+          status: 'SUCCESS',
+        })
+
+        continue
+      }
+
+      if (stockChanged) {
+        results.push({
+          sku: row.sku,
+          listingId: row.listingId,
+          action: 'STOCK_UPDATE',
+          status: 'SUCCESS',
+          fromStock: row.remoteStock,
+          toStock: row.targetStock,
+        })
+      } else {
+        unchanged += 1
+        results.push({
+          sku: row.sku,
+          listingId: row.listingId,
+          action: 'NONE',
+          status: 'NO_CHANGE',
+        })
+      }
+    }
+
+    let refreshStatus = 'not-needed'
+    let refreshDetails: unknown = null
+
+    if (attempted > 0) {
+      const refreshResponse =
+        await allegroAuth.request(
+          '/sync',
+          { method: 'POST' },
+        )
+
+      refreshDetails =
+        await refreshResponse.json().catch(() => null)
+
+      refreshStatus =
+        refreshResponse.ok
+          ? 'success'
+          : 'failed'
+    }
+
+    return context.json({
+      status: 'ok',
+      mode: 'MANUAL_CONFIRMED_STOCK_SYNC',
+      summary: {
+        selected: rows.length,
+        attempted,
+        stockUpdated,
+        autoPaused,
+        reactivated,
+        unchanged,
+        skipped,
+        pending,
+        failed,
+      },
+      applyDetails,
+      refresh: {
+        status: refreshStatus,
+        details: refreshDetails,
+      },
+      results,
     })
   },
 )
