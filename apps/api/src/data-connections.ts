@@ -7,6 +7,12 @@ import {
   inventoryConnectionConfigs,
   inventoryImportRuns,
   inventorySourceItems,
+  products,
+  platforms,
+  platformListings,
+  listingRemoteStates,
+  listingDesiredStates,
+
 } from '@karcher-commerce-hub/database'
 import {
   and,
@@ -2283,8 +2289,806 @@ dataConnectionsApi.post(
 )
 
 /* ============================================================
+   ALLEGRO STOCK SYNC PREVIEW
+   READ ONLY - NO DESIRED STATE OR ALLEGRO WRITE
+   ============================================================ */
+
+dataConnectionsApi.get(
+  '/:connectionId/allegro-stock-preview',
+  async (context) => {
+    const database =
+      requireDatabase()
+
+    const connectionId =
+      context.req.param(
+        'connectionId',
+      )
+
+    const [connection] =
+      await database
+        .select()
+        .from(dataConnections)
+        .where(
+          and(
+            eq(
+              dataConnections.id,
+              connectionId,
+            ),
+            eq(
+              dataConnections.purpose,
+              'INVENTORY',
+            ),
+          ),
+        )
+        .limit(1)
+
+    if (!connection) {
+      return context.json(
+        {
+          error:
+            'Készlet adatkapcsolat nem található.',
+        },
+        404,
+      )
+    }
+
+    const inventoryItems =
+      await database
+        .select({
+          sku:
+            inventorySourceItems.sku,
+          stock:
+            inventorySourceItems.stock,
+          normalizedToZero:
+            inventorySourceItems
+              .normalizedToZero,
+          observedAt:
+            inventorySourceItems
+              .observedAt,
+        })
+        .from(
+          inventorySourceItems,
+        )
+        .where(
+          eq(
+            inventorySourceItems
+              .connectionId,
+            connectionId,
+          ),
+        )
+
+    const allegroListings =
+      await database
+        .select({
+          listingId:
+            platformListings.id,
+
+          offerId:
+            platformListings
+              .externalListingId,
+
+          sku:
+            products.sku,
+
+          listingName:
+            platformListings
+              .listingName,
+
+          marketplace:
+            platformListings
+              .marketplace,
+
+          remoteStock:
+            listingRemoteStates
+              .stockAvailable,
+
+          desiredStock:
+            listingDesiredStates
+              .desiredStock,
+
+          stockLocked:
+            listingDesiredStates
+              .stockLocked,
+
+          autoStockSync:
+            listingDesiredStates
+              .autoStockSync,
+
+          publicationStatus:
+            listingRemoteStates
+              .publicationStatus,
+        })
+        .from(
+          platformListings,
+        )
+        .innerJoin(
+          products,
+          eq(
+            platformListings.productId,
+            products.id,
+          ),
+        )
+        .innerJoin(
+          platforms,
+          eq(
+            platformListings.platformId,
+            platforms.id,
+          ),
+        )
+        .leftJoin(
+          listingRemoteStates,
+          eq(
+            listingRemoteStates
+              .listingId,
+            platformListings.id,
+          ),
+        )
+        .leftJoin(
+          listingDesiredStates,
+          eq(
+            listingDesiredStates
+              .listingId,
+            platformListings.id,
+          ),
+        )
+        .where(
+          and(
+            eq(
+              platforms.code,
+              'ALLEGRO',
+            ),
+            eq(
+              platformListings
+                .marketplace,
+              'allegro-hu',
+            ),
+          ),
+        )
+
+    const inventoryBySku =
+      new Map(
+        inventoryItems.map(
+          (item) => [
+            item.sku,
+            item,
+          ],
+        ),
+      )
+
+    const listingsBySku =
+      new Map<
+        string,
+        typeof allegroListings
+      >()
+
+    for (
+      const listing of
+      allegroListings
+    ) {
+      const current =
+        listingsBySku.get(
+          listing.sku,
+        ) ?? []
+
+      current.push(listing)
+
+      listingsBySku.set(
+        listing.sku,
+        current,
+      )
+    }
+
+    const rows =
+      allegroListings.map(
+        (listing) => {
+          const source =
+            inventoryBySku.get(
+              listing.sku,
+            )
+
+          const duplicateOfferCount =
+            listingsBySku.get(
+              listing.sku,
+            )?.length ?? 1
+
+          if (!source) {
+            return {
+              sku:
+                listing.sku,
+              listingId:
+                listing.listingId,
+              offerId:
+                listing.offerId,
+              listingName:
+                listing.listingName,
+              publicationStatus:
+                listing
+                  .publicationStatus,
+
+              sourceStock: null,
+              remoteStock:
+                listing.remoteStock,
+              desiredStock:
+                listing.desiredStock,
+
+              stockLocked:
+                listing.stockLocked ??
+                false,
+
+              autoStockSync:
+                listing.autoStockSync ??
+                false,
+
+              duplicateOfferCount,
+
+              status:
+                'MISSING_SOURCE',
+            }
+          }
+
+          if (
+            listing.stockLocked
+          ) {
+            return {
+              sku:
+                listing.sku,
+              listingId:
+                listing.listingId,
+              offerId:
+                listing.offerId,
+              listingName:
+                listing.listingName,
+              publicationStatus:
+                listing
+                  .publicationStatus,
+
+              sourceStock:
+                source.stock,
+              remoteStock:
+                listing.remoteStock,
+              desiredStock:
+                listing.desiredStock,
+
+              stockLocked: true,
+
+              autoStockSync:
+                listing.autoStockSync ??
+                false,
+
+              duplicateOfferCount,
+
+              status:
+                'LOCKED',
+            }
+          }
+
+          if (
+            listing.remoteStock ===
+            null
+          ) {
+            return {
+              sku:
+                listing.sku,
+              listingId:
+                listing.listingId,
+              offerId:
+                listing.offerId,
+              listingName:
+                listing.listingName,
+              publicationStatus:
+                listing
+                  .publicationStatus,
+
+              sourceStock:
+                source.stock,
+              remoteStock: null,
+              desiredStock:
+                listing.desiredStock,
+
+              stockLocked: false,
+
+              autoStockSync:
+                listing.autoStockSync ??
+                false,
+
+              duplicateOfferCount,
+
+              status:
+                'REMOTE_STOCK_UNKNOWN',
+            }
+          }
+
+          return {
+            sku:
+              listing.sku,
+            listingId:
+              listing.listingId,
+            offerId:
+              listing.offerId,
+            listingName:
+              listing.listingName,
+            publicationStatus:
+              listing
+                .publicationStatus,
+
+            sourceStock:
+              source.stock,
+            remoteStock:
+              listing.remoteStock,
+            desiredStock:
+              listing.desiredStock,
+
+            stockLocked: false,
+
+            autoStockSync:
+              listing.autoStockSync ??
+              false,
+
+            duplicateOfferCount,
+
+            status:
+              source.stock ===
+              listing.remoteStock
+                ? 'NO_CHANGE'
+                : 'CHANGE_NEEDED',
+          }
+        },
+      )
+
+    const matchedSkuSet =
+      new Set(
+        allegroListings
+          .filter((listing) =>
+            inventoryBySku.has(
+              listing.sku,
+            ),
+          )
+          .map(
+            (listing) =>
+              listing.sku,
+          ),
+      )
+
+    const inventoryWithoutListing =
+      inventoryItems.filter(
+        (item) =>
+          !listingsBySku.has(
+            item.sku,
+          ),
+      )
+
+    const duplicateSkuCount =
+      [...listingsBySku.values()]
+        .filter(
+          (listings) =>
+            listings.length > 1,
+        )
+        .length
+
+    return context.json({
+      connection: {
+        id:
+          connection.id,
+        name:
+          connection.name,
+        isActive:
+          connection.isActive,
+      },
+
+      summary: {
+        inventorySkuCount:
+          inventoryItems.length,
+
+        allegroListingCount:
+          allegroListings.length,
+
+        matchedSkuCount:
+          matchedSkuSet.size,
+
+        changeNeededCount:
+          rows.filter(
+            (row) =>
+              row.status ===
+              'CHANGE_NEEDED',
+          ).length,
+
+        noChangeCount:
+          rows.filter(
+            (row) =>
+              row.status ===
+              'NO_CHANGE',
+          ).length,
+
+        lockedCount:
+          rows.filter(
+            (row) =>
+              row.status ===
+              'LOCKED',
+          ).length,
+
+        missingSourceCount:
+          rows.filter(
+            (row) =>
+              row.status ===
+              'MISSING_SOURCE',
+          ).length,
+
+        remoteStockUnknownCount:
+          rows.filter(
+            (row) =>
+              row.status ===
+              'REMOTE_STOCK_UNKNOWN',
+          ).length,
+
+        inventoryWithoutListingCount:
+          inventoryWithoutListing
+            .length,
+
+        duplicateSkuCount,
+      },
+
+      rows,
+
+      inventoryWithoutListing:
+        inventoryWithoutListing
+          .slice(0, 50)
+          .map((item) => ({
+            sku:
+              item.sku,
+            stock:
+              item.stock,
+          })),
+    })
+  },
+)
+
+/* ============================================================
    CURRENT IMPORTED INVENTORY
    ============================================================ */
+
+/* ============================================================
+   APPLY INVENTORY TO DESIRED STOCK
+   INTERNAL ONLY - NO ALLEGRO PUSH
+   ============================================================ */
+
+dataConnectionsApi.post(
+  '/:connectionId/apply-stock-desired',
+  async (context) => {
+    const database =
+      requireDatabase()
+
+    const connectionId =
+      context.req.param(
+        'connectionId',
+      )
+
+    /*
+     * Ugyanazt a read-only preview logikát használjuk,
+     * amit már ellenőriztünk.
+     */
+    const previewResponse =
+      await dataConnectionsApi.request(
+        `/${connectionId}/allegro-stock-preview`,
+        {
+          method: 'GET',
+        },
+      )
+
+    if (!previewResponse.ok) {
+      const previewError =
+        await previewResponse
+          .json()
+          .catch(() => null)
+
+      return context.json(
+        {
+          error:
+            'A készletszinkron előnézet nem tölthető be.',
+          details:
+            previewError,
+        },
+        previewResponse.status as 400 | 404 | 409 | 500,
+      )
+    }
+
+    const preview =
+      (await previewResponse.json()) as {
+        connection: {
+          id: string
+          name: string
+          isActive: boolean
+        }
+
+        summary: {
+          inventorySkuCount: number
+          allegroListingCount: number
+        }
+
+        rows: Array<{
+          sku: string
+          listingId: string
+          offerId: string | null
+          listingName: string | null
+          sourceStock: number | null
+          remoteStock: number | null
+          desiredStock: number | null
+          stockLocked: boolean
+          autoStockSync: boolean
+          duplicateOfferCount: number
+          status: string
+        }>
+      }
+
+    if (!preview.connection.isActive) {
+      return context.json(
+        {
+          error:
+            'Csak az aktív készletforrás alkalmazható.',
+        },
+        409,
+      )
+    }
+
+    let updated = 0
+    let unchanged = 0
+    let missingSource = 0
+    let locked = 0
+    let duplicateSkuSkipped = 0
+    let remoteStockUnknown = 0
+    let missingDesiredState = 0
+
+    const results: Array<{
+      sku: string
+      listingId: string
+      offerId: string | null
+      previousDesiredStock: number | null
+      newDesiredStock: number | null
+      status: string
+    }> = []
+
+    for (
+      const row of preview.rows
+    ) {
+      /*
+       * Nincs benne a forrásban:
+       * az Allegro ajánlathoz nem nyúlunk.
+       */
+      if (
+        row.status ===
+          'MISSING_SOURCE' ||
+        row.sourceStock === null
+      ) {
+        missingSource += 1
+
+        results.push({
+          sku:
+            row.sku,
+          listingId:
+            row.listingId,
+          offerId:
+            row.offerId,
+          previousDesiredStock:
+            row.desiredStock,
+          newDesiredStock:
+            null,
+          status:
+            'MISSING_SOURCE',
+        })
+
+        continue
+      }
+
+      /*
+       * Manuális készletzár:
+       * az automatika nem írhatja felül.
+       */
+      if (row.stockLocked) {
+        locked += 1
+
+        results.push({
+          sku:
+            row.sku,
+          listingId:
+            row.listingId,
+          offerId:
+            row.offerId,
+          previousDesiredStock:
+            row.desiredStock,
+          newDesiredStock:
+            row.sourceStock,
+          status:
+            'LOCKED',
+        })
+
+        continue
+      }
+
+      /*
+       * Ugyanaz a SKU több Allegro ajánlaton:
+       * egyelőre safety okból kihagyjuk.
+       */
+      if (
+        row.duplicateOfferCount > 1
+      ) {
+        duplicateSkuSkipped += 1
+
+        results.push({
+          sku:
+            row.sku,
+          listingId:
+            row.listingId,
+          offerId:
+            row.offerId,
+          previousDesiredStock:
+            row.desiredStock,
+          newDesiredStock:
+            row.sourceStock,
+          status:
+            'DUPLICATE_SKU_SKIPPED',
+        })
+
+        continue
+      }
+
+      /*
+       * Ha az Allegro aktuális készletét nem ismerjük,
+       * egyelőre szintén nem automatizálunk.
+       */
+      if (
+        row.status ===
+        'REMOTE_STOCK_UNKNOWN'
+      ) {
+        remoteStockUnknown += 1
+
+        results.push({
+          sku:
+            row.sku,
+          listingId:
+            row.listingId,
+          offerId:
+            row.offerId,
+          previousDesiredStock:
+            row.desiredStock,
+          newDesiredStock:
+            row.sourceStock,
+          status:
+            'REMOTE_STOCK_UNKNOWN',
+        })
+
+        continue
+      }
+
+      /*
+       * A kívánt készlet már megegyezik
+       * a forráskészlettel.
+       */
+      if (
+        row.desiredStock ===
+        row.sourceStock
+      ) {
+        unchanged += 1
+
+        results.push({
+          sku:
+            row.sku,
+          listingId:
+            row.listingId,
+          offerId:
+            row.offerId,
+          previousDesiredStock:
+            row.desiredStock,
+          newDesiredStock:
+            row.sourceStock,
+          status:
+            'NO_CHANGE',
+        })
+
+        continue
+      }
+
+      const [updatedRow] =
+        await database
+          .update(
+            listingDesiredStates,
+          )
+          .set({
+            desiredStock:
+              row.sourceStock,
+
+            updatedBy:
+              'COMMERCE_HUB_INVENTORY',
+
+            updatedAt:
+              new Date(),
+          })
+          .where(
+            eq(
+              listingDesiredStates
+                .listingId,
+              row.listingId,
+            ),
+          )
+          .returning({
+            listingId:
+              listingDesiredStates
+                .listingId,
+          })
+
+      /*
+       * Ha nincs desired-state rekord,
+       * nem hozunk létre automatikusan újat.
+       */
+      if (!updatedRow) {
+        missingDesiredState += 1
+
+        results.push({
+          sku:
+            row.sku,
+          listingId:
+            row.listingId,
+          offerId:
+            row.offerId,
+          previousDesiredStock:
+            row.desiredStock,
+          newDesiredStock:
+            row.sourceStock,
+          status:
+            'MISSING_DESIRED_STATE',
+        })
+
+        continue
+      }
+
+      updated += 1
+
+      results.push({
+        sku:
+          row.sku,
+        listingId:
+          row.listingId,
+        offerId:
+          row.offerId,
+        previousDesiredStock:
+          row.desiredStock,
+        newDesiredStock:
+          row.sourceStock,
+        status:
+          'UPDATED',
+      })
+    }
+
+    return context.json({
+      status:
+        'ok',
+
+      mode:
+        'DESIRED_STOCK_ONLY',
+
+      allegroPushPerformed:
+        false,
+
+      summary: {
+        inventorySkuCount:
+          preview.summary
+            .inventorySkuCount,
+
+        allegroListingCount:
+          preview.summary
+            .allegroListingCount,
+
+        updated,
+        unchanged,
+        missingSource,
+        locked,
+        duplicateSkuSkipped,
+        remoteStockUnknown,
+        missingDesiredState,
+      },
+
+      results,
+    })
+  },
+)
 
 dataConnectionsApi.get(
   '/:connectionId/items',
