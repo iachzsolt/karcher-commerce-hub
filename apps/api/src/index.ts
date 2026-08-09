@@ -347,6 +347,9 @@ app.get('/allegro/listings', async (context) => {
         stockLocked:
           listingDesiredStates.stockLocked,
 
+        stockAutoPaused:
+          listingDesiredStates.stockAutoPaused,
+
         autoPriceSync:
           listingDesiredStates.autoPriceSync,
 

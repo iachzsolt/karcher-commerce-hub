@@ -68,6 +68,7 @@ type AllegroListing = {
 
   priceLocked: boolean | null
   stockLocked: boolean | null
+  stockAutoPaused: boolean | null
 
   autoPriceSync: boolean | null
   autoStockSync: boolean | null
@@ -1374,17 +1375,29 @@ function HomePage({
       expectedPriceMinor
     )
   }
+  const getEffectiveStockAvailable = (
+    listing: AllegroListing,
+  ) =>
+    listing.stockAutoPaused
+      ? 0
+      : listing.stockAvailable
+
   const hasAcceptedStockDifference = (
     listing: AllegroListing,
   ) =>
-    listing.stockAvailable !==
-    listing.acceptedStockAvailable
+    listing.stockAutoPaused
+      ? false
+      : listing.stockAvailable !==
+        listing.acceptedStockAvailable
 
   const hasAcceptedPublicationDifference = (
     listing: AllegroListing,
   ) =>
-    listing.publicationStatus !==
-    listing.acceptedPublicationStatus
+    listing.stockAutoPaused
+      ? false
+      : listing.publicationStatus !==
+        listing.acceptedPublicationStatus
+
   const hasAcceptedDifference = (
     listing: AllegroListing,
   ) =>
@@ -1397,7 +1410,7 @@ function HomePage({
       (listing) =>
         hasPriceDifference(listing) ||
         (listing.desiredStock !== null &&
-          listing.stockAvailable !==
+          getEffectiveStockAvailable(listing) !==
             listing.desiredStock) ||
         hasPublicationDifference(listing),
     ).length
@@ -1411,7 +1424,7 @@ function HomePage({
           hasPriceDifference(listing) ||
           (
             listing.desiredStock !== null &&
-            listing.stockAvailable !==
+            getEffectiveStockAvailable(listing) !==
               listing.desiredStock
           ) ||
           hasPublicationDifference(listing)
@@ -2127,7 +2140,7 @@ Hibás: ${failed}`,
         (
           hasPriceDifference(listing) ||
           (listing.desiredStock !== null &&
-            listing.stockAvailable !==
+            getEffectiveStockAvailable(listing) !==
               listing.desiredStock) ||
           hasPublicationDifference(listing)
         ),
@@ -2219,7 +2232,7 @@ Folyamatban: ${data.pending ?? 0}`,
 
     const stockChanged =
       listing.desiredStock !== null &&
-      listing.stockAvailable !== listing.desiredStock
+      getEffectiveStockAvailable(listing) !== listing.desiredStock
 
     const publicationChanged =
       hasPublicationDifference(listing)
@@ -2248,7 +2261,7 @@ Folyamatban: ${data.pending ?? 0}`,
 
     if (stockChanged) {
       changes.push(
-        `Készlet: ${listing.stockAvailable ?? 0} db → ${listing.desiredStock} db`,
+        `Készlet: ${getEffectiveStockAvailable(listing) ?? 0} db → ${listing.desiredStock} db`,
       )
     }
 
@@ -3312,7 +3325,7 @@ ${changes.join('\n')}`,
                         </span>
 
                         <strong>
-                          {listing.stockAvailable ?? '–'} db
+                          {getEffectiveStockAvailable(listing) ?? '–'} db
                         </strong>
                       </div>
 
@@ -3390,11 +3403,11 @@ ${changes.join('\n')}`,
                         </span>
 
                         <span
-                          className={`listing-status listing-${listing.publicationStatus.toLowerCase()}`}
+                          className={listing.stockAutoPaused ? 'listing-status stock-auto-paused-status' : `listing-status listing-${listing.publicationStatus.toLowerCase()}`}
                         >
-                          {formatListingStatus(
-                            listing.publicationStatus,
-                          )}
+                          {listing.stockAutoPaused
+                            ? 'Készlethiány miatt leállítva'
+                            : formatListingStatus(listing.publicationStatus)}
                         </span>
                       </div>
 
@@ -3461,7 +3474,7 @@ ${changes.join('\n')}`,
                         type="button"
                         disabled={
                           (!hasPriceDifference(listing) &&
-                            listing.stockAvailable ===
+                            getEffectiveStockAvailable(listing) ===
                               listing.desiredStock &&
                             !hasPublicationDifference(
                               listing,

@@ -5305,3 +5305,20 @@ input:checked + span::after {
   box-shadow:
     0 2px 8px rgba(0, 0, 0, 0.025);
 }
+
+.stock-auto-paused-status {
+  display: inline-block;
+  white-space: normal;
+  max-width: 160px;
+  line-height: 1.2;
+  text-align: left;
+}
+
+.stock-auto-managed-label {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  font-weight: 600;
+  color: #555;
+  line-height: 1.2;
+}
