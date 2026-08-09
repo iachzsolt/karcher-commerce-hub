@@ -5322,3 +5322,32 @@ input:checked + span::after {
   color: #555;
   line-height: 1.2;
 }
+
+.stock-lock-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+.stock-lock-control input {
+  margin: 0;
+  cursor: pointer;
+}
+
+.stock-lock-control input:disabled {
+  cursor: wait;
+}
+
+.stock-lock-helper {
+  display: block;
+  margin-top: 4px;
+  max-width: 190px;
+  font-size: 11px;
+  line-height: 1.25;
+  color: #6b6b6b;
+}

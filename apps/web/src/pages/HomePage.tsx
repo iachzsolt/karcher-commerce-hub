@@ -692,6 +692,9 @@ function HomePage({
   const [, setSavingDesiredStock] =
     useState<string | null>(null)
 
+  const [savingStockLockId, setSavingStockLockId] =
+    useState<string | null>(null)
+
   const [
     desiredStatusDrafts,
     setDesiredStatusDraftsState,
@@ -1158,6 +1161,64 @@ function HomePage({
       setSavingDesiredStock(null)
     }
   }
+  const updateStockLock = async (
+    listing: AllegroListing,
+    stockLocked: boolean,
+  ) => {
+    setSavingStockLockId(listing.id)
+
+    try {
+      const response = await fetch(
+        `http://localhost:3000/allegro/listings/${listing.id}/stock-lock`,
+        {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            stockLocked,
+          }),
+        },
+      )
+
+      if (!response.ok) {
+        throw new Error(
+          'A készletrögzítés módosítása sikertelen.',
+        )
+      }
+
+      const result = (await response.json()) as {
+        status: string
+        data: {
+          stockLocked: boolean
+        }
+      }
+
+      setAllegroListings((current) =>
+        current.map((item) =>
+          item.id === listing.id
+            ? {
+                ...item,
+                stockLocked:
+                  result.data.stockLocked,
+              }
+            : item,
+        ),
+      )
+    } catch (error) {
+      console.error(
+        'Stock lock update failed:',
+        error,
+      )
+
+      window.alert(
+        'A készletrögzítés módosítása sikertelen.',
+      )
+    } finally {
+      setSavingStockLockId(null)
+    }
+  }
+
   const saveDesiredStatus = async (
     listing: AllegroListing,
   ) => {
@@ -3364,6 +3425,30 @@ ${changes.join('\n')}`,
 
                             <span>db</span>
                           </div>
+
+                        <label className="stock-lock-control">
+                          <input
+                            type="checkbox"
+                            checked={listing.stockLocked ?? false}
+                            disabled={savingStockLockId === listing.id}
+                            onChange={(event) =>
+                              void updateStockLock(
+                                listing,
+                                event.target.checked,
+                              )
+                            }
+                          />
+
+                          <span>
+                            Készlet rögzítve
+                          </span>
+                        </label>
+
+                        {listing.stockLocked && (
+                          <span className="stock-lock-helper">
+                            Az automatikus készletszinkron nem írja felül.
+                          </span>
+                        )}
 
                           
                         </div>
