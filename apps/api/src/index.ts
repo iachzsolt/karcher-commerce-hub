@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto'
 import { serve } from '@hono/node-server'
 import {
   createDatabase,
+  dataConnections,
+  inventorySourceItems,
   campaigns,
   listingCampaigns,
   listingAcceptedStates,
@@ -417,10 +419,75 @@ app.get('/allegro/listings', async (context) => {
         ),
       )
 
+    const [activeInventoryConnection] =
+      await db
+        .select({
+          id: dataConnections.id,
+        })
+        .from(dataConnections)
+        .where(
+          and(
+            eq(
+              dataConnections.purpose,
+              'INVENTORY',
+            ),
+            eq(
+              dataConnections.isActive,
+              true,
+            ),
+          ),
+        )
+        .limit(1)
+
+    const inventoryItems =
+      activeInventoryConnection
+        ? await db
+            .select({
+              sku: inventorySourceItems.sku,
+              stock: inventorySourceItems.stock,
+            })
+            .from(inventorySourceItems)
+            .where(
+              eq(
+                inventorySourceItems.connectionId,
+                activeInventoryConnection.id,
+              ),
+            )
+        : []
+
+    const inventoryStockBySku = new Map(
+      inventoryItems.map(
+        (item) => [
+          item.sku,
+          item.stock,
+        ] as const,
+      ),
+    )
+
+    const data = result.map((listing) => ({
+      ...listing,
+
+      inventorySourceStock:
+        activeInventoryConnection
+          ? (
+              inventoryStockBySku.get(
+                listing.sku,
+              ) ?? null
+            )
+          : null,
+
+      inventorySourceMissing:
+        activeInventoryConnection
+          ? !inventoryStockBySku.has(
+              listing.sku,
+            )
+          : null,
+    }))
+
     return context.json({
       status: 'ok',
       count: result.length,
-      data: result,
+      data: data,
     })
   } catch (error) {
     console.error(
@@ -3879,6 +3946,9 @@ app.post(
           listingId:
             platformListings.id,
 
+      sku:
+        products.sku,
+
           priceMinor:
             listingRemoteStates.priceMinor,
 
@@ -3902,8 +3972,19 @@ app.post(
 
           priceLocked:
             listingDesiredStates.priceLocked,
+
+      stockAutoPaused:
+        listingDesiredStates
+          .stockAutoPaused,
         })
         .from(platformListings)
+    .innerJoin(
+      products,
+      eq(
+        products.id,
+        platformListings.productId,
+      ),
+    )
         .leftJoin(
           listingRemoteStates,
           eq(
@@ -3924,6 +4005,52 @@ app.post(
             'allegro-hu',
           ),
         )
+
+  const [activeInventoryConnection] =
+    await db
+      .select({
+        id: dataConnections.id,
+      })
+      .from(dataConnections)
+      .where(
+        and(
+          eq(
+            dataConnections.purpose,
+            'INVENTORY',
+          ),
+          eq(
+            dataConnections.isActive,
+            true,
+          ),
+        ),
+      )
+      .limit(1)
+
+  const activeInventoryItems =
+    activeInventoryConnection
+      ? await db
+          .select({
+            sku: inventorySourceItems.sku,
+            stock: inventorySourceItems.stock,
+          })
+          .from(inventorySourceItems)
+          .where(
+            eq(
+              inventorySourceItems.connectionId,
+              activeInventoryConnection.id,
+            ),
+          )
+      : []
+
+  const inventoryStockBySku =
+    new Map(
+      activeInventoryItems.map(
+        (item) => [
+          item.sku,
+          item.stock,
+        ] as const,
+      ),
+    )
 
       const scheduleRows = await db
         .select({
@@ -4019,22 +4146,24 @@ app.post(
             row.listingId,
           )
 
-        let nextPublicationStatus =
-          row.desiredPublicationStatus
+    let nextPublicationStatus =
+      row.desiredPublicationStatus
 
-        if (
-          row.publicationStatus === 'ACTIVE' ||
-          row.publicationStatus ===
-            'ACTIVATING'
-        ) {
-          nextPublicationStatus = 'ACTIVE'
-        } else if (
-          row.publicationStatus ===
-            'INACTIVE' ||
-          row.publicationStatus === 'ENDED'
-        ) {
-          nextPublicationStatus = 'INACTIVE'
-        }
+    if (row.stockAutoPaused) {
+      nextPublicationStatus = 'INACTIVE'
+    } else if (
+      row.publicationStatus === 'ACTIVE' ||
+      row.publicationStatus ===
+        'ACTIVATING'
+    ) {
+      nextPublicationStatus = 'ACTIVE'
+    } else if (
+      row.publicationStatus ===
+        'INACTIVE' ||
+      row.publicationStatus === 'ENDED'
+    ) {
+      nextPublicationStatus = 'INACTIVE'
+    }
 
         const nextPriceMinor =
           priceProtected
@@ -4044,9 +4173,19 @@ app.post(
                 row.desiredPriceMinor
               )
 
-        const nextStock =
-          row.stockAvailable ??
-          row.desiredStock
+    const nextStock =
+      activeInventoryConnection
+        ? (
+            inventoryStockBySku.get(
+              row.sku,
+            ) ?? 0
+          )
+        : row.stockAutoPaused
+          ? 0
+          : (
+              row.stockAvailable ??
+              row.desiredStock
+            )
 
         const priceChanged =
           nextPriceMinor !==

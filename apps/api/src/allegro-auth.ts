@@ -2067,6 +2067,114 @@ function normalizeAllegroListingStatus(
   }
 }
 
+allegroAuth.get(
+  '/open-offer/:offerId',
+  async (context) => {
+    await refreshAllegroSessionIfNeeded()
+
+    if (!currentSession) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Allegro account is not connected',
+        },
+        401,
+      )
+    }
+
+    const apiUrl = process.env.ALLEGRO_API_URL
+
+    if (!apiUrl) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'ALLEGRO_API_URL is missing',
+        },
+        500,
+      )
+    }
+
+    const offerId = context.req.param('offerId')
+
+    const response = await fetch(
+      apiUrl +
+        '/sale/product-offers/' +
+        encodeURIComponent(offerId),
+      {
+        headers: {
+          Authorization:
+            'Bearer ' + currentSession.accessToken,
+          Accept:
+            'application/vnd.allegro.public.v1+json',
+          'Accept-Language': 'hu-HU',
+        },
+      },
+    )
+
+    if (!response.ok) {
+      const body = await response.text()
+
+      return context.json(
+        {
+          status: 'error',
+          message: 'Could not load Allegro offer',
+          allegroStatus: response.status,
+          body,
+        },
+        502,
+      )
+    }
+
+    const data = (await response.json()) as {
+      name?: string | null
+      productSet?: Array<{
+        product?: {
+          id?: string | null
+        }
+      }>
+    }
+
+    const productId =
+      data.productSet?.[0]?.product?.id ?? null
+
+    if (!productId) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Allegro product ID is not available',
+        },
+        404,
+      )
+    }
+
+    const slug =
+      (data.name ?? 'termek')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 120) || 'termek'
+
+    const storefrontUrl = apiUrl.includes(
+      'allegrosandbox',
+    )
+      ? 'https://allegro.hu.allegrosandbox.pl'
+      : 'https://allegro.hu'
+
+    const targetUrl =
+      storefrontUrl +
+      '/termek/' +
+      slug +
+      '-' +
+      productId +
+      '?offerId=' +
+      encodeURIComponent(offerId)
+
+    return context.redirect(targetUrl, 302)
+  },
+)
+
 allegroAuth.post('/sync', async (context) => {
   if (!currentSession) {
     return context.json(

@@ -5351,3 +5351,54 @@ input:checked + span::after {
   line-height: 1.25;
   color: #6b6b6b;
 }
+
+.listing-status-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: 6px;
+  border: 1px solid #b8b8b8;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  color: #666;
+  cursor: help;
+  vertical-align: middle;
+}
+
+/* Státuszválasztó – teljes Aktív / Inaktív felirat */
+.status-select {
+  min-width: 105px;
+  width: 105px;
+  padding-right: 28px;
+}
+
+.listing-product-name-with-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.allegro-offer-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.allegro-offer-link:hover {
+  text-decoration: none;
+  transform: translateY(-1px);
+}

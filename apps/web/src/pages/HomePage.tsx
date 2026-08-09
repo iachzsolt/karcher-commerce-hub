@@ -69,6 +69,8 @@ type AllegroListing = {
   priceLocked: boolean | null
   stockLocked: boolean | null
   stockAutoPaused: boolean | null
+  inventorySourceStock: number | null
+  inventorySourceMissing: boolean | null
 
   autoPriceSync: boolean | null
   autoStockSync: boolean | null
@@ -491,6 +493,24 @@ function budapestLocalToIso(
 function HomePage({
   view = 'home',
 }: HomePageProps) {
+  const getListingStatusInfo = (
+    listing: AllegroListing,
+  ) => {
+    if (listing.publicationStatus !== 'ENDED') {
+      return null
+    }
+
+    if (listing.inventorySourceMissing === true) {
+      return 'Ehhez az ajánlathoz nincs elérhető készletadat az aktív készletforrásban, ezért az ajánlat le van állítva.'
+    }
+
+    if (listing.inventorySourceStock === 0) {
+      return 'Az aktív készletforrás szerint nincs elérhető készlet, ezért az ajánlat le van állítva.'
+    }
+
+    return 'Az ajánlat jelenleg le van állítva.'
+  }
+
   const hasPublicationDifference = (
     listing: AllegroListing,
   ) => {
@@ -1414,57 +1434,40 @@ function HomePage({
         effectiveDesiredPriceMinor
     )
   }
-  const hasAcceptedPriceDifference = (
-    listing: AllegroListing,
-  ) => {
-    const activePriceSchedule =
-      (
-        priceSchedulesByListing[
-          listing.id
-        ] ?? []
-      ).find(
-        isAppliedPriceScheduleActive,
-      ) ?? null
-
-    const expectedPriceMinor =
-      activePriceSchedule
-        ?.promotionalPriceMinor ??
-      listing.acceptedPriceMinor
-
-    return (
-      listing.priceMinor !==
-      expectedPriceMinor
-    )
-  }
   const getEffectiveStockAvailable = (
     listing: AllegroListing,
-  ) =>
-    listing.stockAutoPaused
-      ? 0
-      : listing.stockAvailable
+  ) => {
+    const isNotSellable =
+      listing.publicationStatus === 'ENDED' ||
+      listing.publicationStatus === 'INACTIVE'
 
-  const hasAcceptedStockDifference = (
-    listing: AllegroListing,
-  ) =>
-    listing.stockAutoPaused
-      ? false
-      : listing.stockAvailable !==
-        listing.acceptedStockAvailable
+    if (isNotSellable || listing.stockAutoPaused) {
+      return 0
+    }
 
-  const hasAcceptedPublicationDifference = (
-    listing: AllegroListing,
-  ) =>
-    listing.stockAutoPaused
-      ? false
-      : listing.publicationStatus !==
-        listing.acceptedPublicationStatus
+    return listing.stockAvailable
+  }
 
-  const hasAcceptedDifference = (
+  const hasListingDifference = (
     listing: AllegroListing,
-  ) =>
-    hasAcceptedPriceDifference(listing) ||
-    hasAcceptedStockDifference(listing) ||
-    hasAcceptedPublicationDifference(listing)
+  ) => {
+    const isIntentionallyInactive =
+      listing.desiredPublicationStatus === 'INACTIVE' &&
+      (listing.publicationStatus === 'INACTIVE' ||
+        listing.publicationStatus === 'ENDED')
+
+    const hasStockDifference =
+      !isIntentionallyInactive &&
+      listing.desiredStock !== null &&
+      getEffectiveStockAvailable(listing) !==
+        listing.desiredStock
+
+    return (
+      hasPriceDifference(listing) ||
+      hasStockDifference ||
+      hasPublicationDifference(listing)
+    )
+  }
 
   const changedListingsCount =
     allegroListings.filter(
@@ -2090,7 +2093,7 @@ Hibás: ${failed}`,
   const searchedDifferentListingsCount =
     searchedAllegroListings.filter(
       (listing) =>
-        hasAcceptedDifference(listing),
+        hasListingDifference(listing),
     ).length
 
   const searchedUnsavedListingsCount =
@@ -2124,7 +2127,7 @@ Hibás: ${failed}`,
     searchedAllegroListings.filter((listing) => {
       switch (listingFilter) {
         case 'DIFFERENT':
-          return hasAcceptedDifference(
+          return hasListingDifference(
             listing,
           )
 
@@ -2811,7 +2814,29 @@ ${changes.join('\n')}`,
                       {listing.sku}
                     </td>
 
-                    <td>{listing.productName}</td>
+                    <td>
+                      <span className="listing-product-name-with-link">
+                        <span>{listing.productName}</span>
+                        {listing.offerId && (
+                          <a
+                            className="allegro-offer-link"
+                            href={
+                              'http:' +
+                              '//' +
+                              'localhost:3000/auth/allegro/open-offer/' +
+                              encodeURIComponent(listing.offerId)
+                            }
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title="Ajánlat megnyitása az Allegrón"
+                            aria-label="Ajánlat megnyitása az Allegrón"
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            ↗
+                          </a>
+                        )}
+                      </span>
+                    </td>
 
                     <td className="offer-id-cell">
                       {listing.offerId}
@@ -3457,7 +3482,7 @@ ${changes.join('\n')}`,
 
                     <td>
                       <div className="difference-cell-content">
-                        {!hasAcceptedDifference(
+                        {!hasListingDifference(
                           listing,
                         ) ? (
                           <span className="sync-match">
@@ -3488,12 +3513,20 @@ ${changes.join('\n')}`,
                         </span>
 
                         <span
-                          className={listing.stockAutoPaused ? 'listing-status stock-auto-paused-status' : `listing-status listing-${listing.publicationStatus.toLowerCase()}`}
+                          className={`listing-status listing-${listing.publicationStatus.toLowerCase()}`}
                         >
-                          {listing.stockAutoPaused
-                            ? 'Készlethiány miatt leállítva'
-                            : formatListingStatus(listing.publicationStatus)}
+                          {formatListingStatus(listing.publicationStatus)}
                         </span>
+
+                    {listing.publicationStatus === 'ENDED' && (
+                      <span
+                        className="listing-status-info"
+                        title={getListingStatusInfo(listing) ?? undefined}
+                        aria-label={getListingStatusInfo(listing) ?? 'Ajánlat információ'}
+                      >
+                        i
+                      </span>
+                    )}
                       </div>
 
                       <div className="management-desired">
