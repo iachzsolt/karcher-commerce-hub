@@ -1183,20 +1183,82 @@ allegroAuth.post('/inventory-sync', async (context) => {
 
         refresh:
           async () => {
-            const response =
-              await allegroAuth.request(
-                '/sync',
-                { method: 'POST' },
-              )
+            const offerIds =
+              rows
+                .map((row) => row.offerId)
+                .filter(
+                  (offerId): offerId is string =>
+                    typeof offerId === 'string' &&
+                    offerId.trim().length > 0,
+                )
 
-            const details =
-              await response
-                .json()
-                .catch(() => null)
+            const batches: string[][] = []
+
+            for (
+              let index = 0;
+              index < offerIds.length;
+              index += 10
+            ) {
+              batches.push(
+                offerIds.slice(index, index + 10),
+              )
+            }
+
+            const batchResults: Array<{
+              offerIds: string[]
+              ok: boolean
+              status: number
+              details: unknown
+            }> = []
+
+            for (const batch of batches) {
+              const response =
+                await allegroAuth.request(
+                  '/sync',
+                  {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type':
+                        'application/json',
+                    },
+                    body: JSON.stringify({
+                      offerIds: batch,
+                    }),
+                  },
+                )
+
+              const details =
+                await response
+                  .json()
+                  .catch(() => null)
+
+              batchResults.push({
+                offerIds: batch,
+                ok: response.ok,
+                status: response.status,
+                details,
+              })
+
+              if (!response.ok) {
+                return {
+                  ok: false,
+                  details: {
+                    batches: batchResults,
+                  },
+                }
+              }
+            }
 
             return {
-              ok: response.ok,
-              details,
+              ok: true,
+              details: {
+                refreshedOffers:
+                  offerIds.length,
+                batchCount:
+                  batches.length,
+                batches:
+                  batchResults,
+              },
             }
           },
       },
@@ -2719,12 +2781,21 @@ allegroAuth.get('/import-issues', async (context) => {
   }> = []
 
   for (const offer of data.offers ?? []) {
-    const huMarketplace =
+    const isHuBaseMarketplace =
+      currentSession.account
+        .baseMarketplace?.id ===
+      'allegro-hu'
+
+    const huAdditionalState =
       offer.additionalMarketplaces?.[
         'allegro-hu'
       ]
 
-    if (!huMarketplace) {
+    const hasHuMarketplace =
+      isHuBaseMarketplace ||
+      Boolean(huAdditionalState)
+
+    if (!hasHuMarketplace) {
       issues.push({
         offerId: offer.id,
         name:
@@ -2755,6 +2826,68 @@ allegroAuth.get('/import-issues', async (context) => {
     data: issues,
   })
 })
+allegroAuth.post('/disconnect', async (context) => {
+  if (!currentSession) {
+    return context.json({
+      status: 'ok',
+      connected: false,
+    })
+  }
+
+  const databaseUrl =
+    process.env.DATABASE_URL
+
+  if (!databaseUrl) {
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Database configuration is missing',
+      },
+      500,
+    )
+  }
+
+  const db =
+    createDatabase(databaseUrl)
+
+  const accountId =
+    currentSession.platformAccountId
+
+  await db
+    .update(platformInventorySyncSettings)
+    .set({
+      enabled: false,
+      updatedAt: new Date(),
+    })
+    .where(
+      eq(
+        platformInventorySyncSettings.accountId,
+        accountId,
+      ),
+    )
+
+  await db
+    .update(platformAccounts)
+    .set({
+      active: false,
+      updatedAt: new Date(),
+    })
+    .where(
+      eq(
+        platformAccounts.id,
+        accountId,
+      ),
+    )
+
+  currentSession = null
+
+  return context.json({
+    status: 'ok',
+    connected: false,
+  })
+})
+
 allegroAuth.get('/status', (context) => {
   if (!currentSession) {
     return context.json({
@@ -2794,6 +2927,14 @@ type AllegroOfferForSync = {
   external?: {
     id?: string | null
   }
+
+sellingMode?: {
+  price?: {
+    amount?: string
+    currency?: string
+  }
+}
+
 
   publication?: {
     status?: string
@@ -3004,6 +3145,234 @@ allegroAuth.get(
   },
 )
 
+allegroAuth.get('/offers-preview', async (context) => {
+  await refreshAllegroSessionIfNeeded()
+
+  if (!currentSession) {
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Allegro account is not connected',
+      },
+      401,
+    )
+  }
+
+  const apiUrl =
+    process.env.ALLEGRO_API_URL
+
+  if (!apiUrl) {
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'ALLEGRO_API_URL is missing',
+      },
+      500,
+    )
+  }
+
+  const environment =
+    assertAllegroEnvironmentConfiguration()
+
+  const offersResponse =
+    await allegroFetch(
+      `${apiUrl}/sale/offers?limit=100`,
+      {
+        headers: {
+          Authorization:
+            `Bearer ${currentSession.accessToken}`,
+
+          Accept:
+            'application/vnd.allegro.public.v1+json',
+
+          'Accept-Language':
+            'hu-HU',
+        },
+      },
+    )
+
+  if (!offersResponse.ok) {
+    const errorBody =
+      await offersResponse.text()
+
+    console.error(
+      'Allegro offers preview request failed:',
+      offersResponse.status,
+      errorBody,
+    )
+
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Could not load Allegro offers preview',
+        httpStatus:
+          offersResponse.status,
+        allegroResponse:
+          errorBody,
+      },
+      502,
+    )
+  }
+
+  const data =
+    (await offersResponse.json()) as
+      AllegroOffersForSyncResponse
+
+const baseMarketplaceId =
+  currentSession.account.baseMarketplace?.id ?? null
+
+  const offers =
+    (data.offers ?? []).map(
+      (offer) => {
+        const isHuBaseMarketplace =
+          baseMarketplaceId ===
+          'allegro-hu'
+
+        const huAdditionalState =
+          offer.additionalMarketplaces?.[
+            'allegro-hu'
+          ]
+
+        const hasHuMarketplace =
+          isHuBaseMarketplace ||
+          Boolean(huAdditionalState)
+
+        const sku =
+          offer.external?.id?.trim() ??
+          null
+
+        const priceMinor =
+          isHuBaseMarketplace
+            ? priceToMinor(
+                offer.sellingMode
+                  ?.price
+                  ?.amount,
+              )
+            : huAdditionalState
+              ? priceToMinor(
+                  huAdditionalState
+                    .sellingMode
+                    ?.price
+                    ?.amount,
+                )
+              : null
+
+        const currency =
+          isHuBaseMarketplace
+            ? offer.sellingMode
+                ?.price
+                ?.currency ??
+              null
+            : huAdditionalState
+                ?.sellingMode
+                ?.price
+                ?.currency ??
+              null
+
+        return {
+          offerId:
+            offer.id,
+
+          sku,
+
+          name:
+            offer.name,
+
+          categoryId:
+            offer.category?.id ??
+            null,
+
+          hasHuMarketplace,
+
+          marketplace:
+        hasHuMarketplace
+          ? 'allegro-hu'
+          : null,
+
+          priceMinor,
+
+          currency,
+
+          stockAvailable:
+            offer.stock
+              ?.available ??
+            null,
+
+          stockSold:
+        isHuBaseMarketplace
+          ? offer.stock
+              ?.sold ??
+            null
+          : huAdditionalState
+              ?.stock
+              ?.sold ??
+            offer.stock
+              ?.sold ??
+            null,
+
+          publicationStatus:
+            normalizeAllegroListingStatus(
+              offer.publication
+                ?.status,
+            ),
+        }
+      },
+    )
+
+  const huOffers =
+    offers.filter(
+      (offer) =>
+        offer.hasHuMarketplace,
+    )
+
+  const missingSku =
+    huOffers.filter(
+      (offer) =>
+        !offer.sku,
+    )
+
+  return context.json({
+    status: 'ok',
+
+    mode: 'READ_ONLY_PREVIEW',
+
+    environment,
+
+    account: {
+      id:
+        currentSession.account.id,
+
+      login:
+        currentSession.account.login,
+
+      baseMarketplace:
+        currentSession.account
+          .baseMarketplace
+          ?.id ??
+        null,
+    },
+
+    summary: {
+      returned:
+        offers.length,
+
+      huMarketplace:
+        huOffers.length,
+
+      missingSku:
+        missingSku.length,
+
+      previewWritePerformed:
+        false,
+    },
+
+    offers,
+  })
+})
+
 allegroAuth.post('/sync', async (context) => {
   if (!currentSession) {
     return context.json(
@@ -3017,6 +3386,13 @@ allegroAuth.post('/sync', async (context) => {
 
   const databaseUrl = process.env.DATABASE_URL
   const apiUrl = process.env.ALLEGRO_API_URL
+
+  const body =
+    (await context.req.json().catch(() => null)) as
+      | {
+          offerIds?: unknown[]
+        }
+      | null
 
   if (!databaseUrl || !apiUrl) {
     return context.json(
@@ -3061,6 +3437,84 @@ allegroAuth.post('/sync', async (context) => {
 
   const data =
     (await offersResponse.json()) as AllegroOffersForSyncResponse
+
+  const requestedOfferIds =
+    new Set(
+      (body?.offerIds ?? [])
+        .filter(
+          (value): value is string =>
+            typeof value === 'string' &&
+            value.trim().length > 0,
+        )
+        .map(
+          (value) => value.trim(),
+        ),
+    )
+
+  if (
+    getAllegroEnvironment() === 'PRODUCTION' &&
+    requestedOfferIds.size === 0
+  ) {
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Production Allegro sync requires explicit offerIds',
+      },
+      400,
+    )
+  }
+
+  if (requestedOfferIds.size > 10) {
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Maximum 10 offers can be imported during the production pilot',
+      },
+      400,
+    )
+  }
+
+  const availableOffers =
+    data.offers ?? []
+
+  const offersToImport =
+    requestedOfferIds.size > 0
+      ? availableOffers.filter(
+          (offer) =>
+            requestedOfferIds.has(offer.id),
+        )
+      : availableOffers
+
+  if (
+    requestedOfferIds.size > 0 &&
+    offersToImport.length !==
+      requestedOfferIds.size
+  ) {
+    const foundIds =
+      new Set(
+        offersToImport.map(
+          (offer) => offer.id,
+        ),
+      )
+
+    const missingOfferIds =
+      [...requestedOfferIds].filter(
+        (offerId) => !foundIds.has(offerId),
+      )
+
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'One or more requested Allegro offers were not returned by the current sync scope',
+        missingOfferIds,
+      },
+      409,
+    )
+  }
+
 
   const db = createDatabase(databaseUrl)
   const now = new Date()
@@ -3142,21 +3596,35 @@ allegroAuth.post('/sync', async (context) => {
     status: string
   }> = []
 
-  for (const offer of data.offers ?? []) {
-    const huState =
-      offer.additionalMarketplaces?.['allegro-hu']
+  const baseMarketplaceId =
+  currentSession.account.baseMarketplace?.id ??
+  null
 
-    if (!huState) {
-      skipped++
+  for (const offer of offersToImport) {
+    const isHuBaseMarketplace =
+  baseMarketplaceId ===
+  'allegro-hu'
 
-      skippedOffers.push({
-        offerId: offer.id,
-        name: offer.name,
-        reason: 'MISSING_HU_MARKETPLACE',
-      })
+const huAdditionalState =
+  offer.additionalMarketplaces?.[
+    'allegro-hu'
+  ]
 
-      continue
-    }
+const hasHuMarketplace =
+  isHuBaseMarketplace ||
+  Boolean(huAdditionalState)
+
+if (!hasHuMarketplace) {
+  skipped++
+
+  skippedOffers.push({
+    offerId: offer.id,
+    name: offer.name,
+    reason: 'MISSING_HU_MARKETPLACE',
+  })
+
+  continue
+}
 
     const sku = offer.external?.id?.trim()
 
@@ -3225,12 +3693,31 @@ allegroAuth.post('/sync', async (context) => {
         id: platformListings.id,
       })
 
-    const priceMinor = priceToMinor(
-      huState.sellingMode?.price?.amount,
-    )
+    const priceMinor =
+  isHuBaseMarketplace
+    ? priceToMinor(
+        offer.sellingMode
+          ?.price
+          ?.amount,
+      )
+    : priceToMinor(
+        huAdditionalState
+          ?.sellingMode
+          ?.price
+          ?.amount,
+      )
 
-    const currency =
-      huState.sellingMode?.price?.currency ?? 'HUF'
+const currency =
+  isHuBaseMarketplace
+    ? offer.sellingMode
+        ?.price
+        ?.currency ??
+      'HUF'
+    : huAdditionalState
+        ?.sellingMode
+        ?.price
+        ?.currency ??
+      'HUF'
 
     const publicationStatus =
       normalizeAllegroListingStatus(
@@ -3241,12 +3728,21 @@ allegroAuth.post('/sync', async (context) => {
       offer.stock?.available ?? null
 
     const stockSold =
-      huState.stock?.sold ??
+  isHuBaseMarketplace
+    ? offer.stock?.sold ??
+      null
+    : huAdditionalState
+        ?.stock
+        ?.sold ??
       offer.stock?.sold ??
       null
 
     const priceAutomation =
-      huState.sellingMode?.priceAutomation
+  isHuBaseMarketplace
+    ? null
+    : huAdditionalState
+        ?.sellingMode
+        ?.priceAutomation
 
     const priceAutomationRuleId =
       priceAutomation?.rule?.id ??
@@ -6065,7 +6561,15 @@ allegroAuth.post('/sync-selected', async (context) => {
       row.priceMinor !==
         effectiveDesiredPriceMinorForBulk
 
+    const isIntentionallyInactive =
+      row.desiredPublicationStatus === 'INACTIVE' &&
+      (
+        row.publicationStatus === 'INACTIVE' ||
+        row.publicationStatus === 'ENDED'
+      )
+
     const stockChanged =
+      !isIntentionallyInactive &&
       row.desiredStock !== null &&
       row.stockAvailable !== row.desiredStock
 
@@ -6271,6 +6775,11 @@ allegroAuth.post('/sync-selected', async (context) => {
     results,
   })
 })
+
+
+
+
+
 
 
 

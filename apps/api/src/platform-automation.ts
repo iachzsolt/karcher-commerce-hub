@@ -198,40 +198,105 @@ export async function runInventoryRefreshAutomations(
         continue
       }
 
-      const response =
-        await allegroAuth.request(
-          '/inventory-sync',
-          {
-            method: 'POST',
+      const batches: string[][] = []
 
-            headers: {
-              'Content-Type':
-                'application/json',
-            },
-
-            body:
-              JSON.stringify({
-                confirm: true,
-                connectionId,
-                listingIds,
-              }),
-          },
+      for (
+        let index = 0;
+        index < listingIds.length;
+        index += 100
+      ) {
+        batches.push(
+          listingIds.slice(
+            index,
+            index + 100,
+          ),
         )
+      }
 
-      const details =
-        await response
-          .json()
-          .catch(() => null)
+      const batchResults: Array<{
+        batchNumber: number
+        listingCount: number
+        ok: boolean
+        status: number
+        details: unknown
+      }> = []
+
+      for (
+        let batchIndex = 0;
+        batchIndex < batches.length;
+        batchIndex++
+      ) {
+        const batch =
+          batches[batchIndex]
+
+        const response =
+          await allegroAuth.request(
+            '/inventory-sync',
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type':
+                  'application/json',
+              },
+              body:
+                JSON.stringify({
+                  confirm: true,
+                  connectionId,
+                  listingIds: batch,
+                }),
+            },
+          )
+
+        const details =
+          await response
+            .json()
+            .catch(() => null)
+
+        batchResults.push({
+          batchNumber:
+            batchIndex + 1,
+          listingCount:
+            batch.length,
+          ok:
+            response.ok,
+          status:
+            response.status,
+          details,
+        })
+      }
+
+      const failedBatches =
+        batchResults.filter(
+          (batch) => !batch.ok,
+        )
 
       results.push({
         platform: 'ALLEGRO',
         accountId:
           setting.accountId,
         ok:
-          response.ok,
+          failedBatches.length === 0,
         status:
-          response.status,
-        details,
+          failedBatches.length === 0
+            ? 200
+            : failedBatches[0].status,
+        details: {
+          status:
+            failedBatches.length === 0
+              ? 'SUCCESS'
+              : 'PARTIAL_FAILURE',
+          totalListings:
+            listingIds.length,
+          batchCount:
+            batches.length,
+          successfulBatches:
+            batchResults.length -
+            failedBatches.length,
+          failedBatches:
+            failedBatches.length,
+          batches:
+            batchResults,
+        },
       })
 
       continue

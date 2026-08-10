@@ -1,4 +1,4 @@
-import 'dotenv/config'
+﻿import 'dotenv/config'
 import { randomUUID } from 'node:crypto'
 import { serve } from '@hono/node-server'
 import {
@@ -416,6 +416,15 @@ app.get('/allegro/listings', async (context) => {
             platformListings.marketplace,
             'allegro-hu',
           ),
+          eq(
+            platformAccounts.environment,
+            (process.env.ALLEGRO_ENV ?? 'SANDBOX')
+              .toUpperCase(),
+          ),
+          eq(
+            platformAccounts.active,
+            true,
+          ),
         ),
       )
 
@@ -505,6 +514,173 @@ app.get('/allegro/listings', async (context) => {
   }
 })
 
+app.post(
+  '/allegro/listings/initialize-baseline',
+  async (context) => {
+    if (!db) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Database is not configured',
+        },
+        500,
+      )
+    }
+
+    try {
+      const environment =
+        (process.env.ALLEGRO_ENV ?? 'SANDBOX')
+          .toUpperCase()
+
+      if (environment !== 'PRODUCTION') {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Accepted baseline initialization is production-only',
+          },
+          409,
+        )
+      }
+
+      const rows =
+        await db
+          .select({
+            listingId:
+              platformListings.id,
+
+            priceMinor:
+              listingRemoteStates.priceMinor,
+
+            stockAvailable:
+              listingRemoteStates.stockAvailable,
+
+            publicationStatus:
+              listingRemoteStates.publicationStatus,
+
+            acceptedStateId:
+              listingAcceptedStates.id,
+          })
+          .from(platformListings)
+          .innerJoin(
+            platformAccounts,
+            eq(
+              platformListings.accountId,
+              platformAccounts.id,
+            ),
+          )
+          .innerJoin(
+            platforms,
+            eq(
+              platformListings.platformId,
+              platforms.id,
+            ),
+          )
+          .leftJoin(
+            listingRemoteStates,
+            eq(
+              listingRemoteStates.listingId,
+              platformListings.id,
+            ),
+          )
+          .leftJoin(
+            listingAcceptedStates,
+            eq(
+              listingAcceptedStates.listingId,
+              platformListings.id,
+            ),
+          )
+          .where(
+            and(
+              eq(
+                platforms.code,
+                'ALLEGRO',
+              ),
+              eq(
+                platformListings.marketplace,
+                'allegro-hu',
+              ),
+              eq(
+                platformAccounts.environment,
+                environment,
+              ),
+              eq(
+                platformAccounts.active,
+                true,
+              ),
+            ),
+          )
+
+      const missingBaselineRows =
+        rows.filter(
+          (row) =>
+            row.acceptedStateId === null,
+        )
+
+      const now = new Date()
+
+      if (missingBaselineRows.length > 0) {
+        await db
+          .insert(listingAcceptedStates)
+          .values(
+            missingBaselineRows.map(
+              (row) => ({
+                listingId:
+                  row.listingId,
+
+                acceptedPriceMinor:
+                  row.priceMinor,
+
+                acceptedStockAvailable:
+                  row.stockAvailable,
+
+                acceptedPublicationStatus:
+                  row.publicationStatus ??
+                  'UNKNOWN',
+
+                acceptedAt: now,
+                updatedAt: now,
+              }),
+            ),
+          )
+          .onConflictDoNothing({
+            target:
+              listingAcceptedStates.listingId,
+          })
+      }
+
+      return context.json({
+        status: 'ok',
+        environment,
+        totalListings:
+          rows.length,
+        initialized:
+          missingBaselineRows.length,
+        alreadyInitialized:
+          rows.length -
+          missingBaselineRows.length,
+        allegroWritePerformed:
+          false,
+        desiredStateModified:
+          false,
+      })
+    } catch (error) {
+      console.error(
+        'Allegro baseline initialization failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Could not initialize Allegro accepted baseline',
+        },
+        500,
+      )
+    }
+  },
+)
 app.post(
   '/allegro/listings/:id/accept-current-state',
   async (context) => {
@@ -4561,6 +4737,121 @@ app.patch('/allegro/listings/:id/stock-lock', async (context) => {
     )
   }
 })
+
+app.patch('/allegro/listings/:id/auto-stock-sync', async (context) => {
+  if (!db) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database is not configured',
+      },
+      500,
+    )
+  }
+
+  try {
+    const listingId =
+      context.req.param('id')
+
+    const body =
+      await context.req.json<{
+        autoStockSync?: boolean
+      }>()
+
+    if (
+      typeof body.autoStockSync !==
+      'boolean'
+    ) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'autoStockSync must be boolean',
+        },
+        400,
+      )
+    }
+
+    const [updated] =
+      await db
+        .update(
+          listingDesiredStates,
+        )
+        .set({
+          autoStockSync:
+            body.autoStockSync,
+
+          updatedBy:
+            'COMMERCE_HUB_UI',
+
+          updatedAt:
+            new Date(),
+        })
+        .where(
+          eq(
+            listingDesiredStates
+              .listingId,
+            listingId,
+          ),
+        )
+        .returning({
+          listingId:
+            listingDesiredStates
+              .listingId,
+
+          autoStockSync:
+            listingDesiredStates
+              .autoStockSync,
+
+          stockLocked:
+            listingDesiredStates
+              .stockLocked,
+
+          desiredStock:
+            listingDesiredStates
+              .desiredStock,
+
+          updatedBy:
+            listingDesiredStates
+              .updatedBy,
+
+          updatedAt:
+            listingDesiredStates
+              .updatedAt,
+        })
+
+    if (!updated) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Desired state was not found',
+        },
+        404,
+      )
+    }
+
+    return context.json({
+      status: 'ok',
+      data: updated,
+    })
+  } catch (error) {
+    console.error(
+      'Auto stock sync update failed:',
+      error,
+    )
+
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Could not update auto stock sync',
+      },
+      500,
+    )
+  }
+})
+
 app.patch('/allegro/listings/:id/desired-status', async (context) => {
   if (!db) {
     return context.json(
@@ -6326,3 +6617,4 @@ const campaignSubmissionTimer =
 }
 
 void startServer()
+

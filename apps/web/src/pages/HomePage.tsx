@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+﻿import { useEffect, useState } from 'react'
 import '../CommerceHub.css'
 
 type HealthResponse = {
@@ -1472,11 +1472,7 @@ function HomePage({
   const changedListingsCount =
     allegroListings.filter(
       (listing) =>
-        hasPriceDifference(listing) ||
-        (listing.desiredStock !== null &&
-          getEffectiveStockAvailable(listing) !==
-            listing.desiredStock) ||
-        hasPublicationDifference(listing),
+        hasListingDifference(listing),
     ).length
   const selectedChangedListingsCount =
     allegroListings.filter(
@@ -1484,15 +1480,7 @@ function HomePage({
         selectedListingIds.includes(
           listing.id,
         ) &&
-        (
-          hasPriceDifference(listing) ||
-          (
-            listing.desiredStock !== null &&
-            getEffectiveStockAvailable(listing) !==
-              listing.desiredStock
-          ) ||
-          hasPublicationDifference(listing)
-        ),
+        hasListingDifference(listing),
     ).length
   const unsavedDesiredListings =
     allegroListings.filter(
@@ -2294,9 +2282,18 @@ Folyamatban: ${data.pending ?? 0}`,
     const priceChanged =
       hasPriceDifference(listing)
 
+    const isIntentionallyInactive =
+      listing.desiredPublicationStatus === 'INACTIVE' &&
+      (
+        listing.publicationStatus === 'INACTIVE' ||
+        listing.publicationStatus === 'ENDED'
+      )
+
     const stockChanged =
+      !isIntentionallyInactive &&
       listing.desiredStock !== null &&
-      getEffectiveStockAvailable(listing) !== listing.desiredStock
+      getEffectiveStockAvailable(listing) !==
+        listing.desiredStock
 
     const publicationChanged =
       hasPublicationDifference(listing)
