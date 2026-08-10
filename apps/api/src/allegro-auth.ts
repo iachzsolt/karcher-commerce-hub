@@ -199,6 +199,40 @@ function assertAllegroWriteSafety() {
   return environment
 }
 
+function getAllegroUserAgent() {
+  const userAgent =
+    process.env.ALLEGRO_USER_AGENT?.trim()
+
+  if (!userAgent) {
+    throw new Error(
+      'ALLEGRO_USER_AGENT is required',
+    )
+  }
+
+  return userAgent
+}
+
+async function allegroFetch(
+  input: Parameters<typeof fetch>[0],
+  init?: Parameters<typeof fetch>[1],
+) {
+  const headers =
+    new Headers(init?.headers)
+
+  headers.set(
+    'User-Agent',
+    getAllegroUserAgent(),
+  )
+
+  return globalThis.fetch(
+    input,
+    {
+      ...init,
+      headers,
+    },
+  )
+}
+
 export const allegroAuth = new Hono()
 export async function refreshAllegroSessionIfNeeded() {
   if (!currentSession) {
@@ -253,7 +287,7 @@ export async function refreshAllegroSessionIfNeeded() {
     })
 
     try {
-      const response = await fetch(tokenUrl, {
+      const response = await allegroFetch(tokenUrl, {
         method: 'POST',
         headers: {
           Authorization:
@@ -1337,7 +1371,7 @@ allegroAuth.get('/callback', async (context) => {
     client_id: clientId,
   })
 
-  const tokenResponse = await fetch(tokenUrl, {
+  const tokenResponse = await allegroFetch(tokenUrl, {
     method: 'POST',
     headers: {
       'Content-Type':
@@ -1368,7 +1402,7 @@ allegroAuth.get('/callback', async (context) => {
   const tokenData =
     (await tokenResponse.json()) as TokenResponse
 
-  const profileResponse = await fetch(
+  const profileResponse = await allegroFetch(
     `${apiUrl}/me`,
     {
       headers: {
@@ -1662,7 +1696,7 @@ const body: {
     }
   }
 
-  const response = await fetch(
+  const response = await allegroFetch(
     `${apiUrl}/sale/badges`,
     {
       method: 'POST',
@@ -1757,7 +1791,7 @@ export async function finishOfferAllegroCampaign(
 
   
   assertAllegroWriteSafety()
-const response = await fetch(
+const response = await allegroFetch(
     `${apiUrl}/sale/badges/offers/${encodeURIComponent(
       input.offerId,
     )}/campaigns/${encodeURIComponent(
@@ -1858,7 +1892,7 @@ export async function getAllegroBadgeOperation(
     )
   }
 
-  const response = await fetch(
+  const response = await allegroFetch(
     `${apiUrl}/sale/badge-operations/${encodeURIComponent(
       operationId,
     )}`,
@@ -1927,7 +1961,7 @@ export async function getAllegroBadgeApplication(
     )
   }
 
-  const response = await fetch(
+  const response = await allegroFetch(
     `${apiUrl}/sale/badge-applications/${encodeURIComponent(
       applicationId,
     )}`,
@@ -2006,7 +2040,7 @@ export async function getAllegroBadgeApplicationsForOffer(
       String(offset),
     )
 
-    const response = await fetch(
+    const response = await allegroFetch(
       url.toString(),
       {
         headers: {
@@ -2110,7 +2144,7 @@ export async function getAllegroBadgeCampaigns(
     )
   }
 
-  const response = await fetch(
+  const response = await allegroFetch(
     `${apiUrl}/sale/badge-campaigns?marketplace.id=${encodeURIComponent(
       marketplaceId,
     )}`,
@@ -2255,7 +2289,7 @@ export async function getAllegroAlleDiscountCampaigns(
   const query =
     searchParams.toString()
 
-  const response = await fetch(
+  const response = await allegroFetch(
     `${apiUrl}/sale/alle-discount/campaigns${
       query ? `?${query}` : ''
     }`,
@@ -2350,7 +2384,7 @@ export async function getAllegroAlleDiscountEligibleOffers(
       )
     }
 
-    const response = await fetch(
+    const response = await allegroFetch(
       `${apiUrl}/sale/alle-discount/${encodeURIComponent(
         input.campaignId,
       )}/eligible-offers?${searchParams.toString()}`,
@@ -2574,7 +2608,7 @@ allegroAuth.get('/offers', async (context) => {
     )
   }
 
-  const response = await fetch(
+  const response = await allegroFetch(
     `${apiUrl}/sale/offers?limit=20`,
     {
       headers: {
@@ -2636,7 +2670,7 @@ allegroAuth.get('/import-issues', async (context) => {
     )
   }
 
-  const response = await fetch(
+  const response = await allegroFetch(
     `${apiUrl}/sale/offers?limit=100`,
     {
       headers: {
@@ -2891,7 +2925,7 @@ allegroAuth.get(
 
     const offerId = context.req.param('offerId')
 
-    const response = await fetch(
+    const response = await allegroFetch(
       apiUrl +
         '/sale/product-offers/' +
         encodeURIComponent(offerId),
@@ -2994,7 +3028,7 @@ allegroAuth.post('/sync', async (context) => {
     )
   }
 
-  const offersResponse = await fetch(
+  const offersResponse = await allegroFetch(
     `${apiUrl}/sale/offers?limit=100`,
     {
       headers: {
@@ -3641,7 +3675,7 @@ allegroAuth.post('/push-price/:listingId', async (context) => {
 
   const commandId = randomUUID()
 
-  const commandResponse = await fetch(
+  const commandResponse = await allegroFetch(
     `${apiUrl}/sale/offer-price-change-commands/${commandId}`,
     {
       method: 'PUT',
@@ -3711,7 +3745,7 @@ allegroAuth.post('/push-price/:listingId', async (context) => {
   for (let attempt = 0; attempt < 10; attempt++) {
     await sleep(500)
 
-    const taskResponse = await fetch(
+    const taskResponse = await allegroFetch(
       `${apiUrl}/sale/offer-price-change-commands/${commandId}/tasks`,
       {
         headers: {
@@ -3887,7 +3921,7 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
 
   const commandId = randomUUID()
 
-  const commandResponse = await fetch(
+  const commandResponse = await allegroFetch(
     `${apiUrl}/sale/offer-quantity-change-commands/${commandId}`,
     {
       method: 'PUT',
@@ -3958,7 +3992,7 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
   for (let attempt = 0; attempt < 10; attempt++) {
     await sleep(500)
 
-    const taskResponse = await fetch(
+    const taskResponse = await allegroFetch(
       `${apiUrl}/sale/offer-quantity-change-commands/${commandId}/tasks`,
       {
         headers: {
@@ -4186,7 +4220,7 @@ allegroAuth.post('/push-status/:listingId', async (context) => {
 
   const commandId = randomUUID()
 
-  const commandResponse = await fetch(
+  const commandResponse = await allegroFetch(
     `${apiUrl}/sale/offer-publication-commands/${commandId}`,
     {
       method: 'PUT',
@@ -4256,7 +4290,7 @@ allegroAuth.post('/push-status/:listingId', async (context) => {
   ) {
     await sleep(500)
 
-    const taskResponse = await fetch(
+    const taskResponse = await allegroFetch(
       `${apiUrl}/sale/offer-publication-commands/${commandId}/tasks`,
       {
         headers: {
@@ -6237,6 +6271,7 @@ allegroAuth.post('/sync-selected', async (context) => {
     results,
   })
 })
+
 
 
 
