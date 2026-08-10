@@ -3038,6 +3038,75 @@ function normalizeAllegroListingStatus(
 }
 
 allegroAuth.get(
+  '/offer-debug/:offerId',
+  async (context) => {
+    await refreshAllegroSessionIfNeeded()
+
+    if (!currentSession) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Allegro account is not connected',
+        },
+        401,
+      )
+    }
+
+    const apiUrl = process.env.ALLEGRO_API_URL
+
+    if (!apiUrl) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'ALLEGRO_API_URL is missing',
+        },
+        500,
+      )
+    }
+
+    const offerId =
+      context.req.param('offerId')
+
+    const response = await allegroFetch(
+      apiUrl +
+        '/sale/product-offers/' +
+        encodeURIComponent(offerId),
+      {
+        headers: {
+          Authorization:
+            'Bearer ' + currentSession.accessToken,
+          Accept:
+            'application/vnd.allegro.public.v1+json',
+          'Accept-Language': 'hu-HU',
+        },
+      },
+    )
+
+    if (!response.ok) {
+      const body = await response.text()
+
+      return context.json(
+        {
+          status: 'error',
+          allegroStatus: response.status,
+          body,
+        },
+        502,
+      )
+    }
+
+    const data =
+      (await response.json()) as Record<string, unknown>
+
+    return context.json({
+      status: 'ok',
+      offerId,
+      data,
+    })
+  },
+)
+
+allegroAuth.get(
   '/open-offer/:offerId',
   async (context) => {
     await refreshAllegroSessionIfNeeded()
@@ -3719,10 +3788,58 @@ const currency =
         ?.currency ??
       'HUF'
 
-    const publicationStatus =
+    let publicationStatus =
       normalizeAllegroListingStatus(
         offer.publication?.status,
       )
+
+    if (environment === 'PRODUCTION') {
+      try {
+        const detailResponse =
+          await allegroFetch(
+            apiUrl +
+              '/sale/product-offers/' +
+              encodeURIComponent(offer.id),
+            {
+              headers: {
+                Authorization:
+                  'Bearer ' +
+                  currentSession.accessToken,
+                Accept:
+                  'application/vnd.allegro.public.v1+json',
+                'Accept-Language':
+                  'hu-HU',
+              },
+            },
+          )
+
+        if (detailResponse.ok) {
+          const detail =
+            (await detailResponse.json()) as {
+              publication?: {
+                status?: string
+              }
+            }
+
+          publicationStatus =
+            normalizeAllegroListingStatus(
+              detail.publication?.status,
+            )
+        } else {
+          console.warn(
+            'Allegro product-offer publication lookup failed; using list status:',
+            offer.id,
+            detailResponse.status,
+          )
+        }
+      } catch (detailError) {
+        console.warn(
+          'Allegro product-offer publication lookup failed; using list status:',
+          offer.id,
+          detailError,
+        )
+      }
+    }
 
     const stockAvailable =
       offer.stock?.available ?? null

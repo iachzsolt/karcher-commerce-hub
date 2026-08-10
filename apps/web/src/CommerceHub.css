@@ -5761,3 +5761,160 @@ input:checked + span::after {
   background: #ff5a00;
   color: #ffffff;
 }
+
+/* Allegro account connection */
+
+.allegro-connection-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 16px;
+  padding: 18px 22px;
+  background: #ffffff;
+  border: 1px solid #d8d8d8;
+  border-radius: 12px;
+}
+
+.allegro-connection-main {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.allegro-connection-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  border-radius: 9px;
+  background: #ff5a00;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.allegro-connection-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.allegro-connection-title h3 {
+  margin: 2px 0 3px;
+}
+
+.allegro-connection-main p {
+  margin: 0;
+  color: #666666;
+  font-size: 12px;
+}
+
+.allegro-connection-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #f1f1f1;
+  color: #666666;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.allegro-connection-status.is-connected {
+  background: #edf7ef;
+  color: #237b35;
+}
+
+.allegro-connection-button {
+  min-height: 36px;
+  padding: 0 16px;
+  border: 1px solid #222222;
+  border-radius: 8px;
+  background: #222222;
+  color: #ffffff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.allegro-connection-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.allegro-settings-card.is-disabled {
+  opacity: 0.72;
+}
+
+.allegro-settings-info {
+  padding: 10px 22px;
+  border-top: 1px solid #eeeeee;
+  border-bottom: 1px solid #eeeeee;
+  background: #fafafa;
+  color: #666666;
+  font-size: 11px;
+}
+
+.allegro-connection-error {
+  margin-bottom: 16px;
+  border: 1px solid #f0caca;
+  border-radius: 8px;
+}
+
+
+/* Allegro settings visual alignment */
+
+.allegro-settings-heading {
+  margin-bottom: 20px;
+}
+
+.allegro-settings-heading > span {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.allegro-settings-heading h2 {
+  margin: 0 0 4px;
+  font-size: 24px;
+  line-height: 1.15;
+}
+
+.allegro-settings-heading p {
+  margin: 0;
+}
+
+.allegro-connection-card {
+  min-height: 96px;
+  padding: 18px 22px;
+}
+
+.allegro-connection-title h3 {
+  margin: 2px 0 4px;
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.allegro-connection-status {
+  position: relative;
+  top: 1px;
+}
+
+.allegro-connection-button {
+  background: #ffffff;
+  color: #222222;
+  border: 1px solid #cfcfcf;
+}
+
+.allegro-connection-button:hover {
+  border-color: #222222;
+  background: #f7f7f7;
+}
+

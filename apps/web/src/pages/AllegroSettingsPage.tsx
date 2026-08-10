@@ -1,4 +1,4 @@
-import {
+﻿import {
   useEffect,
   useState,
 } from 'react'
@@ -10,6 +10,18 @@ type InventorySyncSettings = {
   enabled: boolean
   triggerMode: string
   updatedAt: string | null
+}
+
+type AllegroStatus = {
+  status: string
+  connected: boolean
+  environment: string | null
+  account?: {
+    id: string
+    login: string
+    baseMarketplace: string | null
+  }
+  accessTokenExpiresAt?: string
 }
 
 function AllegroSettingsPage() {
@@ -29,52 +41,154 @@ function AllegroSettingsPage() {
   ] = useState(false)
 
   const [
+    connectionLoading,
+    setConnectionLoading,
+  ] = useState(true)
+
+  const [
+    connection,
+    setConnection,
+  ] = useState<AllegroStatus | null>(
+    null,
+  )
+
+  const [
     error,
     setError,
   ] = useState<string | null>(
     null,
   )
 
+  const [
+    connectionError,
+    setConnectionError,
+  ] = useState<string | null>(
+    null,
+  )
+
   useEffect(() => {
-    const loadSettings =
+    const loadData =
       async () => {
+        setConnectionLoading(true)
+        setLoading(true)
+
         try {
-          const response =
+          const statusResponse =
+            await fetch(
+              `${API_BASE_URL}/auth/allegro/status`,
+            )
+
+          if (!statusResponse.ok) {
+            throw new Error(
+              'Az Allegro kapcsolat állapota nem tölthető be.',
+            )
+          }
+
+          const status =
+            (await statusResponse.json()) as
+              AllegroStatus
+
+          setConnection(status)
+
+          if (!status.connected) {
+            setSyncEnabled(false)
+            return
+          }
+
+          const settingsResponse =
             await fetch(
               `${API_BASE_URL}/auth/allegro/inventory-sync-settings`,
             )
 
-          if (!response.ok) {
+          if (!settingsResponse.ok) {
             throw new Error(
               'A készletszinkron beállítása nem tölthető be.',
             )
           }
 
-          const result =
-            (await response.json()) as
+          const settings =
+            (await settingsResponse.json()) as
               InventorySyncSettings
 
           setSyncEnabled(
-            result.enabled,
+            settings.enabled,
           )
         } catch (loadError) {
-          setError(
+          const message =
             loadError instanceof Error
               ? loadError.message
-              : 'Ismeretlen hiba történt.',
-          )
+              : 'Ismeretlen hiba történt.'
+
+          setConnectionError(message)
         } finally {
+          setConnectionLoading(false)
           setLoading(false)
         }
       }
 
-    void loadSettings()
+    void loadData()
   }, [])
+
+  const connectAllegro = () => {
+    window.location.assign(
+      `${API_BASE_URL}/auth/allegro/connect`,
+    )
+  }
+
+  const disconnectAllegro =
+    async () => {
+      const confirmed =
+        window.confirm(
+          'Biztosan le szeretnéd kapcsolni az Allegro fiókot?',
+        )
+
+      if (!confirmed) {
+        return
+      }
+
+      setConnectionError(null)
+
+      try {
+        const response =
+          await fetch(
+            `${API_BASE_URL}/auth/allegro/disconnect`,
+            {
+              method: 'POST',
+            },
+          )
+
+        if (!response.ok) {
+          throw new Error(
+            'Az Allegro kapcsolat nem bontható.',
+          )
+        }
+
+        setConnection({
+          status: 'ok',
+          connected: false,
+          environment:
+            connection?.environment ??
+            null,
+        })
+
+        setSyncEnabled(false)
+      } catch (disconnectError) {
+        setConnectionError(
+          disconnectError instanceof Error
+            ? disconnectError.message
+            : 'Ismeretlen hiba történt.',
+        )
+      }
+    }
 
   const updateSyncEnabled =
     async (
       enabled: boolean,
     ) => {
+      if (!connection?.connected) {
+        return
+      }
+
       setSaving(true)
       setError(null)
 
@@ -118,12 +232,13 @@ function AllegroSettingsPage() {
       }
     }
 
+  const connected =
+    connection?.connected === true
+
   return (
     <section className="allegro-settings-page">
       <div className="allegro-settings-heading">
-        <p className="section-label">
-          ALLEGRO
-        </p>
+        <span>ALLEGRO</span>
 
         <h2>Beállítások</h2>
 
@@ -133,7 +248,97 @@ function AllegroSettingsPage() {
         </p>
       </div>
 
-      <div className="allegro-settings-card">
+      <div className="allegro-connection-card">
+        <div className="allegro-connection-main">
+          <div className="allegro-connection-icon">
+            A
+          </div>
+
+          <div>
+            <span className="allegro-settings-eyebrow">
+              ALLEGRO KAPCSOLAT
+            </span>
+
+            <div className="allegro-connection-title">
+              <h3>
+                Allegro kapcsolat
+              </h3>
+
+              {!connectionLoading && (
+                <span
+                  className={
+                    connected
+                      ? 'allegro-connection-status is-connected'
+                      : 'allegro-connection-status'
+                  }
+                >
+                  {connected
+                    ? 'Csatlakoztatva'
+                    : 'Nincs kapcsolat'}
+                </span>
+              )}
+            </div>
+
+            {connectionLoading ? (
+              <p>
+                Kapcsolat ellenőrzése...
+              </p>
+            ) : connected ? (
+              <p>
+                <strong>
+                  {connection?.account?.login ??
+                    'Allegro'}
+                </strong>
+                {' · '}
+                {connection?.environment ??
+                  '—'}
+                {connection?.account
+                  ?.baseMarketplace
+                  ? ` · ${connection.account.baseMarketplace}`
+                  : ''}
+              </p>
+            ) : (
+              <p>
+                Csatlakoztasd az Allegro fiókot a
+                Commerce Hubhoz az adatok
+                szinkronizálásához.
+              </p>
+            )}
+          </div>
+        </div>
+
+        <button
+          type="button"
+          className="allegro-connection-button"
+          disabled={connectionLoading}
+          onClick={() => {
+            if (connected) {
+              void disconnectAllegro()
+              return
+            }
+
+            connectAllegro()
+          }}
+        >
+          {connected
+            ? 'Kapcsolat bontása'
+            : 'Kapcsolódás az Allegrohoz'}
+        </button>
+      </div>
+
+      {connectionError && (
+        <div className="allegro-settings-error allegro-connection-error">
+          {connectionError}
+        </div>
+      )}
+
+      <div
+        className={
+          connected
+            ? 'allegro-settings-card'
+            : 'allegro-settings-card is-disabled'
+        }
+      >
         <div className="allegro-settings-card-header">
           <div>
             <span className="allegro-settings-eyebrow">
@@ -155,6 +360,7 @@ function AllegroSettingsPage() {
               type="checkbox"
               checked={syncEnabled}
               disabled={
+                !connected ||
                 loading ||
                 saving
               }
@@ -168,16 +374,25 @@ function AllegroSettingsPage() {
             <span />
 
             <strong>
-              {loading
-                ? 'Betöltés...'
-                : saving
-                  ? 'Mentés...'
-                  : syncEnabled
-                    ? 'Bekapcsolva'
-                    : 'Kikapcsolva'}
+              {!connected
+                ? 'Kikapcsolva'
+                : loading
+                  ? 'Betöltés...'
+                  : saving
+                    ? 'Mentés...'
+                    : syncEnabled
+                      ? 'Bekapcsolva'
+                      : 'Kikapcsolva'}
             </strong>
           </label>
         </div>
+
+        {!connected && (
+          <div className="allegro-settings-info">
+            A készletszinkron az Allegro fiók
+            csatlakoztatása után kapcsolható be.
+          </div>
+        )}
 
         {error && (
           <div className="allegro-settings-error">
@@ -293,3 +508,4 @@ function AllegroSettingsPage() {
 }
 
 export default AllegroSettingsPage
+
