@@ -5492,3 +5492,267 @@ input:checked + span::after {
   color: #a02424;
   font-size: 9px;
 }
+/* ============================================================
+   ALLEGRO SETTINGS
+   ============================================================ */
+
+.allegro-settings-page {
+  display: grid;
+  gap: 18px;
+}
+
+.allegro-settings-heading h2 {
+  margin: 4px 0 5px;
+}
+
+.allegro-settings-heading > p:last-child {
+  margin: 0;
+  color: #777;
+  font-size: 12px;
+}
+
+.allegro-settings-card {
+  overflow: hidden;
+  border: 1px solid #dedede;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.allegro-settings-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 20px 22px;
+  border-bottom: 1px solid #ededed;
+}
+
+.allegro-settings-eyebrow {
+  color: #777;
+  font-size: 9px;
+  font-weight: 850;
+  letter-spacing: 0.07em;
+}
+
+.allegro-settings-card-header h3 {
+  margin: 4px 0;
+  font-size: 16px;
+}
+
+.allegro-settings-card-header p {
+  max-width: 620px;
+  margin: 0;
+  color: #777;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.allegro-settings-status {
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: #f1f1f1;
+  color: #666;
+  font-size: 9px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.allegro-settings-source {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 20px 22px;
+  border-bottom: 1px solid #ededed;
+  background: #fafafa;
+}
+
+.allegro-settings-source-node {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 190px;
+  padding: 11px 13px;
+  border: 1px solid #ddd;
+  border-radius: 9px;
+  background: #fff;
+}
+
+.allegro-settings-source-node > span {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  background: #ffee00;
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.allegro-settings-source-node div {
+  display: grid;
+  gap: 2px;
+}
+
+.allegro-settings-source-node strong {
+  font-size: 11px;
+}
+
+.allegro-settings-source-node small {
+  color: #888;
+  font-size: 9px;
+}
+
+.allegro-settings-source-arrow {
+  color: #777;
+  font-size: 18px;
+}
+
+.allegro-settings-rules {
+  display: grid;
+  grid-template-columns:
+    repeat(2, minmax(0, 1fr));
+  gap: 0;
+}
+
+.allegro-settings-rules > div {
+  display: flex;
+  gap: 9px;
+  padding: 15px 18px;
+  border-bottom: 1px solid #ededed;
+}
+
+.allegro-settings-rules > div:nth-child(odd) {
+  border-right: 1px solid #ededed;
+}
+
+.allegro-settings-rules > div > span {
+  color: #2d7a42;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.allegro-settings-rules > div > div {
+  display: grid;
+  gap: 3px;
+}
+
+.allegro-settings-rules strong {
+  font-size: 10px;
+}
+
+.allegro-settings-rules small {
+  color: #888;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.allegro-settings-runtime {
+  display: grid;
+  grid-template-columns:
+    repeat(3, minmax(0, 1fr));
+}
+
+.allegro-settings-runtime > div {
+  padding: 13px 18px;
+  border-right: 1px solid #ededed;
+}
+
+.allegro-settings-runtime > div:last-child {
+  border-right: 0;
+}
+
+.allegro-settings-runtime span {
+  display: block;
+  margin-bottom: 4px;
+  color: #888;
+  font-size: 8px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.allegro-settings-runtime strong {
+  font-size: 10px;
+}
+
+@media (max-width: 800px) {
+  .allegro-settings-rules,
+  .allegro-settings-runtime {
+    grid-template-columns: 1fr;
+  }
+
+  .allegro-settings-rules > div:nth-child(odd),
+  .allegro-settings-runtime > div {
+    border-right: 0;
+  }
+
+  .allegro-settings-source {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .allegro-settings-source-node {
+    min-width: 0;
+  }
+
+  .allegro-settings-source-arrow {
+    text-align: center;
+    transform: rotate(90deg);
+  }
+}
+.allegro-sync-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.allegro-sync-switch input {
+  display: none;
+}
+
+.allegro-sync-switch > span {
+  position: relative;
+  width: 34px;
+  height: 19px;
+  border-radius: 999px;
+  background: #d2d2d2;
+  transition: background 140ms ease;
+}
+
+.allegro-sync-switch > span::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 140ms ease;
+}
+
+.allegro-sync-switch input:checked + span {
+  background: #111;
+}
+
+.allegro-sync-switch input:checked + span::after {
+  transform: translateX(15px);
+}
+
+.allegro-sync-switch strong {
+  font-size: 9px;
+}
+
+.allegro-sync-switch input:disabled + span {
+  opacity: 0.5;
+}
+
+.allegro-settings-error {
+  padding: 9px 22px;
+  border-bottom: 1px solid #efcccc;
+  background: #fff7f7;
+  color: #a02424;
+  font-size: 10px;
+  font-weight: 700;
+}

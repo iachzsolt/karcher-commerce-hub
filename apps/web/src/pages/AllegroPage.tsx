@@ -1,6 +1,7 @@
 import CommerceHubTopbar from '../components/CommerceHubTopbar'
 import HomePage from './HomePage'
 import AllegroCampaignsPage from './AllegroCampaignsPage'
+import AllegroSettingsPage from './AllegroSettingsPage'
 
 import {
   NavLink,
@@ -31,16 +32,7 @@ function AllegroCampaigns() {
 }
 
 function AllegroSettings() {
-  return (
-    <section>
-      <p className="section-label">ALLEGRO</p>
-      <h2>Beállítások</h2>
-      <p>
-        Ide kerülnek majd az adatforrások és a
-        szinkronizálási beállítások.
-      </p>
-    </section>
-  )
+  return <AllegroSettingsPage />
 }
 
 function AllegroPage() {

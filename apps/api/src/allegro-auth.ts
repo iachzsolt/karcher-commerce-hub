@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Hono } from 'hono'
 import { and, desc, eq } from 'drizzle-orm'
 import { decryptSecret, encryptSecret } from './token-crypto.js'
+import { applyAllegroDesiredStock, resolveAllegroInventoryRows, syncAllegroInventoryRows } from './allegro-inventory-sync.js'
 import {
   createDatabase,
   listingCampaigns,
@@ -12,6 +13,7 @@ import {
   listingPriceSchedules,
   listingRemoteStates,
   platformAccountCredentials,
+  platformInventorySyncSettings,
   platformAccounts,
   platformListings,
   platforms,
@@ -390,6 +392,559 @@ export async function restoreAllegroSession() {
     return false
   }
 }
+
+
+allegroAuth.get('/inventory-sync-settings', async (context) => {
+  const databaseUrl =
+    process.env.DATABASE_URL
+
+  if (!databaseUrl) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database configuration is missing',
+      },
+      500,
+    )
+  }
+
+  if (!currentSession) {
+    await restoreAllegroSession()
+  }
+
+  if (!currentSession) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Allegro account is not connected',
+      },
+      409,
+    )
+  }
+
+  const db =
+    createDatabase(databaseUrl)
+
+  const [settings] =
+    await db
+      .select({
+        enabled:
+          platformInventorySyncSettings.enabled,
+        triggerMode:
+          platformInventorySyncSettings.triggerMode,
+        updatedAt:
+          platformInventorySyncSettings.updatedAt,
+      })
+      .from(
+        platformInventorySyncSettings,
+      )
+      .where(
+        eq(
+          platformInventorySyncSettings.accountId,
+          currentSession.platformAccountId,
+        ),
+      )
+      .limit(1)
+
+  return context.json({
+    enabled:
+      settings?.enabled ?? false,
+    triggerMode:
+      settings?.triggerMode ??
+      'INVENTORY_REFRESH',
+    updatedAt:
+      settings?.updatedAt ?? null,
+  })
+})
+
+
+allegroAuth.put('/inventory-sync-settings', async (context) => {
+  const databaseUrl =
+    process.env.DATABASE_URL
+
+  if (!databaseUrl) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database configuration is missing',
+      },
+      500,
+    )
+  }
+
+  if (!currentSession) {
+    await restoreAllegroSession()
+  }
+
+  if (!currentSession) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Allegro account is not connected',
+      },
+      409,
+    )
+  }
+
+  let body: {
+    enabled?: unknown
+  }
+
+  try {
+    body =
+      await context.req.json()
+  } catch {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Invalid request body',
+      },
+      400,
+    )
+  }
+
+  if (typeof body.enabled !== 'boolean') {
+    return context.json(
+      {
+        status: 'error',
+        message: 'enabled must be a boolean',
+      },
+      400,
+    )
+  }
+
+  const db =
+    createDatabase(databaseUrl)
+
+  const now =
+    new Date()
+
+  const [settings] =
+    await db
+      .insert(
+        platformInventorySyncSettings,
+      )
+      .values({
+        accountId:
+          currentSession.platformAccountId,
+        enabled:
+          body.enabled,
+        triggerMode:
+          'INVENTORY_REFRESH',
+        updatedAt:
+          now,
+      })
+      .onConflictDoUpdate({
+        target:
+          platformInventorySyncSettings.accountId,
+        set: {
+          enabled:
+            body.enabled,
+          triggerMode:
+            'INVENTORY_REFRESH',
+          updatedAt:
+            now,
+        },
+      })
+      .returning({
+        enabled:
+          platformInventorySyncSettings.enabled,
+        triggerMode:
+          platformInventorySyncSettings.triggerMode,
+        updatedAt:
+          platformInventorySyncSettings.updatedAt,
+      })
+
+  return context.json(settings)
+})
+
+
+allegroAuth.get(
+  '/inventory-stock-preview',
+  async (context) => {
+    const databaseUrl =
+      process.env.DATABASE_URL
+
+    if (!databaseUrl) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Database configuration is missing',
+        },
+        500,
+      )
+    }
+
+    if (!currentSession) {
+      await restoreAllegroSession()
+    }
+
+    if (!currentSession) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Allegro account is not connected',
+        },
+        409,
+      )
+    }
+
+    const connectionId =
+      context.req.query('connectionId')
+
+    if (!connectionId) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'connectionId is required',
+        },
+        400,
+      )
+    }
+
+    const db =
+      createDatabase(databaseUrl)
+
+    const result =
+      await resolveAllegroInventoryRows(
+        db,
+        {
+          connectionId,
+          accountId:
+            currentSession.platformAccountId,
+        },
+      )
+
+    if (!result.ok) {
+      return context.json(
+        {
+          status: 'error',
+          reason: result.reason,
+        },
+        404,
+      )
+    }
+
+    return context.json({
+      status: 'ok',
+      connection: result.connection,
+      summary: result.summary,
+      rows: result.rows,
+    })
+  },
+)
+
+
+allegroAuth.post(
+  '/inventory-apply-desired',
+  async (context) => {
+    const databaseUrl =
+      process.env.DATABASE_URL
+
+    if (!databaseUrl) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Database configuration is missing',
+        },
+        500,
+      )
+    }
+
+    if (!currentSession) {
+      await restoreAllegroSession()
+    }
+
+    if (!currentSession) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Allegro account is not connected',
+        },
+        409,
+      )
+    }
+
+    const connectionId =
+      context.req.query('connectionId')
+
+    if (!connectionId) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'connectionId is required',
+        },
+        400,
+      )
+    }
+
+    const db =
+      createDatabase(databaseUrl)
+
+    const resolved =
+      await resolveAllegroInventoryRows(
+        db,
+        {
+          connectionId,
+          accountId:
+            currentSession.platformAccountId,
+        },
+      )
+
+    if (!resolved.ok) {
+      return context.json(
+        {
+          status: 'error',
+          reason: resolved.reason,
+        },
+        404,
+      )
+    }
+
+    if (!resolved.connection.isActive) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Only the active inventory source can be applied',
+        },
+        409,
+      )
+    }
+
+    const applied =
+      await applyAllegroDesiredStock(
+        db,
+        resolved.rows,
+      )
+
+    return context.json({
+      status: 'ok',
+      mode: 'DESIRED_STOCK_ONLY',
+      allegroPushPerformed: false,
+      connection: resolved.connection,
+      inventorySummary:
+        resolved.summary,
+      summary:
+        applied.summary,
+      results:
+        applied.results,
+    })
+  },
+)
+
+
+allegroAuth.post('/inventory-sync', async (context) => {
+  const databaseUrl = process.env.DATABASE_URL
+
+  if (!databaseUrl) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database configuration is missing',
+      },
+      500,
+    )
+  }
+
+  if (!currentSession) {
+    await restoreAllegroSession()
+  }
+
+  if (!currentSession) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Allegro account is not connected',
+      },
+      409,
+    )
+  }
+
+  const body =
+    (await context.req.json().catch(() => null)) as
+      | {
+          confirm?: boolean
+          connectionId?: string
+          listingIds?: string[]
+        }
+      | null
+
+  if (body?.confirm !== true) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Explicit confirm=true is required',
+      },
+      400,
+    )
+  }
+
+  if (!body.connectionId) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'connectionId is required',
+      },
+      400,
+    )
+  }
+
+  const db = createDatabase(databaseUrl)
+
+  const resolved =
+    await resolveAllegroInventoryRows(
+      db,
+      {
+        connectionId: body.connectionId,
+        accountId:
+          currentSession.platformAccountId,
+      },
+    )
+
+  if (!resolved.ok) {
+    return context.json(
+      {
+        status: 'error',
+        reason: resolved.reason,
+      },
+      404,
+    )
+  }
+
+  if (!resolved.connection.isActive) {
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Only the active inventory source can be synced',
+      },
+      409,
+    )
+  }
+
+  const applied =
+    await applyAllegroDesiredStock(
+      db,
+      resolved.rows,
+    )
+
+  const refreshed =
+    await resolveAllegroInventoryRows(
+      db,
+      {
+        connectionId: body.connectionId,
+        accountId:
+          currentSession.platformAccountId,
+      },
+    )
+
+  if (!refreshed.ok) {
+    return context.json(
+      {
+        status: 'error',
+        reason: refreshed.reason,
+      },
+      404,
+    )
+  }
+
+  const requestedIds =
+    new Set(
+      (body.listingIds ?? []).map(String),
+    )
+
+  const rows =
+    requestedIds.size > 0
+      ? refreshed.rows.filter((row) =>
+          requestedIds.has(row.listingId),
+        )
+      : refreshed.rows
+
+  if (rows.length > 100) {
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Maximum 100 listings per stock sync run',
+      },
+      409,
+    )
+  }
+
+  const postAllegro =
+    async (path: string) => {
+      const response =
+        await allegroAuth.request(
+          path,
+          { method: 'POST' },
+        )
+
+      const details =
+        (await response
+          .json()
+          .catch(() => null)) as
+          | {
+              status?: string
+              message?: string
+            }
+          | null
+
+      return {
+        ok: response.ok,
+        status: response.status,
+        details,
+      }
+    }
+
+  const syncResult =
+    await syncAllegroInventoryRows(
+      db,
+      rows,
+      {
+        pushStock:
+          (listingId) =>
+            postAllegro(
+              '/push-stock/' +
+                encodeURIComponent(listingId),
+            ),
+
+        pushStatus:
+          (listingId) =>
+            postAllegro(
+              '/push-status/' +
+                encodeURIComponent(listingId),
+            ),
+
+        refresh:
+          async () => {
+            const response =
+              await allegroAuth.request(
+                '/sync',
+                { method: 'POST' },
+              )
+
+            const details =
+              await response
+                .json()
+                .catch(() => null)
+
+            return {
+              ok: response.ok,
+              details,
+            }
+          },
+      },
+    )
+
+  return context.json({
+    status: 'ok',
+    mode:
+      'MANUAL_CONFIRMED_STOCK_SYNC_SERVICE',
+    apply: applied.summary,
+    ...syncResult,
+  })
+})
 
 
 allegroAuth.get('/connect', (context) => {

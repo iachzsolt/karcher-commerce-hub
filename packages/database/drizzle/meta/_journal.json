@@ -127,6 +127,13 @@
       "when": 1786356800132,
       "tag": "0017_quiet_thunderbolt_ross",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1786358265578,
+      "tag": "0018_yellow_alex_wilder",
+      "breakpoints": true
     }
   ]
 }

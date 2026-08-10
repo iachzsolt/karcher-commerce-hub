@@ -174,6 +174,45 @@ export const platformAccounts = pgTable(
   ],
 )
 
+export const platformInventorySyncSettings = pgTable(
+  'platform_inventory_sync_settings',
+  {
+    id: uuid('id')
+      .defaultRandom()
+      .primaryKey(),
+
+    accountId: uuid('account_id')
+      .notNull()
+      .references(() => platformAccounts.id),
+
+    enabled: boolean('enabled')
+      .notNull()
+      .default(false),
+
+    triggerMode: text('trigger_mode')
+      .notNull()
+      .default('INVENTORY_REFRESH'),
+
+    createdAt: timestamp('created_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp('updated_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex(
+      'platform_inventory_sync_settings_account_unique',
+    ).on(table.accountId),
+  ],
+)
+
+
 export const platformAccountCredentials = pgTable(
   'platform_account_credentials',
   {
