@@ -5756,3 +5756,8 @@ input:checked + span::after {
   font-size: 10px;
   font-weight: 700;
 }
+/* Allegro brand color in inventory sync flow */
+.allegro-settings-source-node:last-child > span {
+  background: #ff5a00;
+  color: #ffffff;
+}

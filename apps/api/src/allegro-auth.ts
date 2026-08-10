@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from 'node:crypto'
+﻿import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Hono } from 'hono'
 import { and, desc, eq } from 'drizzle-orm'
 import { decryptSecret, encryptSecret } from './token-crypto.js'
@@ -51,6 +51,7 @@ type AllegroSession = {
   refreshToken: string
   expiresAt: number
   platformAccountId: string
+  environment: AllegroEnvironment
   account: AllegroAccount
 }
 
@@ -94,6 +95,108 @@ function removeExpiredAuthorizations() {
       pendingAuthorizations.delete(state)
     }
   }
+}
+
+type AllegroEnvironment =
+  | 'SANDBOX'
+  | 'PRODUCTION'
+
+function getAllegroEnvironment(): AllegroEnvironment {
+  const environment =
+    (process.env.ALLEGRO_ENV ?? 'SANDBOX')
+      .toUpperCase()
+
+  if (
+    environment !== 'SANDBOX' &&
+    environment !== 'PRODUCTION'
+  ) {
+    throw new Error(
+      `Invalid ALLEGRO_ENV: ${environment}. Expected SANDBOX or PRODUCTION.`,
+    )
+  }
+
+  return environment
+}
+
+function assertAllegroEnvironmentConfiguration() {
+  const environment =
+    getAllegroEnvironment()
+
+  const apiUrl =
+    process.env.ALLEGRO_API_URL
+
+  const authUrl =
+    process.env.ALLEGRO_AUTH_URL
+
+  const tokenUrl =
+    process.env.ALLEGRO_TOKEN_URL
+
+  const urls = [
+    ['ALLEGRO_API_URL', apiUrl],
+    ['ALLEGRO_AUTH_URL', authUrl],
+    ['ALLEGRO_TOKEN_URL', tokenUrl],
+  ] as const
+
+  for (const [name, value] of urls) {
+    if (!value) {
+      throw new Error(
+        `${name} is required for Allegro ${environment}`,
+      )
+    }
+  }
+
+  const sandboxValues =
+    urls.filter(
+      ([, value]) =>
+        value !== undefined &&
+        value
+          .toLowerCase()
+          .includes('sandbox'),
+    )
+
+  if (
+    environment === 'PRODUCTION' &&
+    sandboxValues.length > 0
+  ) {
+    throw new Error(
+      `Allegro environment mismatch: PRODUCTION uses sandbox URL in ${sandboxValues
+        .map(([name]) => name)
+        .join(', ')}`,
+    )
+  }
+
+  if (
+    environment === 'SANDBOX' &&
+    sandboxValues.length !== urls.length
+  ) {
+    throw new Error(
+      'Allegro environment mismatch: SANDBOX must use sandbox Allegro URLs',
+    )
+  }
+
+  return environment
+}
+
+function assertAllegroWriteSafety() {
+  const environment =
+    assertAllegroEnvironmentConfiguration()
+
+  if (!currentSession) {
+    throw new Error(
+      'Allegro session is not available',
+    )
+  }
+
+  if (
+    currentSession.environment !==
+    environment
+  ) {
+    throw new Error(
+      `Allegro session environment mismatch: session=${currentSession.environment}, config=${environment}`,
+    )
+  }
+
+  return environment
 }
 
 export const allegroAuth = new Hono()
@@ -314,6 +417,10 @@ export async function restoreAllegroSession() {
         and(
           eq(platforms.code, 'ALLEGRO'),
           eq(platformAccounts.active, true),
+          eq(
+            platformAccounts.environment,
+            getAllegroEnvironment(),
+          ),
         ),
       )
       .limit(1)
@@ -351,6 +458,9 @@ export async function restoreAllegroSession() {
       expiresAt,
 
       platformAccountId: storedSession.accountId,
+
+      environment:
+        getAllegroEnvironment(),
 
       account: {
         id: storedSession.externalAccountId,
@@ -589,6 +699,13 @@ allegroAuth.get(
       )
     }
 
+    const body =
+      (await context.req.json().catch(() => null)) as
+        | {
+            listingIds?: string[]
+          }
+        | null
+
     const connectionId =
       context.req.query('connectionId')
 
@@ -665,6 +782,13 @@ allegroAuth.post(
       )
     }
 
+    const body =
+      (await context.req.json().catch(() => null)) as
+        | {
+            listingIds?: string[]
+          }
+        | null
+
     const connectionId =
       context.req.query('connectionId')
 
@@ -712,10 +836,71 @@ allegroAuth.post(
       )
     }
 
+    const requestedIds =
+      new Set(
+        (body?.listingIds ?? []).map(String),
+      )
+
+    if (requestedIds.size === 0) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'listingIds are required for inventory desired stock apply',
+        },
+        400,
+      )
+    }
+
+    const rowsToApply =
+      resolved.rows.filter((row) =>
+        requestedIds.has(row.listingId),
+      )
+
+    if (
+      rowsToApply.length !==
+      requestedIds.size
+    ) {
+      const resolvedIds =
+        new Set(
+          rowsToApply.map(
+            (row) =>
+              row.listingId,
+          ),
+        )
+
+      const missingListingIds =
+        [...requestedIds].filter(
+          (listingId) =>
+            !resolvedIds.has(listingId),
+        )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'One or more requested listings are outside the resolved inventory scope',
+          missingListingIds,
+        },
+        409,
+      )
+    }
+
+    if (rowsToApply.length > 100) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Maximum 100 listings per desired stock apply',
+        },
+        409,
+      )
+    }
+
     const applied =
       await applyAllegroDesiredStock(
         db,
-        resolved.rows,
+        rowsToApply,
       )
 
     return context.json({
@@ -823,10 +1008,61 @@ allegroAuth.post('/inventory-sync', async (context) => {
     )
   }
 
+  const requestedIds =
+    new Set(
+      (body.listingIds ?? []).map(String),
+    )
+
+  const rowsToApply =
+    requestedIds.size > 0
+      ? resolved.rows.filter((row) =>
+          requestedIds.has(row.listingId),
+        )
+      : resolved.rows
+
+  if (
+    requestedIds.size > 0 &&
+    rowsToApply.length !== requestedIds.size
+  ) {
+    const resolvedIds =
+      new Set(
+        rowsToApply.map(
+          (row) => row.listingId,
+        ),
+      )
+
+    const missingListingIds =
+      [...requestedIds].filter(
+        (listingId) =>
+          !resolvedIds.has(listingId),
+      )
+
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'One or more requested listings are outside the resolved inventory scope',
+        missingListingIds,
+      },
+      409,
+    )
+  }
+
+  if (rowsToApply.length > 100) {
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Maximum 100 listings per stock sync run',
+      },
+      409,
+    )
+  }
+
   const applied =
     await applyAllegroDesiredStock(
       db,
-      resolved.rows,
+      rowsToApply,
     )
 
   const refreshed =
@@ -848,11 +1084,6 @@ allegroAuth.post('/inventory-sync', async (context) => {
       404,
     )
   }
-
-  const requestedIds =
-    new Set(
-      (body.listingIds ?? []).map(String),
-    )
 
   const rows =
     requestedIds.size > 0
@@ -1209,7 +1440,7 @@ allegroAuth.get('/callback', async (context) => {
   }
 
   const environment =
-    (process.env.ALLEGRO_ENV ?? 'SANDBOX').toUpperCase()
+    assertAllegroEnvironmentConfiguration()
 
   const accountCode =
     `${account.login.toUpperCase()}_${environment}`
@@ -1294,13 +1525,14 @@ allegroAuth.get('/callback', async (context) => {
     expiresAt:
       Date.now() + tokenData.expires_in * 1000,
     platformAccountId: platformAccount.id,
+    environment,
     account,
   }
 
   return context.json({
     status: 'ok',
-    message: 'Allegro Sandbox connected successfully',
-    environment: process.env.ALLEGRO_ENV,
+    message: `Allegro ${environment} connected successfully`,
+    environment,
     account: {
       id: account.id,
       login: account.login,
@@ -1343,6 +1575,8 @@ export type AllegroCampaignSubmissionResult =
 export async function submitOfferToAllegroCampaign(
   input: SubmitAllegroCampaignOfferInput,
 ): Promise<AllegroCampaignSubmissionResult> {
+  assertAllegroEnvironmentConfiguration()
+
   const apiUrl = process.env.ALLEGRO_API_URL
 
   if (!apiUrl) {
@@ -1357,7 +1591,9 @@ export async function submitOfferToAllegroCampaign(
     )
   }
 
-  const body: {
+  
+  assertAllegroWriteSafety()
+const body: {
     campaign: {
       id: string
     }
@@ -1503,6 +1739,8 @@ export type AllegroCampaignFinishResult =
 export async function finishOfferAllegroCampaign(
   input: FinishAllegroCampaignOfferInput,
 ): Promise<AllegroCampaignFinishResult> {
+  assertAllegroEnvironmentConfiguration()
+
   const apiUrl = process.env.ALLEGRO_API_URL
 
   if (!apiUrl) {
@@ -1517,7 +1755,9 @@ export async function finishOfferAllegroCampaign(
     )
   }
 
-  const response = await fetch(
+  
+  assertAllegroWriteSafety()
+const response = await fetch(
     `${apiUrl}/sale/badges/offers/${encodeURIComponent(
       input.offerId,
     )}/campaigns/${encodeURIComponent(
@@ -2810,7 +3050,7 @@ allegroAuth.post('/sync', async (context) => {
   }
 
   const environment =
-    (process.env.ALLEGRO_ENV ?? 'SANDBOX').toUpperCase()
+    assertAllegroEnvironmentConfiguration()
 
   const accountCode =
     `${currentSession.account.login.toUpperCase()}_${environment}`
@@ -3228,6 +3468,9 @@ allegroAuth.post('/push-price/:listingId', async (context) => {
     )
   }
 
+  
+  assertAllegroWriteSafety()
+
   const databaseUrl = process.env.DATABASE_URL
   const apiUrl = process.env.ALLEGRO_API_URL
 
@@ -3569,6 +3812,9 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
     )
   }
 
+  
+  assertAllegroWriteSafety()
+
   const databaseUrl = process.env.DATABASE_URL
   const apiUrl = process.env.ALLEGRO_API_URL
 
@@ -3819,6 +4065,9 @@ allegroAuth.post('/push-status/:listingId', async (context) => {
       401,
     )
   }
+
+  
+  assertAllegroWriteSafety()
 
   const databaseUrl = process.env.DATABASE_URL
   const apiUrl = process.env.ALLEGRO_API_URL
@@ -5988,3 +6237,9 @@ allegroAuth.post('/sync-selected', async (context) => {
     results,
   })
 })
+
+
+
+
+
+

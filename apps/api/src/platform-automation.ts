@@ -1,4 +1,4 @@
-import {
+﻿import {
   and,
   eq,
 } from 'drizzle-orm'
@@ -6,8 +6,10 @@ import {
 import {
   createDatabase,
   dataConnections,
+  listingDesiredStates,
   platformAccounts,
   platformInventorySyncSettings,
+  platformListings,
   platforms,
 } from '@karcher-commerce-hub/database'
 
@@ -142,6 +144,60 @@ export async function runInventoryRefreshAutomations(
       setting.platformCode ===
       'ALLEGRO'
     ) {
+      const enabledListings =
+        await database
+          .select({
+            listingId:
+              platformListings.id,
+          })
+          .from(platformListings)
+          .innerJoin(
+            listingDesiredStates,
+            eq(
+              listingDesiredStates.listingId,
+              platformListings.id,
+            ),
+          )
+          .where(
+            and(
+              eq(
+                platformListings.accountId,
+                setting.accountId,
+              ),
+              eq(
+                platformListings.marketplace,
+                'allegro-hu',
+              ),
+              eq(
+                listingDesiredStates.autoStockSync,
+                true,
+              ),
+            ),
+          )
+
+      const listingIds =
+        enabledListings.map(
+          (listing) =>
+            listing.listingId,
+        )
+
+      if (listingIds.length === 0) {
+        results.push({
+          platform: 'ALLEGRO',
+          accountId:
+            setting.accountId,
+          ok: true,
+          status: 204,
+          details: {
+            status: 'SKIPPED',
+            reason:
+              'NO_AUTO_STOCK_SYNC_LISTINGS',
+          },
+        })
+
+        continue
+      }
+
       const response =
         await allegroAuth.request(
           '/inventory-sync',
@@ -157,6 +213,7 @@ export async function runInventoryRefreshAutomations(
               JSON.stringify({
                 confirm: true,
                 connectionId,
+                listingIds,
               }),
           },
         )
