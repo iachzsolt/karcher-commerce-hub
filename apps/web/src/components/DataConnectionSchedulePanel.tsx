@@ -6,6 +6,8 @@ import {
 const API_BASE_URL =
   'http://localhost:3000'
 
+import DataConnectionRunSummary from './DataConnectionRunSummary'
+
 type ScheduleMode =
   | 'DAILY_TIMES'
   | 'INTERVAL'
@@ -504,8 +506,8 @@ function DataConnectionSchedulePanel({
           </strong>
 
           <small>
-            Az import még nem frissíti
-            az Allegro készletet.
+            A készletforrás adatai automatikusan betöltődnek
+            a Commerce Hub központi készletébe.
           </small>
         </div>
 
@@ -735,6 +737,9 @@ function DataConnectionSchedulePanel({
         <small>
           Europe/Budapest
         </small>
+        <DataConnectionRunSummary
+          connectionId={connectionId}
+        />
           </div>
         </div>
       )}

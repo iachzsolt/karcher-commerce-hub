@@ -979,6 +979,70 @@ export const inventorySourceItems = pgTable(
 )
 
 /* ============================================================
+   DATA CONNECTION RUNS
+   End-to-end adatkapcsolati futások naplója
+   ============================================================ */
+
+export const dataConnectionRuns = pgTable(
+  'data_connection_runs',
+  {
+    id: uuid('id')
+      .defaultRandom()
+      .primaryKey(),
+
+    connectionId: uuid('connection_id')
+      .notNull()
+      .references(() => dataConnections.id),
+
+    triggerType: text('trigger_type')
+      .notNull()
+      .default('SCHEDULED'),
+
+    status: text('status')
+      .notNull()
+      .default('RUNNING'),
+
+    importStatus: text('import_status'),
+
+    rowsImported: integer('rows_imported')
+      .notNull()
+      .default(0),
+
+    changedItemCount: integer(
+      'changed_item_count',
+    )
+      .notNull()
+      .default(0),
+
+
+    error: text('error'),
+
+    startedAt: timestamp('started_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    finishedAt: timestamp('finished_at', {
+      withTimezone: true,
+    }),
+  },
+  (table) => [
+    index(
+      'data_connection_runs_connection_started_index',
+    ).on(
+      table.connectionId,
+      table.startedAt,
+    ),
+
+    index(
+      'data_connection_runs_status_index',
+    ).on(table.status),
+  ],
+)
+
+
+/* ============================================================
    DATA CONNECTION SCHEDULES
    ============================================================ */
 

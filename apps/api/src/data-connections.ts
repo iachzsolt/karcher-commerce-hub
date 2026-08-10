@@ -4,6 +4,7 @@ import {
   createDatabase,
   dataConnections,
   dataConnectionSchedules,
+  dataConnectionRuns,
   inventoryConnectionConfigs,
   inventoryImportRuns,
   inventorySourceItems,
@@ -758,6 +759,66 @@ function calculateNextRunAt(
 }
 
 
+/* ============================================================
+   LATEST DATA CONNECTION RUN
+   ============================================================ */
+
+dataConnectionsApi.get(
+  '/:connectionId/runs/latest',
+  async (context) => {
+    const database =
+      requireDatabase()
+
+    const connectionId =
+      context.req.param(
+        'connectionId',
+      )
+
+    const [run] =
+      await database
+        .select({
+          id:
+            dataConnectionRuns.id,
+          connectionId:
+            dataConnectionRuns.connectionId,
+          triggerType:
+            dataConnectionRuns.triggerType,
+          status:
+            dataConnectionRuns.status,
+          importStatus:
+            dataConnectionRuns.importStatus,
+          rowsImported:
+            dataConnectionRuns.rowsImported,
+          changedItemCount:
+            dataConnectionRuns.changedItemCount,
+          error:
+            dataConnectionRuns.error,
+          startedAt:
+            dataConnectionRuns.startedAt,
+          finishedAt:
+            dataConnectionRuns.finishedAt,
+        })
+        .from(dataConnectionRuns)
+        .where(
+          eq(
+            dataConnectionRuns.connectionId,
+            connectionId,
+          ),
+        )
+        .orderBy(
+          desc(
+            dataConnectionRuns.startedAt,
+          ),
+        )
+        .limit(1)
+
+    return context.json({
+      run: run ?? null,
+    })
+  },
+)
+
+
 dataConnectionsApi.get(
   '/:connectionId/schedule',
   async (context) => {
@@ -1127,6 +1188,32 @@ export async function processDueDataConnectionSchedules() {
       const startedAt =
         new Date()
 
+      const [connectionRun] =
+        await db
+          .insert(dataConnectionRuns)
+          .values({
+            connectionId:
+              item.connection.id,
+            triggerType: 'SCHEDULED',
+            status: 'RUNNING',
+            startedAt,
+          })
+          .returning({
+            id: dataConnectionRuns.id,
+          })
+
+      if (!connectionRun) {
+        throw new Error(
+          'Data connection run could not be created.',
+        )
+      }
+
+      let runStatus = 'SUCCESS'
+      let runImportStatus: string | null = null
+      let runRowsImported = 0
+      let runChangedItemCount = 0
+      let runError: string | null = null
+
       const settings:
         RefreshScheduleSettings = {
         mode:
@@ -1158,9 +1245,7 @@ export async function processDueDataConnectionSchedules() {
         const response =
           await dataConnectionsApi
             .request(
-              '/' +
-                item.connection.id +
-                '/import',
+              `/${item.connection.id}/import`,
               {
                 method: 'POST',
               },
@@ -1178,7 +1263,21 @@ export async function processDueDataConnectionSchedules() {
               }
             | null
 
+        runImportStatus =
+          result?.status ?? null
+
+        runRowsImported =
+          result?.rowsImported ?? 0
+
+        runChangedItemCount =
+          result?.changedItemCount ?? 0
+
         if (!response.ok) {
+          runStatus = 'FAILED'
+          runError =
+            result?.error ??
+            'Automatic inventory import failed.'
+
           console.warn(
             'Automatic inventory refresh failed:',
             {
@@ -1210,205 +1309,14 @@ export async function processDueDataConnectionSchedules() {
                 0,
             },
           )
-
-          /*
-           * A sikeres import után mindig ellenőrizzük az
-           * Allegro készletállapotot. NO_CHANGE import esetén is,
-           * mert az Allegro állapota ettől még eltérhet a forrástól.
-           */
-          const previewResponse =
-            await dataConnectionsApi.request(
-              '/' +
-                item.connection.id +
-                '/allegro-stock-preview',
-              {
-                method: 'GET',
-              },
-            )
-
-          const previewResult =
-            (await previewResponse
-              .json()
-              .catch(() => null)) as
-              | {
-                  rows?: Array<{
-                    listingId?: string
-                  }>
-                  error?: string
-                  message?: string
-                }
-              | null
-
-          if (
-            !previewResponse.ok ||
-            !Array.isArray(
-              previewResult?.rows,
-            )
-          ) {
-            console.warn(
-              'Automatic Allegro stock sync skipped: preview failed',
-              {
-                connectionId:
-                  item.connection.id,
-                status:
-                  previewResponse.status,
-                result:
-                  previewResult,
-              },
-            )
-          } else {
-            const listingIds =
-              Array.from(
-                new Set(
-                  previewResult.rows
-                    .map((row) =>
-                      row.listingId,
-                    )
-                    .filter(
-                      (listingId): listingId is string =>
-                        typeof listingId === 'string' &&
-                        listingId.length > 0,
-                    ),
-                ),
-              )
-
-            const totals = {
-              selected: 0,
-              attempted: 0,
-              stockUpdated: 0,
-              autoPaused: 0,
-              reactivated: 0,
-              unchanged: 0,
-              skipped: 0,
-              pending: 0,
-              failed: 0,
-            }
-
-            let batchCount = 0
-            let failedBatchCount = 0
-
-            for (
-              let offset = 0;
-              offset < listingIds.length;
-              offset += 100
-            ) {
-              const batch =
-                listingIds.slice(
-                  offset,
-                  offset + 100,
-                )
-
-              batchCount += 1
-
-              const syncResponse =
-                await dataConnectionsApi.request(
-                  '/' +
-                    item.connection.id +
-                    '/sync-stock-to-allegro',
-                  {
-                    method: 'POST',
-                    headers: {
-                      'Content-Type':
-                        'application/json',
-                    },
-                    body: JSON.stringify({
-                      confirm: true,
-                      listingIds: batch,
-                    }),
-                  },
-                )
-
-              const syncResult =
-                (await syncResponse
-                  .json()
-                  .catch(() => null)) as
-                  | {
-                      status?: string
-                      message?: string
-                      summary?: {
-                        selected?: number
-                        attempted?: number
-                        stockUpdated?: number
-                        autoPaused?: number
-                        reactivated?: number
-                        unchanged?: number
-                        skipped?: number
-                        pending?: number
-                        failed?: number
-                      }
-                    }
-                  | null
-
-              if (
-                !syncResponse.ok ||
-                !syncResult?.summary
-              ) {
-                failedBatchCount += 1
-
-                console.warn(
-                  'Automatic Allegro stock sync batch failed:',
-                  {
-                    connectionId:
-                      item.connection.id,
-                    batch:
-                      batchCount,
-                    batchSize:
-                      batch.length,
-                    status:
-                      syncResponse.status,
-                    result:
-                      syncResult,
-                  },
-                )
-
-                continue
-              }
-
-              totals.selected +=
-                syncResult.summary.selected ?? 0
-
-              totals.attempted +=
-                syncResult.summary.attempted ?? 0
-
-              totals.stockUpdated +=
-                syncResult.summary.stockUpdated ?? 0
-
-              totals.autoPaused +=
-                syncResult.summary.autoPaused ?? 0
-
-              totals.reactivated +=
-                syncResult.summary.reactivated ?? 0
-
-              totals.unchanged +=
-                syncResult.summary.unchanged ?? 0
-
-              totals.skipped +=
-                syncResult.summary.skipped ?? 0
-
-              totals.pending +=
-                syncResult.summary.pending ?? 0
-
-              totals.failed +=
-                syncResult.summary.failed ?? 0
-            }
-
-            console.log(
-              'Automatic Allegro inventory sync completed:',
-              {
-                connectionId:
-                  item.connection.id,
-                connectionName:
-                  item.connection.name,
-                listings:
-                  listingIds.length,
-                batchCount,
-                failedBatchCount,
-                ...totals,
-              },
-            )
-          }
         }
       } catch (error) {
+        runStatus = 'FAILED'
+        runError =
+          error instanceof Error
+            ? error.message
+            : 'Automatic inventory refresh error.'
+
         console.error(
           'Automatic inventory refresh error:',
           {
@@ -1418,6 +1326,28 @@ export async function processDueDataConnectionSchedules() {
           },
         )
       } finally {
+        const finishedAt = new Date()
+
+        await db
+          .update(dataConnectionRuns)
+          .set({
+            status: runStatus,
+            importStatus:
+              runImportStatus,
+            rowsImported:
+              runRowsImported,
+            changedItemCount:
+              runChangedItemCount,
+            error: runError,
+            finishedAt,
+          })
+          .where(
+            eq(
+              dataConnectionRuns.id,
+              connectionRun.id,
+            ),
+          )
+
         const nextRunAt =
           calculateNextRunAt(
             settings,
