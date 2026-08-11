@@ -682,6 +682,228 @@ app.post(
   },
 )
 app.post(
+  '/allegro/listings/:id/initialize-baseline',
+  async (context) => {
+    if (!db) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Database is not configured',
+        },
+        500,
+      )
+    }
+
+    try {
+      const environment =
+        (process.env.ALLEGRO_ENV ?? 'SANDBOX')
+          .toUpperCase()
+
+      if (environment !== 'PRODUCTION') {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Targeted accepted baseline initialization is production-only',
+          },
+          409,
+        )
+      }
+
+      const listingId =
+        context.req.param('id')
+
+      const [row] = await db
+        .select({
+          listingId:
+            platformListings.id,
+
+          priceMinor:
+            listingRemoteStates.priceMinor,
+
+          stockAvailable:
+            listingRemoteStates.stockAvailable,
+
+          publicationStatus:
+            listingRemoteStates.publicationStatus,
+
+          acceptedStateId:
+            listingAcceptedStates.id,
+        })
+        .from(platformListings)
+        .innerJoin(
+          platformAccounts,
+          eq(
+            platformListings.accountId,
+            platformAccounts.id,
+          ),
+        )
+        .innerJoin(
+          platforms,
+          eq(
+            platformListings.platformId,
+            platforms.id,
+          ),
+        )
+        .leftJoin(
+          listingRemoteStates,
+          eq(
+            listingRemoteStates.listingId,
+            platformListings.id,
+          ),
+        )
+        .leftJoin(
+          listingAcceptedStates,
+          eq(
+            listingAcceptedStates.listingId,
+            platformListings.id,
+          ),
+        )
+        .where(
+          and(
+            eq(
+              platformListings.id,
+              listingId,
+            ),
+            eq(
+              platforms.code,
+              'ALLEGRO',
+            ),
+            eq(
+              platformListings.marketplace,
+              'allegro-hu',
+            ),
+            eq(
+              platformAccounts.environment,
+              environment,
+            ),
+            eq(
+              platformAccounts.active,
+              true,
+            ),
+          ),
+        )
+        .limit(1)
+
+      if (!row) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Production Allegro listing was not found',
+          },
+          404,
+        )
+      }
+
+      if (row.acceptedStateId !== null) {
+        return context.json({
+          status: 'ok',
+
+          listingId:
+            row.listingId,
+
+          initialized:
+            false,
+
+          alreadyInitialized:
+            true,
+
+          allegroWritePerformed:
+            false,
+
+          desiredStateModified:
+            false,
+        })
+      }
+
+      if (!row.publicationStatus) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Remote listing state is not initialized',
+          },
+          409,
+        )
+      }
+
+      const now = new Date()
+
+      await db
+        .insert(listingAcceptedStates)
+        .values({
+          listingId:
+            row.listingId,
+
+          acceptedPriceMinor:
+            row.priceMinor,
+
+          acceptedStockAvailable:
+            row.stockAvailable,
+
+          acceptedPublicationStatus:
+            row.publicationStatus,
+
+          acceptedAt:
+            now,
+
+          updatedAt:
+            now,
+        })
+        .onConflictDoNothing({
+          target:
+            listingAcceptedStates.listingId,
+        })
+
+      return context.json({
+        status: 'ok',
+
+        listingId:
+          row.listingId,
+
+        initialized:
+          true,
+
+        alreadyInitialized:
+          false,
+
+        acceptedPriceMinor:
+          row.priceMinor,
+
+        acceptedStockAvailable:
+          row.stockAvailable,
+
+        acceptedPublicationStatus:
+          row.publicationStatus,
+
+        acceptedAt:
+          now.toISOString(),
+
+        allegroWritePerformed:
+          false,
+
+        desiredStateModified:
+          false,
+      })
+    } catch (error) {
+      console.error(
+        'Targeted Allegro baseline initialization failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Could not initialize targeted Allegro accepted baseline',
+        },
+        500,
+      )
+    }
+  },
+)
+app.post(
   '/allegro/listings/:id/accept-current-state',
   async (context) => {
     if (!db) {
