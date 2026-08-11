@@ -24,6 +24,21 @@ type AllegroStatus = {
   accessTokenExpiresAt?: string
 }
 
+type AllegroImportIssue = {
+  offerId: string
+  name: string
+  issue:
+    | 'MISSING_HU_MARKETPLACE'
+    | 'MISSING_SKU'
+}
+
+type AllegroImportIssuesResponse = {
+  status: string
+  scannedOffers?: number
+  count?: number
+  data?: AllegroImportIssue[]
+  message?: string
+}
 function AllegroSettingsPage() {
   const [
     syncEnabled,
@@ -235,6 +250,72 @@ function AllegroSettingsPage() {
   const connected =
     connection?.connected === true
 
+  const [
+    importIssues,
+    setImportIssues,
+  ] = useState<AllegroImportIssue[]>([])
+
+  const [
+    importIssuesScannedOffers,
+    setImportIssuesScannedOffers,
+  ] = useState<number | null>(null)
+
+  const [
+    importIssuesLoading,
+    setImportIssuesLoading,
+  ] = useState(true)
+
+  const [
+    importIssuesError,
+    setImportIssuesError,
+  ] = useState<string | null>(null)
+
+  const loadImportIssues =
+    async () => {
+      setImportIssuesLoading(true)
+      setImportIssuesError(null)
+
+      try {
+        const response =
+          await fetch(
+            `${API_BASE_URL}/auth/allegro/import-issues`,
+          )
+
+        const result =
+          (await response.json()) as
+            AllegroImportIssuesResponse
+
+        if (!response.ok) {
+          throw new Error(
+            result.message ??
+              'Nem sikerült betölteni az importálási problémákat.',
+          )
+        }
+
+        setImportIssues(
+          result.data ?? [],
+        )
+
+        setImportIssuesScannedOffers(
+          typeof result.scannedOffers ===
+            'number'
+            ? result.scannedOffers
+            : null,
+        )
+      } catch (loadError) {
+        setImportIssuesError(
+          loadError instanceof Error
+            ? loadError.message
+            : 'Ismeretlen hiba történt.',
+        )
+      } finally {
+        setImportIssuesLoading(false)
+      }
+    }
+
+  useEffect(() => {
+    void loadImportIssues()
+  }, [])
   return (
     <section className="allegro-settings-page">
       <div className="allegro-settings-heading">
@@ -502,6 +583,117 @@ function AllegroSettingsPage() {
             </strong>
           </div>
         </div>
+      </div>
+      <div className="allegro-settings-card allegro-import-issues-card">
+        <div className="allegro-settings-card-header">
+          <div>
+            <span className="allegro-settings-eyebrow">
+              IMPORT ELLENŐRZÉS
+            </span>
+
+            <h3>Importálási problémák</h3>
+
+            <p>
+              Azok az Allegro-ajánlatok, amelyeket a
+              Commerce Hub hiányzó vagy hibás azonosító
+              miatt nem tud automatikusan importálni.
+            </p>
+          </div>
+
+          <div className="allegro-import-issues-header-actions">
+            <span
+              className={[
+                'allegro-import-issue-count',
+                importIssuesLoading
+                  ? 'is-loading'
+                  : importIssues.length > 0
+                    ? 'has-issues'
+                    : 'is-clear',
+              ].join(' ')}
+            >
+              {importIssuesLoading
+                ? 'Betöltés...'
+                : `${importIssues.length} probléma`}
+            </span>
+
+            <button
+              className="allegro-connection-button"
+              type="button"
+              disabled={importIssuesLoading}
+              onClick={() => {
+                void loadImportIssues()
+              }}
+            >
+              Frissítés
+            </button>
+          </div>
+        </div>
+
+        {importIssuesError && (
+          <div className="allegro-settings-error">
+            {importIssuesError}
+          </div>
+        )}
+
+        {!importIssuesLoading &&
+          !importIssuesError &&
+          importIssuesScannedOffers !== null && (
+            <div className="allegro-import-issues-summary">
+              <strong>
+                {importIssuesScannedOffers}
+              </strong>
+              {' Allegro-ajánlat ellenőrizve · '}
+              <strong>
+                {importIssues.length}
+              </strong>
+              {' probléma'}
+            </div>
+          )}
+
+        {!importIssuesLoading &&
+          !importIssuesError &&
+          importIssues.length === 0 && (
+            <div className="allegro-import-issues-empty">
+              <strong>
+                Nincs importálási probléma
+              </strong>
+
+              <span>
+                Minden ellenőrzött ajánlat rendelkezik
+                az automatikus importhoz szükséges
+                azonosítókkal.
+              </span>
+            </div>
+          )}
+
+        {!importIssuesLoading &&
+          !importIssuesError &&
+          importIssues.length > 0 && (
+            <div className="allegro-import-issues-list">
+              {importIssues.map((issue) => (
+                <div
+                  className="allegro-import-issue-row"
+                  key={issue.offerId}
+                >
+                  <div className="allegro-import-issue-main">
+                    <strong>
+                      {issue.name}
+                    </strong>
+
+                    <span>
+                      Offer ID: {issue.offerId}
+                    </span>
+                  </div>
+
+                  <span className="allegro-import-issue-badge">
+                    {issue.issue === 'MISSING_SKU'
+                      ? 'Hiányzó SKU'
+                      : 'Hiányzó Allegro.hu kapcsolat'}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
       </div>
     </section>
   )

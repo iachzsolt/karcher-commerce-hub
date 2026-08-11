@@ -788,6 +788,19 @@ function HomePage({
       | 'ENDED'
     >('ALL')
 
+  const [listingPageSize, setListingPageSize] =
+    useState<25 | 50 | 100>(25)
+
+  const [listingPage, setListingPage] =
+    useState(1)
+
+  useEffect(() => {
+    setListingPage(1)
+  }, [
+    listingSearch,
+    listingFilter,
+    listingPageSize,
+  ])
   const [selectedListingIds, setSelectedListingIds] =
     useState<string[]>([])
 
@@ -2149,6 +2162,40 @@ Hibás: ${failed}`,
           return true
       }
     })
+  const listingPageCount =
+    Math.max(
+      1,
+      Math.ceil(
+        filteredAllegroListings.length /
+          listingPageSize,
+      ),
+    )
+
+  const safeListingPage =
+    Math.min(
+      listingPage,
+      listingPageCount,
+    )
+
+  const listingPageStart =
+    (safeListingPage - 1) *
+    listingPageSize
+
+  const paginatedAllegroListings =
+    filteredAllegroListings.slice(
+      listingPageStart,
+      listingPageStart +
+        listingPageSize,
+    )
+
+  useEffect(() => {
+    setListingPage((current) =>
+      Math.min(
+        Math.max(current, 1),
+        listingPageCount,
+      ),
+    )
+  }, [listingPageCount])
   const toggleListingSelection = (
     listingId: string,
   ) => {
@@ -2160,27 +2207,45 @@ Hibás: ${failed}`,
   }
 
   const toggleAllListings = () => {
-    const allVisibleSelected =
-      filteredAllegroListings.length > 0 &&
-      filteredAllegroListings.every((listing) =>
-        selectedListingIds.includes(listing.id),
+    const pageIds =
+      paginatedAllegroListings.map(
+        (listing) => listing.id,
       )
 
-    setSelectedListingIds(
-      allVisibleSelected
-        ? []
-        : filteredAllegroListings.map(
-            (listing) => listing.id,
-          ),
-    )
+    const allPageSelected =
+      pageIds.length > 0 &&
+      pageIds.every((listingId) =>
+        selectedListingIds.includes(
+          listingId,
+        ),
+      )
+
+    setSelectedListingIds((current) => {
+      const next =
+        new Set(current)
+
+      if (allPageSelected) {
+        pageIds.forEach((listingId) =>
+          next.delete(listingId),
+        )
+      } else {
+        pageIds.forEach((listingId) =>
+          next.add(listingId),
+        )
+      }
+
+      return Array.from(next)
+    })
   }
 
   const allListingsSelected =
-    filteredAllegroListings.length > 0 &&
-    filteredAllegroListings.every((listing) =>
-      selectedListingIds.includes(listing.id),
+    paginatedAllegroListings.length > 0 &&
+    paginatedAllegroListings.every(
+      (listing) =>
+        selectedListingIds.includes(
+          listing.id,
+        ),
     )
-
   const syncSelectedListingsToAllegro = async () => {
     if (selectedListingIds.length === 0) {
       return
@@ -2536,39 +2601,23 @@ ${changes.join('\n')}`,
           </div>
 
           {allegroImportIssues.length > 0 && (
-            <div className="import-issues-panel">
-              <div className="import-issues-heading">
+            <div className="import-issues-compact">
+              <div className="import-issues-compact-copy">
                 <strong>
-                  Ellenőrzést igénylő ajánlatok
+                  {allegroImportIssues.length}
+                  {' importálási probléma'}
                 </strong>
 
                 <span>
-                  {allegroImportIssues.length} ajánlatot
-                  nem sikerült importálni.
+                  Ezek az ajánlatok hiányzó azonosító miatt
+                  nem kerültek be automatikusan.
                 </span>
               </div>
 
-              <div className="import-issues-list">
-                {allegroImportIssues.map((issue) => (
-                  <div
-                    className="import-issue-row"
-                    key={issue.offerId}
-                  >
-                    <div className="import-issue-offer">
-                      <strong>{issue.name}</strong>
-                      <span>
-                        Offer ID: {issue.offerId}
-                      </span>
-                    </div>
-
-                    <span className="import-issue-message">
-                      {issue.issue === 'MISSING_SKU'
-                        ? 'Hiányzik a cikkszám (SKU).'
-                        : 'Az ajánlat nincs publikálva az Allegro.hu piactéren.'}
-                    </span>
-                  </div>
-                ))}
-              </div>
+              <a href="/allegro/settings">
+                Részletek a Beállításokban
+                <span aria-hidden="true">→</span>
+              </a>
             </div>
           )}
           <div className="listing-filter-panel">
@@ -2690,7 +2739,7 @@ ${changes.join('\n')}`,
                 checked={allListingsSelected}
                 onChange={toggleAllListings}
               />
-              <span>Láthatók kijelölése</span>
+              <span>Aktuális oldal kijelölése</span>
             </label>
 
             <div className="bulk-toolbar-right">
@@ -2757,6 +2806,91 @@ ${changes.join('\n')}`,
             </div>
           </div>
 
+          {filteredAllegroListings.length > 0 && (
+            <div className="campaign-pagination">
+              <div className="campaign-pagination-size">
+                <span>Sorok oldalanként</span>
+
+                <select
+                  value={listingPageSize}
+                  onChange={(event) => {
+                    const value =
+                      Number(event.target.value)
+
+                    if (
+                      value === 25 ||
+                      value === 50 ||
+                      value === 100
+                    ) {
+                      setListingPageSize(value)
+                    }
+                  }}
+                >
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+              </div>
+
+              <div className="campaign-pagination-info">
+                {listingPageStart + 1}
+                {'–'}
+                {Math.min(
+                  listingPageStart +
+                    listingPageSize,
+                  filteredAllegroListings.length,
+                )}
+                {' / '}
+                {filteredAllegroListings.length}
+                {' ajánlat'}
+              </div>
+
+              <div className="campaign-pagination-actions">
+                <button
+                  className="secondary-button campaign-pagination-button"
+                  type="button"
+                  aria-label="Előző oldal"
+                  disabled={safeListingPage <= 1}
+                  onClick={() =>
+                    setListingPage(
+                      Math.max(
+                        1,
+                        safeListingPage - 1,
+                      ),
+                    )
+                  }
+                >
+                  ‹
+                </button>
+
+                <span>
+                  {safeListingPage}
+                  {' / '}
+                  {listingPageCount}
+                </span>
+
+                <button
+                  className="secondary-button campaign-pagination-button"
+                  type="button"
+                  aria-label="Következő oldal"
+                  disabled={
+                    safeListingPage >=
+                    listingPageCount
+                  }
+                  onClick={() =>
+                    setListingPage(
+                      Math.min(
+                        listingPageCount,
+                        safeListingPage + 1,
+                      ),
+                    )
+                  }
+                >
+                  ›
+                </button>
+              </div>
+            </div>
+          )}
           <div className="table-card">
             <table className="products-table allegro-table">
               <thead>
@@ -2775,7 +2909,7 @@ ${changes.join('\n')}`,
               </thead>
 
               <tbody>
-                {filteredAllegroListings.map((listing) => (
+                {paginatedAllegroListings.map((listing) => (
                   <tr
                     key={listing.id}
                     className={[
