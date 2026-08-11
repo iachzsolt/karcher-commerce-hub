@@ -4763,6 +4763,26 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
       setTimeout(resolve, ms),
     )
 
+  const refreshOfferFromAllegro =
+    async () => {
+      const response =
+        await allegroAuth.request(
+          '/sync',
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type':
+                'application/json',
+            },
+            body: JSON.stringify({
+              offerIds: [row.offerId],
+            }),
+          },
+        )
+
+      return response.ok
+    }
+
   for (let attempt = 0; attempt < 10; attempt++) {
     await sleep(500)
 
@@ -4819,6 +4839,7 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
     }
 
     if (task.status === 'SUCCESS') {
+      await refreshOfferFromAllegro()
       return context.json({
         status: 'ok',
 
@@ -4841,6 +4862,10 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
       })
     }
   }
+
+  await refreshOfferFromAllegro()
+  await sleep(4000)
+  await refreshOfferFromAllegro()
 
   return context.json(
     {
