@@ -1701,7 +1701,7 @@ export async function submitOfferToAllegroCampaign(
     )
   }
 
-  
+
   assertAllegroWriteSafety()
 const body: {
     campaign: {
@@ -1865,7 +1865,7 @@ export async function finishOfferAllegroCampaign(
     )
   }
 
-  
+
   assertAllegroWriteSafety()
 const response = await allegroFetch(
     `${apiUrl}/sale/badges/offers/${encodeURIComponent(
@@ -2684,8 +2684,42 @@ allegroAuth.get('/offers', async (context) => {
     )
   }
 
-  const response = await allegroFetch(
-    `${apiUrl}/sale/offers?limit=20`,
+  const requestedLimit =
+  Number(context.req.query('limit') ?? '20')
+
+const requestedOffset =
+  Number(context.req.query('offset') ?? '0')
+
+const limit =
+  Number.isInteger(requestedLimit) &&
+  requestedLimit >= 1 &&
+  requestedLimit <= 100
+    ? requestedLimit
+    : 20
+
+const offset =
+  Number.isInteger(requestedOffset) &&
+  requestedOffset >= 0
+    ? requestedOffset
+    : 0
+
+const offersUrl =
+  new URL(
+    '/sale/offers',
+    apiUrl,
+  )
+
+offersUrl.searchParams.set(
+  'limit',
+  String(limit),
+)
+
+offersUrl.searchParams.set(
+  'offset',
+  String(offset),
+)
+const response = await allegroFetch(
+    offersUrl.toString(),
     {
       headers: {
         Authorization:
@@ -3487,40 +3521,6 @@ allegroAuth.post('/sync', async (context) => {
     )
   }
 
-  const offersResponse = await allegroFetch(
-    `${apiUrl}/sale/offers?limit=100`,
-    {
-      headers: {
-        Authorization:
-          `Bearer ${currentSession.accessToken}`,
-        Accept:
-          'application/vnd.allegro.public.v1+json',
-      },
-    },
-  )
-
-  if (!offersResponse.ok) {
-    const errorBody = await offersResponse.text()
-
-    console.error(
-      'Allegro offers sync request failed:',
-      offersResponse.status,
-      errorBody,
-    )
-
-    return context.json(
-      {
-        status: 'error',
-        message: 'Could not load Allegro offers',
-        httpStatus: offersResponse.status,
-      },
-      500,
-    )
-  }
-
-  const data =
-    (await offersResponse.json()) as AllegroOffersForSyncResponse
-
   const requestedOfferIds =
     new Set(
       (body?.offerIds ?? [])
@@ -3559,6 +3559,69 @@ allegroAuth.post('/sync', async (context) => {
     )
   }
 
+  const offersUrl =
+    new URL(
+      '/sale/offers',
+      apiUrl,
+    )
+
+  if (requestedOfferIds.size > 0) {
+    offersUrl.searchParams.set(
+      'limit',
+      String(requestedOfferIds.size),
+    )
+
+    for (const offerId of requestedOfferIds) {
+      offersUrl.searchParams.append(
+        'offer.id',
+        offerId,
+      )
+    }
+  } else {
+    offersUrl.searchParams.set(
+      'limit',
+      '100',
+    )
+  }
+
+  const offersResponse =
+    await allegroFetch(
+      offersUrl.toString(),
+      {
+        headers: {
+          Authorization:
+            `Bearer ${currentSession.accessToken}`,
+          Accept:
+            'application/vnd.allegro.public.v1+json',
+        },
+      },
+    )
+
+  if (!offersResponse.ok) {
+    const errorBody =
+      await offersResponse.text()
+
+    console.error(
+      'Allegro offers sync request failed:',
+      offersResponse.status,
+      errorBody,
+    )
+
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Could not load Allegro offers',
+        httpStatus:
+          offersResponse.status,
+      },
+      500,
+    )
+  }
+
+  const data =
+    (await offersResponse.json()) as
+      AllegroOffersForSyncResponse
   const availableOffers =
     data.offers ?? []
 
@@ -4129,7 +4192,7 @@ allegroAuth.post('/push-price/:listingId', async (context) => {
     )
   }
 
-  
+
   assertAllegroWriteSafety()
 
   const databaseUrl = process.env.DATABASE_URL
@@ -4473,7 +4536,7 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
     )
   }
 
-  
+
   assertAllegroWriteSafety()
 
   const databaseUrl = process.env.DATABASE_URL
@@ -4727,7 +4790,7 @@ allegroAuth.post('/push-status/:listingId', async (context) => {
     )
   }
 
-  
+
   assertAllegroWriteSafety()
 
   const databaseUrl = process.env.DATABASE_URL
@@ -6531,11 +6594,16 @@ allegroAuth.post('/sync-selected', async (context) => {
   let skipped = 0
   let failed = 0
   let pending = 0
+  const refreshOfferIds =
+    new Set<string>()
 
   for (const listingId of listingIds) {
     const [row] = await db
       .select({
         listingId: platformListings.id,
+
+        externalListingId:
+          platformListings.externalListingId,
 
         priceMinor:
           listingRemoteStates.priceMinor,
@@ -6845,6 +6913,23 @@ allegroAuth.post('/sync-selected', async (context) => {
       succeeded += 1
     }
 
+    const hasWriteResult =
+      priceStatus === 'success' ||
+      priceStatus === 'pending' ||
+      stockStatus === 'success' ||
+      stockStatus === 'pending' ||
+      publicationStatus === 'success' ||
+      publicationStatus === 'pending'
+
+    if (
+      hasWriteResult &&
+      row.externalListingId
+    ) {
+      refreshOfferIds.add(
+        row.externalListingId,
+      )
+    }
+
     results.push({
       listingId,
       status: hasFailure
@@ -6868,22 +6953,77 @@ allegroAuth.post('/sync-selected', async (context) => {
 
   let refreshDetails: unknown = null
 
-  if (attempted > 0) {
-    const refreshResponse =
-      await allegroAuth.request(
-        '/sync',
-        {
-          method: 'POST',
-        },
+  if (refreshOfferIds.size > 0) {
+    const offerIds =
+      [...refreshOfferIds]
+
+    const refreshBatches:
+      string[][] = []
+
+    for (
+      let index = 0;
+      index < offerIds.length;
+      index += 10
+    ) {
+      refreshBatches.push(
+        offerIds.slice(
+          index,
+          index + 10,
+        ),
       )
+    }
 
-    refreshDetails = await refreshResponse
-      .json()
-      .catch(() => null)
+    const batchResults: Array<{
+      offerIds: string[]
+      ok: boolean
+      status: number
+      details: unknown
+    }> = []
 
-    refreshStatus = refreshResponse.ok
-      ? 'success'
-      : 'failed'
+    for (const batch of refreshBatches) {
+      const refreshResponse =
+        await allegroAuth.request(
+          '/sync',
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type':
+                'application/json',
+            },
+            body: JSON.stringify({
+              offerIds: batch,
+            }),
+          },
+        )
+
+      const details =
+        await refreshResponse
+          .json()
+          .catch(() => null)
+
+      batchResults.push({
+        offerIds: batch,
+        ok: refreshResponse.ok,
+        status: refreshResponse.status,
+        details,
+      })
+    }
+
+    refreshStatus =
+      batchResults.every(
+        (batch) => batch.ok,
+      )
+        ? 'success'
+        : 'failed'
+
+    refreshDetails = {
+      refreshedOffers:
+        offerIds.length,
+      batchCount:
+        refreshBatches.length,
+      batches:
+        batchResults,
+    }
   }
 
   return context.json({
@@ -6906,15 +7046,3 @@ allegroAuth.post('/sync-selected', async (context) => {
     results,
   })
 })
-
-
-
-
-
-
-
-
-
-
-
-
