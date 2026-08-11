@@ -4212,13 +4212,18 @@ const currency =
         desiredStock: stockAvailable,
 
         desiredPublicationStatus:
-          publicationStatus,
+          publicationStatus === 'ACTIVE' ||
+          publicationStatus === 'ACTIVATING'
+            ? 'ACTIVE'
+            : publicationStatus === 'INACTIVE'
+              ? 'INACTIVE'
+              : publicationStatus,
 
         priceLocked: false,
         stockLocked: false,
 
         autoPriceSync: false,
-        autoStockSync: false,
+        autoStockSync: true,
 
         updatedBy: 'INITIAL_ALLEGRO_SYNC',
 

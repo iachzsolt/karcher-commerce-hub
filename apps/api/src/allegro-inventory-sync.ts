@@ -695,13 +695,64 @@ export async function syncAllegroInventoryRows(
         !row.stockAutoPaused &&
         remoteEnded
       ) {
-        skipped += 1
+        /*
+         * Explicit desired INACTIVE:
+         * manuálisan leállított ajánlat.
+         */
+        if (
+          row.desiredPublicationStatus ===
+          'INACTIVE'
+        ) {
+          skipped += 1
+
+          results.push({
+            sku: row.sku,
+            listingId: row.listingId,
+            action: 'SKIP',
+            status: 'MANUAL_INACTIVE',
+          })
+
+          continue
+        }
+
+        /*
+         * Legacy, már leállított 0 készletes ajánlat.
+         * Átvesszük auto-pause kezelésbe, hogy
+         * készlet-visszatéréskor újraaktiválható legyen.
+         */
+        await database
+          .update(
+            listingDesiredStates,
+          )
+          .set({
+            stockAutoPaused:
+              true,
+
+            desiredPublicationStatus:
+              'INACTIVE',
+
+            updatedBy:
+              'COMMERCE_HUB_INVENTORY',
+
+            updatedAt:
+              new Date(),
+          })
+          .where(
+            eq(
+              listingDesiredStates.listingId,
+              row.listingId,
+            ),
+          )
+
+        row.stockAutoPaused = true
+
+        autoPaused += 1
 
         results.push({
           sku: row.sku,
           listingId: row.listingId,
-          action: 'SKIP',
-          status: 'MANUAL_INACTIVE',
+          action: 'ADOPT_AUTO_PAUSE',
+          status: 'SUCCESS',
         })
 
         continue
@@ -754,6 +805,36 @@ export async function syncAllegroInventoryRows(
         )
 
       if (push.status === 202) {
+        /*
+         * Az END parancs 202/PENDING esetén is
+         * a Commerce Hub által kezelt auto-pause.
+         * Így a későbbi készlet-visszatérés
+         * automatikusan újraaktiválhatja.
+         */
+        await database
+          .update(
+            listingDesiredStates,
+          )
+          .set({
+            stockAutoPaused:
+              true,
+
+            updatedBy:
+              'COMMERCE_HUB_INVENTORY',
+
+            updatedAt:
+              new Date(),
+          })
+          .where(
+            eq(
+              listingDesiredStates.listingId,
+              row.listingId,
+            ),
+          )
+
+        row.stockAutoPaused = true
+        autoPaused += 1
+
         pending += 1
 
         pendingListingIds.add(row.listingId)
@@ -828,16 +909,54 @@ export async function syncAllegroInventoryRows(
       !row.stockAutoPaused &&
       remoteEnded
     ) {
-      skipped += 1
+      /*
+       * Explicit desired INACTIVE:
+       * manuálisan leállított ajánlat.
+       */
+      if (
+        row.desiredPublicationStatus ===
+        'INACTIVE'
+      ) {
+        skipped += 1
 
-      results.push({
-        sku: row.sku,
-        listingId: row.listingId,
-        action: 'SKIP',
-        status: 'MANUAL_INACTIVE',
-      })
+        results.push({
+          sku: row.sku,
+          listingId: row.listingId,
+          action: 'SKIP',
+          status: 'MANUAL_INACTIVE',
+        })
 
-      continue
+        continue
+      }
+
+      /*
+       * Legacy készlethiány miatt leállt ajánlat.
+       * Auto-pause kezelésbe vesszük.
+       * A meglévő logika ezután frissíti a készletet
+       * és ACTIVATE parancsot küld.
+       */
+      await database
+        .update(
+          listingDesiredStates,
+        )
+        .set({
+          stockAutoPaused:
+            true,
+
+          updatedBy:
+            'COMMERCE_HUB_INVENTORY',
+
+          updatedAt:
+            new Date(),
+        })
+        .where(
+          eq(
+            listingDesiredStates.listingId,
+            row.listingId,
+          ),
+        )
+
+      row.stockAutoPaused = true
     }
 
     if (row.remoteStock === null) {
