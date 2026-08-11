@@ -1,4 +1,4 @@
-import {
+﻿import {
   and,
   eq,
 } from 'drizzle-orm'
@@ -586,7 +586,7 @@ export type AllegroInventoryAdapter = {
     ) => Promise<AllegroInventoryActionResult>
 
   refresh:
-    () => Promise<{
+    (listingIds?: string[]) => Promise<{
       ok: boolean
       details: unknown
     }>
@@ -608,6 +608,13 @@ export async function syncAllegroInventoryRows(
   let skipped = 0
   let pending = 0
   let failed = 0
+
+  const pendingListingIds =
+    new Set<string>()
+
+  const writtenListingIds =
+    new Set<string>()
+
 
   for (const row of rows) {
     if (row.stockLocked) {
@@ -739,6 +746,8 @@ export async function syncAllegroInventoryRows(
 
       attempted += 1
 
+      writtenListingIds.add(row.listingId)
+
       const push =
         await adapter.pushStatus(
           row.listingId,
@@ -746,6 +755,9 @@ export async function syncAllegroInventoryRows(
 
       if (push.status === 202) {
         pending += 1
+
+        pendingListingIds.add(row.listingId)
+
 
         results.push({
           sku: row.sku,
@@ -849,6 +861,8 @@ export async function syncAllegroInventoryRows(
     ) {
       attempted += 1
 
+      writtenListingIds.add(row.listingId)
+
       const push =
         await adapter.pushStock(
           row.listingId,
@@ -856,6 +870,9 @@ export async function syncAllegroInventoryRows(
 
       if (push.status === 202) {
         pending += 1
+
+        pendingListingIds.add(row.listingId)
+
 
         results.push({
           sku: row.sku,
@@ -965,6 +982,9 @@ export async function syncAllegroInventoryRows(
     ) {
       pending += 1
 
+        pendingListingIds.add(row.listingId)
+
+
       results.push({
         sku: row.sku,
         listingId: row.listingId,
@@ -999,6 +1019,8 @@ export async function syncAllegroInventoryRows(
 
       attempted += 1
 
+      writtenListingIds.add(row.listingId)
+
       const push =
         await adapter.pushStatus(
           row.listingId,
@@ -1006,6 +1028,9 @@ export async function syncAllegroInventoryRows(
 
       if (push.status === 202) {
         pending += 1
+
+        pendingListingIds.add(row.listingId)
+
 
         results.push({
           sku: row.sku,
@@ -1109,16 +1134,60 @@ export async function syncAllegroInventoryRows(
     unknown = null
 
   if (attempted > 0) {
-    const refresh =
+    const initialRefresh =
       await adapter.refresh()
 
-    refreshDetails =
-      refresh.details
-
     refreshStatus =
-      refresh.ok
+      initialRefresh.ok
         ? 'success'
         : 'failed'
+
+    refreshDetails =
+      initialRefresh.details
+
+    const delayedRefreshListingIds =
+      new Set([
+        ...pendingListingIds,
+        ...writtenListingIds,
+      ])
+
+    if (
+      initialRefresh.ok &&
+      delayedRefreshListingIds.size > 0
+    ) {
+      await new Promise<void>(
+        (resolve) => {
+          setTimeout(resolve, 4000)
+        },
+      )
+
+      const delayedRefresh =
+        await adapter.refresh(
+          [...delayedRefreshListingIds],
+        )
+
+      refreshStatus =
+        delayedRefresh.ok
+          ? 'success'
+          : 'failed'
+
+      refreshDetails = {
+        initial:
+          initialRefresh.details,
+        delayedWriteRefresh: {
+          listingCount:
+            delayedRefreshListingIds.size,
+          pendingListingCount:
+            pendingListingIds.size,
+          writtenListingCount:
+            writtenListingIds.size,
+          ok:
+            delayedRefresh.ok,
+          details:
+            delayedRefresh.details,
+        },
+      }
+    }
   }
 
   return {

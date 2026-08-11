@@ -6466,6 +6466,13 @@ const port = 3000
 let automaticAllegroSyncRunning = false
 
 async function runAutomaticAllegroSync() {
+  if (
+    (process.env.ALLEGRO_ENV ?? 'SANDBOX')
+      .toUpperCase() === 'PRODUCTION'
+  ) {
+    return
+  }
+
   if (automaticAllegroSyncRunning) {
     return
   }

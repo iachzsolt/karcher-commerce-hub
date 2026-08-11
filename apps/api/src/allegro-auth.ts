@@ -1182,9 +1182,23 @@ allegroAuth.post('/inventory-sync', async (context) => {
             ),
 
         refresh:
-          async () => {
+          async (listingIds?: string[]) => {
+            const requestedListingIds =
+              listingIds && listingIds.length > 0
+                ? new Set(listingIds)
+                : null
+
+            const refreshRows =
+              requestedListingIds
+                ? rows.filter((row) =>
+                    requestedListingIds.has(
+                      row.listingId,
+                    ),
+                  )
+                : rows
+
             const offerIds =
-              rows
+              refreshRows
                 .map((row) => row.offerId)
                 .filter(
                   (offerId): offerId is string =>
