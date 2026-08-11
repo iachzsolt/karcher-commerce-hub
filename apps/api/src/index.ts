@@ -317,7 +317,7 @@ app.get('/allegro/listings', async (context) => {
         categoryId: platformListings.categoryId,
 
         sku: products.sku,
-        productName: products.name,
+        productName: platformListings.listingName,
 
         accountName: platformAccounts.name,
         environment: platformAccounts.environment,
