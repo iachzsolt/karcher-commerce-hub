@@ -6747,6 +6747,376 @@ async function runAutomaticAllegroSync() {
   }
 }
 
+const ALLEGRO_CATALOG_SYNC_INTERVAL_MS =
+  60 * 60 * 1000
+
+let automaticAllegroCatalogSyncRunning =
+  false
+
+type AllegroCatalogOffer = {
+  id: string
+  name?: string
+  external?: {
+    id?: string | null
+  }
+  category?: {
+    id?: string
+  }
+}
+
+type AllegroCatalogOffersResponse = {
+  offers?: AllegroCatalogOffer[]
+  totalCount?: number
+  count?: number
+}
+
+type AllegroCatalogHubListing = {
+  id: string
+  offerId: string
+  sku?: string | null
+  productName?: string | null
+  categoryId?: string | null
+  acceptedAt?: string | null
+}
+
+async function runAutomaticAllegroCatalogSync() {
+  if (
+    (process.env.ALLEGRO_ENV ?? 'SANDBOX')
+      .toUpperCase() !== 'PRODUCTION'
+  ) {
+    return
+  }
+
+  if (automaticAllegroCatalogSyncRunning) {
+    return
+  }
+
+  automaticAllegroCatalogSyncRunning =
+    true
+
+  try {
+    const allOffers: AllegroCatalogOffer[] =
+      []
+
+    const limit = 100
+    let offset = 0
+    let totalCount: number | null = null
+
+    do {
+      const response = await app.request(
+        `/auth/allegro/offers?limit=${limit}&offset=${offset}`,
+      )
+
+      if (!response.ok) {
+        const errorBody =
+          await response.text()
+
+        throw new Error(
+          `Allegro catalog page failed at offset ${offset}: ${response.status} ${errorBody}`,
+        )
+      }
+
+      const page =
+        (await response.json()) as
+          AllegroCatalogOffersResponse
+
+      const pageOffers =
+        page.offers ?? []
+
+      allOffers.push(
+        ...pageOffers,
+      )
+
+      if (totalCount === null) {
+        totalCount =
+          page.totalCount ??
+          page.count ??
+          pageOffers.length
+      }
+
+      if (
+        pageOffers.length === 0 &&
+        offset < totalCount
+      ) {
+        throw new Error(
+          `Allegro catalog pagination stopped unexpectedly at offset ${offset}`,
+        )
+      }
+
+      offset += limit
+    } while (
+      totalCount !== null &&
+      offset < totalCount
+    )
+
+    const listingsResponse =
+      await app.request(
+        '/allegro/listings',
+      )
+
+    if (!listingsResponse.ok) {
+      const errorBody =
+        await listingsResponse.text()
+
+      throw new Error(
+        `Commerce Hub listing load failed: ${listingsResponse.status} ${errorBody}`,
+      )
+    }
+
+    const listingsBody =
+      (await listingsResponse.json()) as {
+        data?: AllegroCatalogHubListing[]
+      }
+
+    const hubListings =
+      listingsBody.data ?? []
+
+    const hubByOfferId =
+      new Map(
+        hubListings.map(
+          (listing) => [
+            listing.offerId,
+            listing,
+          ],
+        ),
+      )
+
+    const offersWithoutSku =
+      allOffers.filter(
+        (offer) =>
+          !offer.external?.id?.trim(),
+      )
+
+    const newOffers =
+      allOffers.filter(
+        (offer) =>
+          Boolean(
+            offer.external?.id?.trim(),
+          ) &&
+          !hubByOfferId.has(
+            offer.id,
+          ),
+      )
+
+    const renamedOffers =
+      allOffers.filter(
+        (offer) => {
+          const existing =
+            hubByOfferId.get(
+              offer.id,
+            )
+
+          if (!existing) {
+            return false
+          }
+
+          return (
+            typeof offer.name === 'string' &&
+            offer.name !==
+              existing.productName
+          )
+        },
+      )
+
+    const changedOfferIds =
+      [
+        ...new Set([
+          ...newOffers.map(
+            (offer) => offer.id,
+          ),
+
+          ...renamedOffers.map(
+            (offer) => offer.id,
+          ),
+        ]),
+      ]
+
+    let syncedOffers = 0
+
+    for (
+      let index = 0;
+      index < changedOfferIds.length;
+      index += 10
+    ) {
+      const offerIds =
+        changedOfferIds.slice(
+          index,
+          index + 10,
+        )
+
+      const syncResponse =
+        await app.request(
+          '/auth/allegro/sync',
+          {
+            method: 'POST',
+
+            headers: {
+              'Content-Type':
+                'application/json',
+            },
+
+            body:
+              JSON.stringify({
+                offerIds,
+              }),
+          },
+        )
+
+      if (!syncResponse.ok) {
+        const errorBody =
+          await syncResponse.text()
+
+        throw new Error(
+          `Targeted Allegro catalog sync failed: ${syncResponse.status} ${errorBody}`,
+        )
+      }
+
+      const syncResult =
+        (await syncResponse.json()) as {
+          status?: string
+          imported?: number
+          skipped?: number
+        }
+
+      if (
+        syncResult.status !== 'ok'
+      ) {
+        throw new Error(
+          'Targeted Allegro catalog sync returned non-ok status',
+        )
+      }
+
+      syncedOffers +=
+        syncResult.imported ?? 0
+    }
+
+    let initializedBaselines = 0
+
+    if (newOffers.length > 0) {
+      const refreshedListingsResponse =
+        await app.request(
+          '/allegro/listings',
+        )
+
+      if (
+        !refreshedListingsResponse.ok
+      ) {
+        const errorBody =
+          await refreshedListingsResponse
+            .text()
+
+        throw new Error(
+          `Commerce Hub listing reload failed after catalog import: ${refreshedListingsResponse.status} ${errorBody}`,
+        )
+      }
+
+      const refreshedListingsBody =
+        (await refreshedListingsResponse
+          .json()) as {
+          data?: AllegroCatalogHubListing[]
+        }
+
+      const refreshedByOfferId =
+        new Map(
+          (
+            refreshedListingsBody.data ??
+            []
+          ).map(
+            (listing) => [
+              listing.offerId,
+              listing,
+            ],
+          ),
+        )
+
+      for (const offer of newOffers) {
+        const listing =
+          refreshedByOfferId.get(
+            offer.id,
+          )
+
+        if (!listing) {
+          throw new Error(
+            `New Allegro offer was imported but Hub listing was not found: ${offer.id}`,
+          )
+        }
+
+        const baselineResponse =
+          await app.request(
+            `/allegro/listings/${encodeURIComponent(listing.id)}/initialize-baseline`,
+            {
+              method: 'POST',
+            },
+          )
+
+        if (!baselineResponse.ok) {
+          const errorBody =
+            await baselineResponse.text()
+
+          throw new Error(
+            `Targeted baseline initialization failed for offer ${offer.id}: ${baselineResponse.status} ${errorBody}`,
+          )
+        }
+
+        const baselineResult =
+          (await baselineResponse.json()) as {
+            status?: string
+            initialized?: boolean
+            alreadyInitialized?: boolean
+          }
+
+        if (
+          baselineResult.status !== 'ok'
+        ) {
+          throw new Error(
+            `Targeted baseline initialization returned non-ok status for offer ${offer.id}`,
+          )
+        }
+
+        if (
+          baselineResult.initialized
+        ) {
+          initializedBaselines++
+        }
+      }
+    }
+
+    console.log(
+      'Automatic Allegro catalog sync completed:',
+      {
+        allegroOffers:
+          allOffers.length,
+
+        hubListingsBefore:
+          hubListings.length,
+
+        newOffers:
+          newOffers.length,
+
+        renamedOffers:
+          renamedOffers.length,
+
+        offersWithoutSku:
+          offersWithoutSku.length,
+
+        targetedSyncOffers:
+          changedOfferIds.length,
+
+        syncedOffers,
+
+        initializedBaselines,
+      },
+    )
+  } catch (error) {
+    console.error(
+      'Automatic Allegro catalog sync failed:',
+      error,
+    )
+  } finally {
+    automaticAllegroCatalogSyncRunning =
+      false
+  }
+}
 async function startServer() {
   await restoreAllegroSession()
 
@@ -6769,6 +7139,14 @@ async function startServer() {
     }, 6 * 60 * 60 * 1000)
 
   allegroListingSyncTimer.unref()
+  const allegroCatalogSyncTimer =
+    setInterval(() => {
+      void runAutomaticAllegroCatalogSync()
+    }, ALLEGRO_CATALOG_SYNC_INTERVAL_MS)
+
+  allegroCatalogSyncTimer.unref()
+
+  void runAutomaticAllegroCatalogSync()
 
   void runAutomaticAllegroSync()
 
