@@ -2780,45 +2780,117 @@ allegroAuth.get('/import-issues', async (context) => {
     )
   }
 
-  const response = await allegroFetch(
-    `${apiUrl}/sale/offers?limit=100`,
-    {
-      headers: {
-        Authorization:
-          `Bearer ${currentSession.accessToken}`,
-        Accept:
-          'application/vnd.allegro.public.v1+json',
-      },
-    },
-  )
+  type ImportIssueOffer = {
+    id: string
+    name?: string
+    external?: {
+      id?: string | null
+    }
+    additionalMarketplaces?: Record<
+      string,
+      unknown
+    >
+  }
 
-  const body = await response.text()
+  type ImportIssueOffersResponse = {
+    offers?: ImportIssueOffer[]
+    totalCount?: number
+    count?: number
+  }
 
-  if (!response.ok) {
-    return context.json(
-      {
-        status: 'error',
-        message:
-          'Failed to check Allegro offers',
-        httpStatus: response.status,
-      },
-      502,
+  const allOffers: ImportIssueOffer[] = []
+
+  const limit = 100
+  let offset = 0
+  let totalCount: number | null = null
+
+  do {
+    const offersUrl =
+      new URL(
+        '/sale/offers',
+        apiUrl,
+      )
+
+    offersUrl.searchParams.set(
+      'limit',
+      String(limit),
     )
-  }
 
-  const data = JSON.parse(body) as {
-    offers?: Array<{
-      id: string
-      name?: string
-      external?: {
-        id?: string | null
-      }
-      additionalMarketplaces?: Record<
-        string,
-        unknown
-      >
-    }>
-  }
+    offersUrl.searchParams.set(
+      'offset',
+      String(offset),
+    )
+
+    const response =
+      await allegroFetch(
+        offersUrl.toString(),
+        {
+          headers: {
+            Authorization:
+              `Bearer ${currentSession.accessToken}`,
+            Accept:
+              'application/vnd.allegro.public.v1+json',
+          },
+        },
+      )
+
+    const body =
+      await response.text()
+
+    if (!response.ok) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Failed to check Allegro offers',
+          httpStatus:
+            response.status,
+          offset,
+        },
+        502,
+      )
+    }
+
+    const page =
+      JSON.parse(
+        body,
+      ) as ImportIssueOffersResponse
+
+    const pageOffers =
+      page.offers ?? []
+
+    allOffers.push(
+      ...pageOffers,
+    )
+
+    if (totalCount === null) {
+      totalCount =
+        page.totalCount ??
+        page.count ??
+        pageOffers.length
+    }
+
+    if (
+      pageOffers.length === 0 &&
+      offset < totalCount
+    ) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Allegro offer pagination stopped unexpectedly',
+          offset,
+          totalCount,
+        },
+        502,
+      )
+    }
+
+    offset += limit
+  } while (
+    totalCount !== null &&
+    offset < totalCount
+  )
 
   const issues: Array<{
     offerId: string
@@ -2828,12 +2900,12 @@ allegroAuth.get('/import-issues', async (context) => {
       | 'MISSING_SKU'
   }> = []
 
-  for (const offer of data.offers ?? []) {
-    const isHuBaseMarketplace =
-      currentSession.account
-        .baseMarketplace?.id ===
-      'allegro-hu'
+  const isHuBaseMarketplace =
+    currentSession.account
+      .baseMarketplace?.id ===
+    'allegro-hu'
 
+  for (const offer of allOffers) {
     const huAdditionalState =
       offer.additionalMarketplaces?.[
         'allegro-hu'
@@ -2849,13 +2921,15 @@ allegroAuth.get('/import-issues', async (context) => {
         name:
           offer.name ??
           'Névtelen Allegro-ajánlat',
-        issue: 'MISSING_HU_MARKETPLACE',
+        issue:
+          'MISSING_HU_MARKETPLACE',
       })
 
       continue
     }
 
-    const sku = offer.external?.id?.trim()
+    const sku =
+      offer.external?.id?.trim()
 
     if (!sku) {
       issues.push({
@@ -2863,15 +2937,20 @@ allegroAuth.get('/import-issues', async (context) => {
         name:
           offer.name ??
           'Névtelen Allegro-ajánlat',
-        issue: 'MISSING_SKU',
+        issue:
+          'MISSING_SKU',
       })
     }
   }
 
   return context.json({
     status: 'ok',
-    count: issues.length,
-    data: issues,
+    scannedOffers:
+      allOffers.length,
+    count:
+      issues.length,
+    data:
+      issues,
   })
 })
 allegroAuth.post('/disconnect', async (context) => {
