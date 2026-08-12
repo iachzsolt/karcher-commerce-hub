@@ -1,4 +1,4 @@
-﻿import 'dotenv/config'
+import 'dotenv/config'
 import { randomUUID } from 'node:crypto'
 import { serve } from '@hono/node-server'
 import {
@@ -1274,6 +1274,10 @@ app.get('/allegro/listing-price-history-summary', async (context) => {
   try {
     const now = new Date()
 
+    const campaignId =
+      context.req.query('campaignId')
+        ?.trim() || null
+
     const thirtyDaysAgo = new Date(
       now.getTime() -
         30 * 24 * 60 * 60 * 1000,
@@ -1350,6 +1354,12 @@ app.get('/allegro/listing-price-history-summary', async (context) => {
           listingId:
             listingPriceHistory.listingId,
 
+          priceMinor:
+            listingPriceHistory.priceMinor,
+
+          externalCampaignId:
+            listingPriceHistory.externalCampaignId,
+
           observedAt:
             listingPriceHistory.observedAt,
         })
@@ -1361,6 +1371,135 @@ app.get('/allegro/listing-price-history-summary', async (context) => {
           ),
         ),
     ])
+
+    const campaignReferenceMinByListing =
+      new Map<string, number>()
+
+    if (campaignId) {
+      const campaignRows = await db
+        .select({
+          listingId:
+            listingCampaigns.listingId,
+
+          validFrom:
+            listingCampaigns.validFrom,
+        })
+        .from(listingCampaigns)
+        .where(
+          eq(
+            listingCampaigns.externalCampaignId,
+            campaignId,
+          ),
+        )
+
+      const campaignStartByListing =
+        new Map<string, Date>()
+
+      for (const campaign of campaignRows) {
+        if (!campaign.validFrom) {
+          continue
+        }
+
+        const campaignStart =
+          new Date(campaign.validFrom)
+
+        const existingStart =
+          campaignStartByListing.get(
+            campaign.listingId,
+          )
+
+        if (
+          !existingStart ||
+          campaignStart.getTime() <
+            existingStart.getTime()
+        ) {
+          campaignStartByListing.set(
+            campaign.listingId,
+            campaignStart,
+          )
+        }
+      }
+
+      const campaignStartTimes =
+        Array.from(
+          campaignStartByListing.values(),
+        ).map((date) => date.getTime())
+
+      if (campaignStartTimes.length > 0) {
+        const earliestCampaignStart =
+          Math.min(...campaignStartTimes)
+
+        const earliestReferenceStart =
+          new Date(
+            earliestCampaignStart -
+              30 * 24 * 60 * 60 * 1000,
+          )
+
+        const referenceRows = await db
+          .select({
+            listingId:
+              listingPriceHistory.listingId,
+
+            priceMinor:
+              listingPriceHistory.priceMinor,
+
+            observedAt:
+              listingPriceHistory.observedAt,
+          })
+          .from(listingPriceHistory)
+          .where(
+            gte(
+              listingPriceHistory.observedAt,
+              earliestReferenceStart,
+            ),
+          )
+
+        for (const row of referenceRows) {
+          const campaignStart =
+            campaignStartByListing.get(
+              row.listingId,
+            )
+
+          if (!campaignStart) {
+            continue
+          }
+
+          const campaignStartTime =
+            campaignStart.getTime()
+
+          const referenceStartTime =
+            campaignStartTime -
+              30 * 24 * 60 * 60 * 1000
+
+          const observedTime =
+            new Date(
+              row.observedAt,
+            ).getTime()
+
+          if (
+            observedTime < referenceStartTime ||
+            observedTime >= campaignStartTime
+          ) {
+            continue
+          }
+
+          const currentMin =
+            campaignReferenceMinByListing.get(
+              row.listingId,
+            )
+
+          if (
+            currentMin === undefined ||
+            row.priceMinor < currentMin
+          ) {
+            campaignReferenceMinByListing.set(
+              row.listingId,
+              row.priceMinor,
+            )
+          }
+        }
+      }
+    }
 
     const historyStartByListing =
       new Map(
@@ -1429,6 +1568,11 @@ app.get('/allegro/listing-price-history-summary', async (context) => {
             : Number(
                 row.min30PriceMinor,
               ),
+
+      campaignReferenceMin30PriceMinor:
+        campaignReferenceMinByListing.get(
+          row.listingId,
+        ) ?? null,
 
         observationCount:
           Number(
@@ -5853,6 +5997,10 @@ async function processPendingCampaignApplications() {
 
         campaignStatus:
           listingCampaigns.campaignStatus,
+
+
+        validTo:
+          listingCampaigns.validTo,
       })
       .from(listingCampaigns)
       .where(
@@ -6060,6 +6208,112 @@ async function processPendingCampaignApplications() {
                 : 'Allegro declined the campaign badge'
               : null
 
+
+          const shouldRecordCampaignPrice =
+            (
+              remoteBadgeStatus ===
+                'ACTIVE' ||
+              remoteBadgeStatus ===
+                'FINISHED'
+            ) &&
+            remotePriceMinor !== null
+
+          if (shouldRecordCampaignPrice) {
+            const [existingCampaignPriceHistory] =
+              await db
+                .select({
+                  id:
+                    listingPriceHistory.id,
+                })
+                .from(
+                  listingPriceHistory,
+                )
+                .where(
+                  and(
+                    eq(
+                      listingPriceHistory.listingId,
+                      row.listingId,
+                    ),
+                    eq(
+                      listingPriceHistory.externalCampaignId,
+                      row.externalCampaignId,
+                    ),
+                    eq(
+                      listingPriceHistory.priceType,
+                      'PROMOTION',
+                    ),
+                    eq(
+                      listingPriceHistory.priceMinor,
+                      remotePriceMinor,
+                    ),
+                  ),
+                )
+                .limit(1)
+
+            if (!existingCampaignPriceHistory) {
+              const campaignObservedAt =
+                remoteBadgeStatus ===
+                  'FINISHED' &&
+                row.validTo !== null &&
+                row.validTo <= syncedAt
+                  ? row.validTo
+                  : syncedAt
+
+              await db
+                .insert(
+                  listingPriceHistory,
+                )
+                .values({
+                  listingId:
+                    row.listingId,
+
+                  priceMinor:
+                    remotePriceMinor,
+
+                  basePriceMinor:
+                    referencePriceMinor,
+
+                  priceType:
+                    'PROMOTION',
+
+                  externalCampaignId:
+                    row.externalCampaignId,
+
+                  currency:
+                    badge.prices?.bargain
+                      ?.currency ??
+                    badge.prices?.market
+                      ?.currency ??
+                    'HUF',
+
+                  source:
+                    'ALLEGRO_CAMPAIGN',
+
+                  observedAt:
+                    campaignObservedAt,
+                })
+
+              console.log(
+                'Allegro campaign price history recorded:',
+                {
+                  campaignId:
+                    row.externalCampaignId,
+
+                  listingId:
+                    row.listingId,
+
+                  priceMinor:
+                    remotePriceMinor,
+
+                  basePriceMinor:
+                    referencePriceMinor,
+
+                  observedAt:
+                    campaignObservedAt,
+                },
+              )
+            }
+          }
           await db
             .update(listingCampaigns)
             .set({

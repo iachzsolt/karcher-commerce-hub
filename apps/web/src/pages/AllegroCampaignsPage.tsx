@@ -75,6 +75,7 @@ type AlleDiscountEligibleOffer = {
 type PriceHistorySummary = {
   listingId: string
   min30PriceMinor: number | null
+  campaignReferenceMin30PriceMinor: number | null
   observationCount: number
   coverageDayCount: number
   missingDayCount: number
@@ -1109,6 +1110,38 @@ function AllegroCampaignsPage() {
     }
   }
 
+  async function loadCampaignPriceHistory(
+    campaignId: string,
+  ) {
+    const response = await fetch(
+      `http://localhost:3000/allegro/listing-price-history-summary?campaignId=${encodeURIComponent(
+        campaignId,
+      )}`,
+    )
+
+    const result = await response.json()
+
+    if (!response.ok) {
+      throw new Error(
+        result.message ??
+          'Nem sikerült betölteni a kampány 30 napos referenciaárait.',
+      )
+    }
+
+    const historyRows =
+      (
+        result.data ?? []
+      ) as PriceHistorySummary[]
+
+    setPriceHistoryByListing(
+      Object.fromEntries(
+        historyRows.map((row) => [
+          row.listingId,
+          row,
+        ]),
+      ),
+    )
+  }
   async function loadPreparations(
     campaignId: string,
   ) {
@@ -1200,7 +1233,7 @@ function AllegroCampaignsPage() {
       },
     )
 
-    setSelectedListingIds(selectedIds)
+    setSelectedListingIds([])
     setCampaignPriceDrafts(prices)
     setValidFromDrafts(starts)
     setValidToDrafts(ends)
@@ -1209,6 +1242,20 @@ function AllegroCampaignsPage() {
     setPreparationStatuses(statuses)
   }
 
+  useEffect(() => {
+    if (!selectedCampaignId) {
+      return
+    }
+
+    void loadCampaignPriceHistory(
+      selectedCampaignId,
+    ).catch((historyError) => {
+      console.error(
+        'Campaign price history loading failed:',
+        historyError,
+      )
+    })
+  }, [selectedCampaignId])
   async function toggleCampaign(
     campaignId: string,
   ) {
@@ -1939,6 +1986,18 @@ function AllegroCampaignsPage() {
   }
 
   useEffect(() => {
+    setSelectedListingIds((current) => {
+      const next = current.filter(
+        isPreparationSelectable,
+      )
+
+      return next.length === current.length
+        ? current
+        : next
+    })
+  }, [preparationStatuses])
+
+  useEffect(() => {
     void loadData()
   }, [])
 
@@ -2614,7 +2673,9 @@ function AllegroCampaignsPage() {
                           const priceHistoryControl =
                             getPriceHistoryControl(
                               listing.priceMinor,
-                              priceHistory?.min30PriceMinor,
+                              priceHistory
+                                ?.campaignReferenceMin30PriceMinor ??
+                                priceHistory?.min30PriceMinor,
                               priceHistory?.hasFull30DayWindow,
                               campaignPriceDrafts[
                                 listing.id
@@ -2836,7 +2897,9 @@ function AllegroCampaignsPage() {
                                 <div className="campaign-history-price">
                                   <strong>
                                     {formatPrice(
-                                      priceHistory?.min30PriceMinor ??
+                                      priceHistory
+                                        ?.campaignReferenceMin30PriceMinor ??
+                                        priceHistory?.min30PriceMinor ??
                                         null,
                                       listing.currency,
                                     )}
@@ -2899,7 +2962,11 @@ function AllegroCampaignsPage() {
                                   {formatCampaignDiscount(
                                     priceHistoryByListing[
                                       listing.id
-                                    ]?.min30PriceMinor,
+                                    ]
+                                      ?.campaignReferenceMin30PriceMinor ??
+                                      priceHistoryByListing[
+                                        listing.id
+                                      ]?.min30PriceMinor,
                                     campaignPriceDrafts[
                                       listing.id
                                     ],
