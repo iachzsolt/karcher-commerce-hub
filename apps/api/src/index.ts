@@ -32,6 +32,7 @@ import {
   getAllegroBadgeApplication,
   getAllegroBadgeApplicationsForOffer,
   getAllegroBadgeCampaigns,
+  getAllegroBadges,
   getAllegroBadgeOperation,
   refreshAllegroSessionIfNeeded,
   restoreAllegroSession,
@@ -1505,6 +1506,12 @@ app.get(
 
           finishError:
             listingCampaigns.finishError,
+
+          finishRetryAfter:
+            listingCampaigns.finishRetryAfter,
+
+          finishRetryCount:
+            listingCampaigns.finishRetryCount,
 
           retryAfter:
             listingCampaigns.retryAfter,
@@ -5688,7 +5695,8 @@ app.post(
               finishError: null,
 
               finishRetryAfter: null,
-              finishRetryCount: 0,
+              finishRetryCount:
+                preparation.finishRetryCount,
 
               lastSyncedAt:
                 new Date(),
@@ -5842,12 +5850,41 @@ async function processPendingCampaignApplications() {
 
         applicationStatus:
           listingCampaigns.applicationStatus,
+
+        campaignStatus:
+          listingCampaigns.campaignStatus,
       })
       .from(listingCampaigns)
       .where(
-        eq(
-          listingCampaigns.applicationStatus,
-          'REQUESTED',
+        or(
+          eq(
+            listingCampaigns.applicationStatus,
+            'REQUESTED',
+          ),
+          and(
+            eq(
+              listingCampaigns.applicationStatus,
+              'PROCESSED',
+            ),
+            or(
+              eq(
+                listingCampaigns.campaignStatus,
+                'AWAITING_BADGE',
+              ),
+              eq(
+                listingCampaigns.campaignStatus,
+                'IN_VERIFICATION',
+              ),
+              eq(
+                listingCampaigns.campaignStatus,
+                'WAITING_FOR_PUBLICATION',
+              ),
+              eq(
+                listingCampaigns.campaignStatus,
+                'FINISH_FAILED',
+              ),
+            ),
+          ),
         ),
       )
 
@@ -5870,25 +5907,207 @@ async function processPendingCampaignApplications() {
         }
 
         if (remoteStatus === 'PROCESSED') {
+          const badges =
+            await getAllegroBadges({
+              offerId:
+                application.offer.id,
+
+              marketplaceId:
+                'allegro-hu',
+            })
+
+          const badge =
+            badges.badges.find(
+              (item) =>
+                item.offer.id ===
+                  application.offer.id &&
+                item.campaign.id ===
+                  row.externalCampaignId,
+            )
+
+          const syncedAt =
+            new Date()
+
+          if (!badge) {
+            if (
+              row.campaignStatus ===
+                'FINISH_FAILED'
+            ) {
+              continue
+            }
+
+            await db
+              .update(listingCampaigns)
+              .set({
+                applicationStatus:
+                  'PROCESSED',
+
+                applicationError: null,
+
+                campaignStatus:
+                  'AWAITING_BADGE',
+
+                retryAfter: null,
+                retryCount: 0,
+
+                lastSyncedAt:
+                  syncedAt,
+
+                updatedAt:
+                  syncedAt,
+              })
+              .where(
+                eq(
+                  listingCampaigns.id,
+                  row.id,
+                ),
+              )
+
+            console.log(
+              'Allegro campaign application processed, waiting for badge:',
+              {
+                campaignId:
+                  row.externalCampaignId,
+
+                listingId:
+                  row.listingId,
+
+                applicationId:
+                  row.externalApplicationId,
+              },
+            )
+
+            continue
+          }
+
+          const remoteBadgeStatus =
+            badge.process.status
+
+          const terminalBadge =
+            remoteBadgeStatus ===
+              'DECLINED' ||
+            remoteBadgeStatus ===
+              'FINISHED'
+
+          if (
+            row.campaignStatus ===
+              'FINISH_FAILED' &&
+            !terminalBadge
+          ) {
+            // A real ACTIVE badge with a transient
+            // finish failure must keep its retry state.
+            continue
+          }
+
+          const knownBadgeStatus =
+            remoteBadgeStatus === 'ACTIVE' ||
+            remoteBadgeStatus ===
+              'IN_VERIFICATION' ||
+            remoteBadgeStatus ===
+              'WAITING_FOR_PUBLICATION' ||
+            remoteBadgeStatus ===
+              'FINISHED' ||
+            remoteBadgeStatus ===
+              'DECLINED'
+
+          const nextCampaignStatus =
+            knownBadgeStatus
+              ? remoteBadgeStatus
+              : 'AWAITING_BADGE'
+
+          const remotePriceAmount =
+            Number(
+              badge.prices?.bargain
+                ?.amount,
+            )
+
+          const referencePriceAmount =
+            Number(
+              badge.prices?.market
+                ?.amount,
+            )
+
+          const remotePriceMinor =
+            Number.isFinite(
+              remotePriceAmount,
+            )
+              ? Math.round(
+                  remotePriceAmount *
+                    100,
+                )
+              : null
+
+          const referencePriceMinor =
+            Number.isFinite(
+              referencePriceAmount,
+            )
+              ? Math.round(
+                  referencePriceAmount *
+                    100,
+                )
+              : null
+
+          const badgeRejectionText =
+            remoteBadgeStatus ===
+              'DECLINED'
+              ? badge.process
+                  .rejectionReasons
+                  .length > 0
+                ? JSON.stringify(
+                    badge.process
+                      .rejectionReasons,
+                  )
+                : 'Allegro declined the campaign badge'
+              : null
+
           await db
             .update(listingCampaigns)
             .set({
               applicationStatus:
                 'PROCESSED',
 
-              applicationError: null,
+              applicationError:
+                badgeRejectionText,
 
               campaignStatus:
-                'ACTIVE',
+                nextCampaignStatus,
+
+              ...(remotePriceMinor !==
+              null
+                ? {
+                    remotePriceMinor,
+                  }
+                : {}),
+
+              ...(referencePriceMinor !==
+              null
+                ? {
+                    referencePriceMinor,
+                  }
+                : {}),
 
               retryAfter: null,
               retryCount: 0,
 
+              ...(terminalBadge
+                ? {
+                    finishOperationId:
+                      null,
+
+                    finishError: null,
+
+                    finishRetryAfter:
+                      null,
+
+                    finishRetryCount: 0,
+                  }
+                : {}),
+
               lastSyncedAt:
-                new Date(),
+                syncedAt,
 
               updatedAt:
-                new Date(),
+                syncedAt,
             })
             .where(
               eq(
@@ -5898,7 +6117,7 @@ async function processPendingCampaignApplications() {
             )
 
           console.log(
-            'Allegro campaign application processed:',
+            'Allegro campaign badge synchronized:',
             {
               campaignId:
                 row.externalCampaignId,
@@ -5908,6 +6127,17 @@ async function processPendingCampaignApplications() {
 
               applicationId:
                 row.externalApplicationId,
+
+              badgeStatus:
+                remoteBadgeStatus,
+
+              remotePriceMinor,
+
+              referencePriceMinor,
+
+              rejectionReasons:
+                badge.process
+                  .rejectionReasons,
             },
           )
 
@@ -6128,14 +6358,53 @@ async function processPendingCampaignFinishOperations() {
                 )
               : 'Allegro declined the campaign finish operation'
 
+          const retryableFinishError =
+            operation.process
+              .rejectionReasons.some(
+                (reason) =>
+                  typeof reason === 'object' &&
+                  reason !== null &&
+                  'code' in reason &&
+                  reason.code === 'BB0',
+              )
+
+          const nextRetryCount =
+            retryableFinishError
+              ? row.finishRetryCount + 1
+              : row.finishRetryCount
+
+          const retryDelaysMinutes =
+            [5, 15, 30, 60]
+
+          const nextRetryAfter =
+            retryableFinishError &&
+            nextRetryCount < 5
+              ? new Date(
+                  Date.now() +
+                    retryDelaysMinutes[
+                      row.finishRetryCount
+                    ] *
+                      60 *
+                      1000,
+                )
+              : null
+
           await db
             .update(listingCampaigns)
             .set({
+              finishOperationId: null,
+
               campaignStatus:
                 'FINISH_FAILED',
 
               finishError:
                 rejectionText,
+
+              finishRetryCount:
+                nextRetryCount,
+
+              finishRetryAfter:
+                nextRetryAfter,
 
               lastSyncedAt:
                 new Date(),
@@ -6162,6 +6431,15 @@ async function processPendingCampaignFinishOperations() {
               operationId:
                 row.finishOperationId,
 
+              retryable:
+                retryableFinishError,
+
+              retryCount:
+                nextRetryCount,
+
+              retryAfter:
+                nextRetryAfter,
+
               rejectionReasons:
                 operation.process
                   .rejectionReasons,
@@ -6170,7 +6448,6 @@ async function processPendingCampaignFinishOperations() {
 
           continue
         }
-
         console.warn(
           'Unknown Allegro finish operation status:',
           {

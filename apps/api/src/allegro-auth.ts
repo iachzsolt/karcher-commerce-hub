@@ -2257,6 +2257,128 @@ export async function getAllegroBadgeCampaigns(
       data.badgeCampaigns ?? [],
   }
 }
+export type AllegroBadge = {
+  offer: {
+    id: string
+  }
+  campaign: {
+    id: string
+    name: string
+  }
+  publication:
+    | {
+        type: string
+        from?: string | null
+        to?: string | null
+      }
+    | null
+  prices:
+    | {
+        bargain?:
+          | {
+              amount: string
+              currency: string
+            }
+          | null
+        market?:
+          | {
+              amount: string
+              currency: string
+            }
+          | null
+        subsidy?: unknown
+      }
+    | null
+  process: {
+    status: string
+    rejectionReasons: unknown[]
+  }
+  campaignStock?:
+    | {
+        quantity: number
+      }
+    | null
+}
+
+export type AllegroBadgesPayload = {
+  badges: AllegroBadge[]
+  count?: number
+  totalCount?: number
+}
+
+export async function getAllegroBadges(
+  options: {
+    offerId?: string
+    marketplaceId?: string
+  } = {},
+): Promise<AllegroBadgesPayload> {
+  const apiUrl = process.env.ALLEGRO_API_URL
+
+  if (!apiUrl) {
+    throw new Error('ALLEGRO_API_URL is missing')
+  }
+
+  await refreshAllegroSessionIfNeeded()
+
+  if (!currentSession) {
+    throw new Error(
+      'Allegro session is not available',
+    )
+  }
+
+  const url = new URL(
+    `${apiUrl}/sale/badges`,
+  )
+
+  url.searchParams.set(
+    'marketplace.id',
+    options.marketplaceId ?? 'allegro-hu',
+  )
+
+  if (options.offerId) {
+    url.searchParams.set(
+      'offer.id',
+      options.offerId,
+    )
+  }
+
+  url.searchParams.set('limit', '1000')
+
+  const response = await allegroFetch(
+    url.toString(),
+    {
+      headers: {
+        Authorization:
+          `Bearer ${currentSession.accessToken}`,
+
+        Accept:
+          'application/vnd.allegro.public.v1+json',
+
+        'Accept-Language':
+          'hu-HU',
+      },
+    },
+  )
+
+  const responseText =
+    await response.text()
+
+  if (!response.ok) {
+    throw new Error(
+      `Allegro badges loading failed (${response.status}): ${responseText}`,
+    )
+  }
+
+  const data =
+    JSON.parse(
+      responseText,
+    ) as AllegroBadgesPayload
+
+  return {
+    ...data,
+    badges: data.badges ?? [],
+  }
+}
 export type AllegroAlleDiscountCampaign = {
   id: string
   name: string
@@ -2621,6 +2743,61 @@ allegroAuth.get(
     }
   },
 )
+allegroAuth.get('/badges', async (context) => {
+  if (!currentSession) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Allegro account is not connected',
+      },
+      401,
+    )
+  }
+
+  const offerId =
+    context.req.query('offerId')?.trim()
+
+  if (!offerId) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'offerId is required',
+      },
+      400,
+    )
+  }
+
+  try {
+    const data =
+      await getAllegroBadges({
+        offerId,
+        marketplaceId: 'allegro-hu',
+      })
+
+    return context.json({
+      status: 'ok',
+      marketplace: 'allegro-hu',
+      offerId,
+      data,
+    })
+  } catch (error) {
+    console.error(
+      'Allegro badges loading failed:',
+      error,
+    )
+
+    return context.json(
+      {
+        status: 'error',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Could not load Allegro badges',
+      },
+      500,
+    )
+  }
+})
 allegroAuth.get('/campaigns', async (context) => {
   if (!currentSession) {
     return context.json(

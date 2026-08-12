@@ -145,19 +145,20 @@ function formatPrice(
 }
 
 function formatCampaignDiscount(
-  currentPriceMinor: number | null,
+  referencePriceMinor: number | null | undefined,
   campaignPriceValue: string | undefined,
 ) {
   if (
-    currentPriceMinor === null ||
-    currentPriceMinor <= 0 ||
+    referencePriceMinor === null ||
+    referencePriceMinor === undefined ||
+    referencePriceMinor <= 0 ||
     !campaignPriceValue
   ) {
     return '–'
   }
 
-  const currentPrice =
-    currentPriceMinor / 100
+  const referencePrice =
+    referencePriceMinor / 100
 
   const campaignPrice =
     Number(campaignPriceValue)
@@ -165,14 +166,14 @@ function formatCampaignDiscount(
   if (
     !Number.isFinite(campaignPrice) ||
     campaignPrice < 0 ||
-    campaignPrice > currentPrice
+    campaignPrice > referencePrice
   ) {
     return '–'
   }
 
   const discount =
-    ((currentPrice - campaignPrice) /
-      currentPrice) *
+    ((referencePrice - campaignPrice) /
+      referencePrice) *
     100
 
   return `${new Intl.NumberFormat(
@@ -314,14 +315,39 @@ function formatPreparationStatus(
   }
 
   if (
-    state.campaignStatus === 'ACTIVE' ||
-    state.applicationStatus === 'PROCESSED'
+    state.campaignStatus === 'DECLINED' ||
+    state.applicationStatus === 'DECLINED'
   ) {
+    return 'Elutasítva'
+  }
+
+  if (
+    state.campaignStatus === 'IN_VERIFICATION'
+  ) {
+    return 'Ellenőrzés alatt'
+  }
+
+  if (
+    state.campaignStatus ===
+      'WAITING_FOR_PUBLICATION'
+  ) {
+    return 'Közzétételre vár'
+  }
+
+  if (
+    state.campaignStatus === 'AWAITING_BADGE'
+  ) {
+    return 'Kampánystátuszra vár'
+  }
+
+  if (state.campaignStatus === 'ACTIVE') {
     return 'Aktív'
   }
 
-  if (state.applicationStatus === 'DECLINED') {
-    return 'Elutasítva'
+  if (
+    state.applicationStatus === 'PROCESSED'
+  ) {
+    return 'Feldolgozva'
   }
 
   if (state.applicationStatus === 'REQUESTED') {
@@ -365,11 +391,75 @@ function getPreparationError(
     return null
   }
 
-  return (
+  const rawError =
     state.finishError ??
-    state.applicationError ??
-    null
-  )
+    state.applicationError
+
+  if (!rawError) {
+    return null
+  }
+
+  try {
+    const parsed =
+      JSON.parse(rawError) as Array<{
+        code?: unknown
+        messages?: Array<{
+          text?: unknown
+        }>
+      }>
+
+    const error =
+      Array.isArray(parsed)
+        ? parsed[0]
+        : null
+
+    const code =
+      typeof error?.code === 'string'
+        ? error.code
+        : null
+
+    if (code === 'BA104') {
+      return (
+        'BA104 – A termék nem jogosult a kampányra, ' +
+        'vagy a megadott kampányár nem felel meg ' +
+        'az Allegro feltételeinek.'
+      )
+    }
+
+    if (code === 'BB0') {
+      return (
+        'BB0 – Átmeneti Allegro-hiba. ' +
+        'A rendszer automatikusan újrapróbálja.'
+      )
+    }
+
+    const message =
+      Array.isArray(error?.messages)
+        ? error.messages.find(
+            (item) =>
+              typeof item.text === 'string',
+          )?.text
+        : null
+
+    if (
+      code &&
+      typeof message === 'string'
+    ) {
+      return `${code} – ${message}`
+    }
+
+    if (typeof message === 'string') {
+      return message
+    }
+
+    if (code) {
+      return code
+    }
+  } catch {
+    // Nem JSON formátumú Allegro-hiba.
+  }
+
+  return rawError
 }
 function formatListingStatus(
   status: AllegroListing['publicationStatus'],
@@ -508,6 +598,63 @@ function budapestLocalToIso(
 
   return utcDate.toISOString()
 }
+function isCampaignCurrentlyNominatable(
+  campaign: AllegroCampaign,
+  now = new Date(),
+) {
+  if (
+    campaign.source === 'BADGE' &&
+    !campaign.eligibility.eligible
+  ) {
+    return false
+  }
+
+  const applicationType =
+    campaign.application.type.toUpperCase()
+
+  if (applicationType === 'NEVER') {
+    return false
+  }
+
+  const applicationFrom =
+    campaign.application.from
+      ? new Date(campaign.application.from)
+      : null
+
+  const applicationTo =
+    campaign.application.to
+      ? new Date(campaign.application.to)
+      : null
+
+  if (
+    applicationFrom &&
+    now < applicationFrom
+  ) {
+    return false
+  }
+
+  if (
+    applicationTo &&
+    now > applicationTo
+  ) {
+    return false
+  }
+
+  const publicationTo =
+    campaign.publication.to
+      ? new Date(campaign.publication.to)
+      : null
+
+  if (
+    publicationTo &&
+    now > publicationTo
+  ) {
+    return false
+  }
+
+  return true
+}
+
 function AllegroCampaignsPage() {
   const [campaigns, setCampaigns] =
     useState<AllegroCampaign[]>([])
@@ -764,6 +911,11 @@ function AllegroCampaignsPage() {
     setSchedulingPreparations,
   ] = useState(false)
 
+  const [
+    submittingPreparations,
+    setSubmittingPreparations,
+  ] = useState(false)
+
   const [loading, setLoading] =
     useState(true)
 
@@ -913,10 +1065,16 @@ function AllegroCampaignsPage() {
         )
       }
 
-      setCampaigns([
-        ...badgeCampaigns,
-        ...alleDiscountCampaigns,
-      ])
+      setCampaigns(
+        [
+          ...badgeCampaigns,
+          ...alleDiscountCampaigns,
+        ].filter((campaign) =>
+          isCampaignCurrentlyNominatable(
+            campaign,
+          ),
+        ),
+      )
 
       setListings(
         listingResult.data ?? [],
@@ -1209,13 +1367,45 @@ function AllegroCampaignsPage() {
       )
     }
   }
+  function isPreparationEditable(
+    listingId: string,
+  ) {
+    const preparation =
+      preparationStatuses[listingId]
+
+    return (
+      !preparation ||
+      (
+        preparation.applicationStatus ===
+          'PREPARED' &&
+        preparation.campaignStatus ===
+          'PREPARED'
+      )
+    )
+  }
+
+  function isPreparationSelectable(
+    listingId: string,
+  ) {
+    const preparation =
+      preparationStatuses[listingId]
+
+    return (
+      isPreparationEditable(listingId) ||
+      preparation?.applicationStatus ===
+        'SCHEDULED'
+    )
+  }
+
   function selectAllFilteredListings() {
     setSelectedListingIds(
       (current) =>
         Array.from(
           new Set([
             ...current,
-            ...selectableFilteredListingIds,
+            ...selectableFilteredListingIds.filter(
+              isPreparationSelectable,
+            ),
           ]),
         ),
     )
@@ -1586,6 +1776,8 @@ function AllegroCampaignsPage() {
       await loadPreparations(
         campaign.id,
       )
+
+      clearListingSelection()
     } catch (scheduleError) {
       console.error(
         'Campaign scheduling failed:',
@@ -1601,6 +1793,133 @@ function AllegroCampaignsPage() {
       setSchedulingPreparations(false)
     }
   }
+  async function submitSelectedCampaignOffers(
+    campaign: AllegroCampaign,
+  ) {
+    setPreparationMessage(null)
+
+    if (selectedListingIds.length === 0) {
+      setPreparationMessage(
+        'Jelölj ki legalább egy ajánlatot.',
+      )
+      return
+    }
+
+    const notScheduledListingIds =
+      selectedListingIds.filter(
+        (listingId) =>
+          preparationStatuses[listingId]
+            ?.applicationStatus !==
+          'SCHEDULED',
+      )
+
+    if (notScheduledListingIds.length > 0) {
+      setPreparationMessage(
+        'Beküldés előtt véglegesítsd az ütemezést minden kijelölt ajánlatnál.',
+      )
+      return
+    }
+
+    setSubmittingPreparations(true)
+
+    try {
+      const response = await fetch(
+        `http://localhost:3000/allegro/remote-campaigns/${campaign.id}/submit`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            listingIds:
+              selectedListingIds,
+          }),
+        },
+      )
+
+      const result = await response.json()
+
+      if (!response.ok) {
+        throw new Error(
+          result.message ??
+            'Nem sikerült beküldeni az ajánlatokat az Allegro kampányba.',
+        )
+      }
+
+      const results = Array.isArray(
+        result.results,
+      )
+        ? result.results
+        : []
+
+      const failedResults =
+        results.filter(
+          (item: {
+            status?: string
+          }) =>
+            item.status === 'FAILED',
+        )
+
+      const scheduledResults =
+        results.filter(
+          (item: {
+            status?: string
+          }) =>
+            item.status === 'SCHEDULED',
+        )
+
+      const submittedResults =
+        results.filter(
+          (item: {
+            status?: string
+          }) =>
+            item.status !== 'FAILED' &&
+            item.status !== 'SKIPPED' &&
+            item.status !== 'SCHEDULED',
+        )
+
+      if (failedResults.length > 0) {
+        const firstError =
+          failedResults[0]?.error
+
+        setPreparationMessage(
+          `${submittedResults.length} ajánlat beküldve, ${failedResults.length} sikertelen.${
+            firstError
+              ? ` Első hiba: ${firstError}`
+              : ''
+          }`,
+        )
+      } else if (
+        scheduledResults.length > 0
+      ) {
+        setPreparationMessage(
+          `${scheduledResults.length} ajánlat még ütemezve van, a kezdési időpontjuk nem érkezett el.`,
+        )
+      } else {
+        setPreparationMessage(
+          `${submittedResults.length} ajánlat beküldése elindult az Allegrón.`,
+        )
+      }
+
+      await loadPreparations(
+        campaign.id,
+      )
+    } catch (submitError) {
+      console.error(
+        'Campaign submission failed:',
+        submitError,
+      )
+
+      setPreparationMessage(
+        submitError instanceof Error
+          ? submitError.message
+          : 'Nem sikerült beküldeni az ajánlatokat az Allegro kampányba.',
+      )
+    } finally {
+      setSubmittingPreparations(false)
+    }
+  }
+
   function toggleListing(
     listingId: string,
   ) {
@@ -1611,6 +1930,10 @@ function AllegroCampaignsPage() {
         )
       }
 
+      if (!isPreparationSelectable(listingId)) {
+        return current
+      }
+
       return [...current, listingId]
     })
   }
@@ -1618,6 +1941,21 @@ function AllegroCampaignsPage() {
   useEffect(() => {
     void loadData()
   }, [])
+
+  const allSelectedPreparationsEditable =
+    selectedListingIds.length > 0 &&
+    selectedListingIds.every(
+      isPreparationEditable,
+    )
+
+  const allSelectedListingsScheduled =
+    selectedListingIds.length > 0 &&
+    selectedListingIds.every(
+      (listingId) =>
+        preparationStatuses[listingId]
+          ?.applicationStatus ===
+        'SCHEDULED',
+    )
 
   const hasInvalidSelectedCampaignPrice =
     selectedListingIds.some((listingId) => {
@@ -1708,13 +2046,11 @@ function AllegroCampaignsPage() {
           const selected =
             selectedCampaignId === campaign.id
 
-          const manualApplication =
-            campaign.application.type !== 'NEVER'
-
           const canSubmit =
             campaign.source === 'BADGE' &&
-            campaign.eligibility.eligible &&
-            manualApplication
+            isCampaignCurrentlyNominatable(
+              campaign,
+            )
 
           return (
             <article
@@ -2250,11 +2586,16 @@ function AllegroCampaignsPage() {
 
                           <th>30 napos min.</th>
                           <th>Kampányár</th>
-                          <th>Kedvezmény</th>
+                          <th className="campaign-discount-heading">
+                            Kedvezmény
+                            <span>
+                              30 napos minimumhoz képest
+                            </span>
+                          </th>
                           <th>Mettől</th>
                           <th>Meddig</th>
                           <th>Kampány státusz</th>
-                          <th>Ajánlat státusz</th>
+                          <th>Publikáció</th>
                         </tr>
                       </thead>
 
@@ -2371,6 +2712,9 @@ function AllegroCampaignsPage() {
                                         listing.priceMinor ===
                                           null
                                       )
+                                    ) ||
+                                    !isPreparationSelectable(
+                                      listing.id,
                                     )
                                   }
                                   onChange={() =>
@@ -2551,12 +2895,16 @@ function AllegroCampaignsPage() {
                               </td>
 
                               <td className="campaign-row-discount">
-                                {formatCampaignDiscount(
-                                  listing.priceMinor,
-                                  campaignPriceDrafts[
-                                    listing.id
-                                  ],
-                                )}
+                                <span className="campaign-discount-value">
+                                  {formatCampaignDiscount(
+                                    priceHistoryByListing[
+                                      listing.id
+                                    ]?.min30PriceMinor,
+                                    campaignPriceDrafts[
+                                      listing.id
+                                    ],
+                                  )}
+                                </span>
                               </td>
 
                               <td>
@@ -2848,7 +3196,8 @@ function AllegroCampaignsPage() {
                         className="secondary-button"
                         disabled={
                           savingPreparations ||
-                          selectedListingIds.length === 0
+                          selectedListingIds.length === 0 ||
+                          !allSelectedPreparationsEditable
                         }
                         onClick={() =>
                           void savePreparations(
@@ -2867,6 +3216,7 @@ function AllegroCampaignsPage() {
                         disabled={
                           schedulingPreparations ||
                           selectedListingIds.length === 0 ||
+                          !allSelectedPreparationsEditable ||
                           hasInvalidSelectedCampaignPrice
                         }
                         onClick={() =>
@@ -2885,10 +3235,18 @@ function AllegroCampaignsPage() {
                         className="campaign-primary-button"
                         disabled={
                           !canSubmit ||
-                          selectedListingIds.length === 0
+                          submittingPreparations ||
+                          !allSelectedListingsScheduled
+                        }
+                        onClick={() =>
+                          void submitSelectedCampaignOffers(
+                            campaign,
+                          )
                         }
                       >
-                        Kijelölt ajánlatok beküldése
+                        {submittingPreparations
+                          ? 'Beküldés…'
+                          : 'Kijelölt ajánlatok beküldése'}
                       </button>
                     </div>
                   </div>
