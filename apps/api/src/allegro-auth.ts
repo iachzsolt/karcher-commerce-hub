@@ -6219,6 +6219,7 @@ allegroAuth.post(
           | 'BLOCKED'
           | 'FAILED'
           | 'SKIPPED'
+          | 'PENDING'
         message?: string
       }> = []
 
@@ -6431,7 +6432,6 @@ allegroAuth.post(
           continue
         }
 
-        /*
         if (response.status === 202) {
           skipped += 1
 
@@ -6450,6 +6450,7 @@ allegroAuth.post(
           continue
         }
 
+    /*
          * Sikeresen kiment egy automatikus Commerce Hub ár.
          *
          * Ez nem külső Allegro-változás, ezért az új árat
