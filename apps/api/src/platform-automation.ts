@@ -1,4 +1,4 @@
-﻿import {
+import {
   and,
   eq,
 } from 'drizzle-orm'
@@ -203,12 +203,12 @@ export async function runInventoryRefreshAutomations(
       for (
         let index = 0;
         index < listingIds.length;
-        index += 100
+        index += 25
       ) {
         batches.push(
           listingIds.slice(
             index,
-            index + 100,
+            index + 25,
           ),
         )
       }
