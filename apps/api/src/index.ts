@@ -8181,9 +8181,25 @@ let runtimeInitialization:
   | Promise<void>
   | null = null
 
+function isAllegroSessionRestoreEnabled() {
+  return (
+    process.env
+      .COMMERCE_HUB_ALLEGRO_SESSION_RESTORE_ENABLED
+      ?.trim()
+      .toLowerCase() !== 'false'
+  )
+}
+
 export function initializeCommerceHubRuntime() {
   runtimeInitialization ??= (async () => {
     assertAccessConfiguration()
+
+    if (!isAllegroSessionRestoreEnabled()) {
+      console.log(
+        'Skipping Allegro session restore: disabled by configuration',
+      )
+      return
+    }
 
     await restoreAllegroSession()
   })()

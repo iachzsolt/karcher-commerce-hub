@@ -67,6 +67,7 @@ COMMERCE_HUB_AUTH_PROVIDER=google
 GOOGLE_OAUTH_CLIENT_ID=your-client-id.apps.googleusercontent.com
 COMMERCE_HUB_ALLOWED_EMAILS=viewer@example.com
 COMMERCE_HUB_ADMIN_EMAILS=admin@example.com
+COMMERCE_HUB_ALLEGRO_SESSION_RESTORE_ENABLED=false
 COMMERCE_HUB_SCHEDULERS_ENABLED=false
 COMMERCE_HUB_DENO_CRON_ENABLED=false
 ```
@@ -101,7 +102,9 @@ deployment side effect.
 Use `apps/api/.env.deno.example` as the runtime checklist. Enter credentials as
 Deno Deploy secrets in the Production context. Keep
 `COMMERCE_HUB_ADMIN_EMAILS` empty and both scheduler switches `false` for the
-first deployment.
+first deployment. Keep `COMMERCE_HUB_ALLEGRO_SESSION_RESTORE_ENABLED=false`
+as well so startup cannot restore or refresh the Allegro session during the
+initial read-only smoke test.
 
 ## Deno entry point and scheduled jobs
 
