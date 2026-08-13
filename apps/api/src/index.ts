@@ -8216,23 +8216,31 @@ export async function runMinuteScheduler() {
 }
 
 async function runMinuteSchedulerJobs() {
+  const isEnabled = (name: string) =>
+    process.env[name]?.trim().toLowerCase() === 'true'
+
   const jobs = [
     ['token refresh', refreshAllegroSessionIfNeeded],
-    ['price schedules', processPriceSchedulesAutomatically],
-    [
+    ...(isEnabled('COMMERCE_HUB_PRICE_SCHEDULES_ENABLED')
+      ? [['price schedules', processPriceSchedulesAutomatically] as const]
+      : []),
+    ...(isEnabled('COMMERCE_HUB_DATA_CONNECTION_SCHEDULES_ENABLED') ? [[
       'data connection schedules',
       processDueDataConnectionSchedules,
-    ],
-    ['campaign submissions', processDueCampaignSubmissions],
-    [
+    ] as const] : []),
+    ...(isEnabled('COMMERCE_HUB_CAMPAIGN_AUTOMATION_ENABLED') ? [[
+      'campaign submissions',
+      processDueCampaignSubmissions,
+    ] as const, [
       'campaign application statuses',
       processPendingCampaignApplications,
-    ],
-    ['campaign finishes', processDueCampaignFinishes],
-    [
+    ] as const, [
+      'campaign finishes',
+      processDueCampaignFinishes,
+    ] as const, [
       'campaign finish operations',
       processPendingCampaignFinishOperations,
-    ],
+    ] as const] : []),
   ] as const
 
   const results = await Promise.allSettled(
@@ -8250,6 +8258,17 @@ async function runMinuteSchedulerJobs() {
 }
 
 export async function runHourlyScheduler() {
+  if (
+    process.env.COMMERCE_HUB_CATALOG_SYNC_ENABLED
+      ?.trim()
+      .toLowerCase() !== 'true'
+  ) {
+    console.log(
+      'Skipping hourly scheduler: catalog sync is disabled',
+    )
+    return
+  }
+
   await runWithSchedulerLease(
     'hourly-scheduler',
     55 * 60 * 1000,
