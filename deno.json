@@ -1,0 +1,12 @@
+{
+  "nodeModulesDir": "manual",
+  "deploy": {
+    "install": "pnpm install --frozen-lockfile",
+    "build": "pnpm --dir packages/database build && pnpm --dir apps/api exec tsc",
+    "runtime": {
+      "type": "dynamic",
+      "entrypoint": "./apps/api/dist/deno.js",
+      "cwd": "."
+    }
+  }
+}

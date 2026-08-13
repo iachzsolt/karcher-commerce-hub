@@ -64,6 +64,18 @@ Authenticated users are read-only by default. Only addresses listed in
 `COMMERCE_HUB_ADMIN_EMAILS` can call non-GET API routes. This intentionally
 keeps the first colleague pilot read-only.
 
+The repository root `deno.json` is the source-controlled Deno Deploy app
+configuration. Use the repository root as the application directory. It
+installs the pnpm workspace, builds the database package and API, then starts
+`apps/api/dist/deno.js` as a dynamic application. There is intentionally no
+pre-deploy command, so database migrations cannot run as a deployment side
+effect.
+
+Use `apps/api/.env.deno.example` as the variable checklist. Enter credentials
+as Deno Deploy secrets in the Production context. Keep
+`COMMERCE_HUB_ADMIN_EMAILS` empty and both scheduler switches `false` for the
+first deployment. Build context does not need Allegro or database secrets.
+
 ## Deno entry point and scheduled jobs
 
 The Deno entry point is `apps/api/src/deno.ts`. It registers four UTC cron
@@ -87,8 +99,9 @@ Deno and in read-only smoke-test environments.
 1. Create the Cloudflare Pages project and Access application.
 2. Configure the Pages and API environment variables with both scheduler
    switches set to `false` and no administrator email addresses.
-3. Review and apply the scheduler lease migration.
-4. Verify the monorepo dependency build in a Deno runtime.
+3. Verify the monorepo dependency build in a Deno runtime.
+4. Review and apply the scheduler lease migration only after the read-only
+   deployment is stable.
 5. Persist OAuth authorization state so it survives runtime restarts.
 6. Add user identity to write audit events.
 7. Perform a read-only production smoke test before any Allegro write.
