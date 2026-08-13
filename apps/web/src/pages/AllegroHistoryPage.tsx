@@ -31,6 +31,129 @@ type AllegroHistoryResponse = {
   data: AllegroHistoryEvent[]
 }
 
+type SyncMetadata = {
+  historyGroupId?: string | null
+  publicationStatus?: string | null
+  targetStock?: number | null
+  remoteStock?: number | null
+  fromStock?: number | null
+  toStock?: number | null
+}
+
+function summarizeSyncEvents(events: AllegroHistoryEvent[]) {
+  let stockIncreased = 0
+  let stockDecreased = 0
+  let unchanged = 0
+  let activated = 0
+  let inactivated = 0
+  let skipped = 0
+  let pending = 0
+  let failed = 0
+
+  for (const event of events) {
+    const metadata = getSyncMetadata(event)
+    const action = event.oldValue ?? ''
+    const status = event.newValue ?? ''
+
+    if (
+      status === 'SUCCESS' &&
+      metadata?.fromStock !== null &&
+      metadata?.fromStock !== undefined &&
+      metadata?.toStock !== null &&
+      metadata?.toStock !== undefined
+    ) {
+      if (metadata.toStock > metadata.fromStock) stockIncreased++
+      if (metadata.toStock < metadata.fromStock) stockDecreased++
+    }
+
+    if (status === 'NO_CHANGE' || status === 'ALREADY_AUTO_PAUSED') unchanged++
+    if (
+      status === 'SUCCESS' &&
+      (action.includes('ACTIVATE') || action.includes('REACTIVATION'))
+    ) activated++
+    if (
+      status === 'SUCCESS' &&
+      (action === 'END' || action === 'ADOPT_AUTO_PAUSE')
+    ) inactivated++
+    if (action === 'SKIP') skipped++
+    if (status === 'PENDING' || status === 'REACTIVATION_IN_PROGRESS') pending++
+    if (status === 'FAILED') failed++
+  }
+
+  return {
+    total: events.length,
+    stockIncreased,
+    stockDecreased,
+    unchanged,
+    activated,
+    inactivated,
+    skipped,
+    pending,
+    failed,
+  }
+}
+
+type HistoryDayItem =
+  | {
+      kind: 'event'
+      occurredAt: string
+      event: AllegroHistoryEvent
+    }
+  | {
+      kind: 'sync-group'
+      occurredAt: string
+      groupId: string
+      events: AllegroHistoryEvent[]
+    }
+
+function groupDayEvents(items: AllegroHistoryEvent[]): HistoryDayItem[] {
+  const regularEvents: AllegroHistoryEvent[] = []
+  const syncGroups = new Map<string, AllegroHistoryEvent[]>()
+
+  for (const event of items) {
+    const historyGroupId = getSyncMetadata(event)?.historyGroupId
+
+    if (event.eventType !== 'SYNC' || !historyGroupId) {
+      regularEvents.push(event)
+      continue
+    }
+
+    const group = syncGroups.get(historyGroupId) ?? []
+    group.push(event)
+    syncGroups.set(historyGroupId, group)
+  }
+
+  return [
+    ...regularEvents.map((event): HistoryDayItem => ({
+      kind: 'event',
+      occurredAt: event.occurredAt,
+      event,
+    })),
+    ...[...syncGroups.entries()].map(
+      ([groupId, events]): HistoryDayItem => ({
+        kind: 'sync-group',
+        occurredAt: events[0].occurredAt,
+        groupId,
+        events,
+      }),
+    ),
+  ].sort(
+    (left, right) =>
+      new Date(right.occurredAt).getTime() -
+      new Date(left.occurredAt).getTime(),
+  )
+}
+
+function getSyncMetadata(event: AllegroHistoryEvent): SyncMetadata | null {
+  if (event.eventType !== 'SYNC' || !event.metadataJson) return null
+
+  try {
+    return JSON.parse(event.metadataJson) as SyncMetadata
+  } catch {
+    return null
+  }
+}
+
 function formatDateInput(date: Date) {
   const year = date.getFullYear()
   const month = String(date.getMonth() + 1).padStart(2, '0')
@@ -178,24 +301,37 @@ function getEventPresentation(event: AllegroHistoryEvent) {
     case 'SYNC': {
       const action = event.oldValue ?? ''
       const status = event.newValue ?? ''
+      const metadata = getSyncMetadata(event)
+      const hasStockChange =
+        metadata?.fromStock !== null &&
+        metadata?.fromStock !== undefined &&
+        metadata?.toStock !== null &&
+        metadata?.toStock !== undefined &&
+        metadata.fromStock !== metadata.toStock
       const title =
         status === 'NO_CHANGE'
           ? 'Nem igényelt frissítést'
           : status === 'FAILED'
             ? 'A frissítés sikertelen'
-            : action === 'END'
-              ? 'Az inaktiválás elindult'
-              : action.includes('ACTIVATE') ||
-                  action.includes('REACTIVATION')
-                ? 'Az aktiválás elindult'
-                : action === 'SKIP'
-                  ? 'Kimaradt a frissítésből'
-                  : status === 'PENDING' ||
-                      status === 'REACTIVATION_IN_PROGRESS'
-                    ? 'A frissítés feldolgozás alatt van'
+            : status === 'PENDING' ||
+                status === 'REACTIVATION_IN_PROGRESS'
+              ? 'A frissítés feldolgozás alatt van'
+              : status === 'SUCCESS' &&
+                  (action === 'END' || action === 'ADOPT_AUTO_PAUSE')
+                ? 'Sikeresen inaktiválva'
+                : status === 'SUCCESS' &&
+                    (action.includes('ACTIVATE') ||
+                      action.includes('REACTIVATION'))
+                  ? 'Sikeresen aktiválva'
+                  : action === 'SKIP'
+                    ? 'Kimaradt a frissítésből'
                     : 'Sikeresen frissült'
 
-      return { label: 'Szinkron', title, tone: 'sync' }
+      return {
+        label: hasStockChange ? 'Készlet' : 'Szinkron',
+        title,
+        tone: hasStockChange ? 'stock' : 'sync',
+      }
     }
     default:
       return { label: 'Változás', title: 'Az ajánlat adata megváltozott', tone: 'default' }
@@ -211,6 +347,90 @@ function formatSource(source: string) {
   if (source === 'MANUAL') return 'Kézi művelet'
 
   return source
+}
+
+function HistoryEventRow({ event }: { event: AllegroHistoryEvent }) {
+  const presentation = getEventPresentation(event)
+  const syncMetadata = getSyncMetadata(event)
+  const hasStockChange =
+    syncMetadata?.fromStock !== null &&
+    syncMetadata?.fromStock !== undefined &&
+    syncMetadata?.toStock !== null &&
+    syncMetadata?.toStock !== undefined &&
+    syncMetadata.fromStock !== syncMetadata.toStock
+  const oldValue = hasStockChange
+    ? String(syncMetadata.fromStock)
+    : formatEventValue(event, event.oldValue)
+  const newValue = hasStockChange
+    ? String(syncMetadata.toStock)
+    : formatEventValue(event, event.newValue)
+
+  return (
+    <article className="allegro-history-event">
+      <time>{formatTime(event.occurredAt)}</time>
+      <span
+        className={`allegro-history-event-type is-${presentation.tone}`}
+      >
+        {presentation.label}
+      </span>
+      <div className="allegro-history-event-main">
+        <strong>{presentation.title}</strong>
+        <span>{event.listingName}</span>
+        <small>SKU: {event.sku} · Ajánlat: {event.offerId}</small>
+      </div>
+      <div className="allegro-history-event-change">
+        <span>{oldValue}</span>
+        <b>→</b>
+        <strong>{newValue}</strong>
+      </div>
+      <span className="allegro-history-event-source">
+        {formatSource(event.source)}
+      </span>
+    </article>
+  )
+}
+
+function SyncHistoryGroup({ events }: { events: AllegroHistoryEvent[] }) {
+  const summary = summarizeSyncEvents(events)
+  const metrics = [
+    ['Vizsgált ajánlat', summary.total, 'total'],
+    ['Készlet nőtt', summary.stockIncreased, 'positive'],
+    ['Készlet csökkent', summary.stockDecreased, 'negative'],
+    ['Nem változott', summary.unchanged, 'neutral'],
+    ['Aktiválva', summary.activated, 'positive'],
+    ['Inaktiválva', summary.inactivated, 'negative'],
+    ['Kihagyva', summary.skipped, 'warning'],
+    ['Függőben', summary.pending, 'warning'],
+    ['Sikertelen', summary.failed, 'negative'],
+  ] as const
+
+  return (
+    <section className="allegro-history-sync-group">
+      <div className="allegro-history-sync-summary">
+        <div>
+          <strong>Automatikus készletfrissítés</strong>
+          <span>{formatTime(events[0].occurredAt)}</span>
+        </div>
+        <div className="allegro-history-sync-metrics">
+          {metrics.map(([label, value, tone]) =>
+            value > 0 || tone === 'total' ? (
+              <span
+                className={`allegro-history-sync-metric is-${tone}`}
+                key={label}
+              >
+                {label}: <strong>{value}</strong>
+              </span>
+            ) : null,
+          )}
+        </div>
+      </div>
+      <div className="allegro-history-events">
+        {events.map((event) => (
+          <HistoryEventRow event={event} key={event.id} />
+        ))}
+      </div>
+    </section>
+  )
 }
 
 function AllegroHistoryPage() {
@@ -272,7 +492,11 @@ function AllegroHistoryPage() {
   }, [from, to, validationError])
 
   useEffect(() => {
-    void loadHistory()
+    const timeoutId = window.setTimeout(() => {
+      void loadHistory()
+    }, 0)
+
+    return () => window.clearTimeout(timeoutId)
   }, [loadHistory])
 
   const dayGroups = useMemo(() => {
@@ -339,7 +563,7 @@ function AllegroHistoryPage() {
 
       <section className="allegro-history-content">
         <div className="allegro-history-summary">
-          <strong>{loading ? 'Betöltés…' : `${events.length} változás`}</strong>
+          <strong>{loading ? 'Betöltés…' : `${events.length} esemény`}</strong>
           <span>{from} – {to}</span>
         </div>
 
@@ -349,44 +573,26 @@ function AllegroHistoryPage() {
           </div>
         )}
 
-        {dayGroups.map(([day, items]) => (
-          <div className="allegro-history-day" key={day}>
-            <div className="allegro-history-day-heading">
-              <h3>{formatDay(day)}</h3>
-              <span>{items.length} változás</span>
-            </div>
+        {dayGroups.map(([day, items]) => {
+          const grouped = groupDayEvents(items)
 
-            <div className="allegro-history-events">
-              {items.map((event) => {
-                const presentation = getEventPresentation(event)
+          return (
+            <div className="allegro-history-day" key={day}>
+              <div className="allegro-history-day-heading">
+                <h3>{formatDay(day)}</h3>
+                <span>{items.length} esemény</span>
+              </div>
 
-                return (
-                  <article className="allegro-history-event" key={event.id}>
-                    <time>{formatTime(event.occurredAt)}</time>
-                    <span
-                      className={`allegro-history-event-type is-${presentation.tone}`}
-                    >
-                      {presentation.label}
-                    </span>
-                    <div className="allegro-history-event-main">
-                      <strong>{presentation.title}</strong>
-                      <span>{event.listingName}</span>
-                      <small>SKU: {event.sku} · Ajánlat: {event.offerId}</small>
-                    </div>
-                    <div className="allegro-history-event-change">
-                      <span>{formatEventValue(event, event.oldValue)}</span>
-                      <b>→</b>
-                      <strong>{formatEventValue(event, event.newValue)}</strong>
-                    </div>
-                    <span className="allegro-history-event-source">
-                      {formatSource(event.source)}
-                    </span>
-                  </article>
-                )
-              })}
+              {grouped.map((item) =>
+                item.kind === 'event' ? (
+                  <HistoryEventRow event={item.event} key={item.event.id} />
+                ) : (
+                  <SyncHistoryGroup events={item.events} key={item.groupId} />
+                ),
+              )}
             </div>
-          </div>
-        ))}
+          )
+        })}
 
         {truncated && (
           <div className="allegro-history-limit-note">

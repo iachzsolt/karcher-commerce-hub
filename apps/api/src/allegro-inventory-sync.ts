@@ -597,6 +597,9 @@ export async function syncAllegroInventoryRows(
   database: Database,
   rows: AllegroInventorySyncRow[],
   adapter: AllegroInventoryAdapter,
+  options?: {
+    historyGroupId?: string
+  },
 ) {
   const results:
     Array<Record<string, unknown>> = []
@@ -1087,6 +1090,12 @@ export async function syncAllegroInventoryRows(
             : 'REACTIVATION_CONFIRMED',
 
         status: 'SUCCESS',
+        ...(stockChanged
+          ? {
+              fromStock: row.remoteStock,
+              toStock: row.targetStock,
+            }
+          : {}),
       })
 
       continue
@@ -1219,6 +1228,12 @@ export async function syncAllegroInventoryRows(
             : 'ACTIVATE',
 
         status: 'SUCCESS',
+        ...(stockChanged
+          ? {
+              fromStock: row.remoteStock,
+              toStock: row.targetStock,
+            }
+          : {}),
       })
 
       continue
@@ -1277,6 +1292,8 @@ export async function syncAllegroInventoryRows(
         oldValue: action,
         newValue: status,
         metadataJson: JSON.stringify({
+          historyGroupId:
+            options?.historyGroupId ?? null,
           publicationStatus:
             row?.publicationStatus ?? null,
           targetStock: row?.targetStock ?? null,
@@ -1299,6 +1316,12 @@ export async function syncAllegroInventoryRows(
     await database
       .insert(allegroChangeEvents)
       .values(syncEvents)
+      .catch((error) => {
+        console.error(
+          'Allegro inventory history logging failed:',
+          error,
+        )
+      })
   }
 
   let refreshStatus =

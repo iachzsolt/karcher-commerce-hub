@@ -1,6 +1,6 @@
 ﻿import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Hono } from 'hono'
-import { and, desc, eq, lt } from 'drizzle-orm'
+import { and, desc, eq } from 'drizzle-orm'
 import { decryptSecret, encryptSecret } from './token-crypto.js'
 import { applyAllegroDesiredStock, resolveAllegroInventoryRows, syncAllegroInventoryRows } from './allegro-inventory-sync.js'
 import {
@@ -987,6 +987,7 @@ allegroAuth.post('/inventory-sync', async (context) => {
           confirm?: boolean
           connectionId?: string
           listingIds?: string[]
+          historyGroupId?: string
         }
       | null
 
@@ -1276,6 +1277,10 @@ allegroAuth.post('/inventory-sync', async (context) => {
               },
             }
           },
+      },
+      {
+        historyGroupId:
+          body.historyGroupId ?? randomUUID(),
       },
     )
 
@@ -5262,17 +5267,6 @@ allegroAuth.post('/sync', async (context) => {
 
   const db = createDatabase(databaseUrl)
   const now = new Date()
-
-  await db
-    .delete(allegroChangeEvents)
-    .where(
-      lt(
-        allegroChangeEvents.occurredAt,
-        new Date(
-          now.getTime() - 30 * 24 * 60 * 60 * 1000,
-        ),
-      ),
-    )
 
   const [allegroPlatform] = await db
     .select({

@@ -2,6 +2,7 @@ import {
   and,
   eq,
 } from 'drizzle-orm'
+import { randomUUID } from 'node:crypto'
 
 import {
   createDatabase,
@@ -220,6 +221,7 @@ export async function runInventoryRefreshAutomations(
         status: number
         details: unknown
       }> = []
+      const historyGroupId = randomUUID()
 
       for (
         let batchIndex = 0;
@@ -243,6 +245,7 @@ export async function runInventoryRefreshAutomations(
                   confirm: true,
                   connectionId,
                   listingIds: batch,
+                  historyGroupId,
                 }),
             },
           )

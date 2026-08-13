@@ -141,6 +141,26 @@ const db = databaseUrl
   ? createDatabase(databaseUrl)
   : null
 
+const ALLEGRO_HISTORY_RETENTION_MS =
+  30 * 24 * 60 * 60 * 1000
+const ALLEGRO_HISTORY_CLEANUP_INTERVAL_MS =
+  24 * 60 * 60 * 1000
+
+async function cleanupExpiredAllegroHistory() {
+  if (!db) return
+
+  await db
+    .delete(allegroChangeEvents)
+    .where(
+      lt(
+        allegroChangeEvents.occurredAt,
+        new Date(
+          Date.now() - ALLEGRO_HISTORY_RETENTION_MS,
+        ),
+      ),
+    )
+}
+
 app.get('/', (context) => {
   return context.json({
     name: 'Kärcher Commerce Hub API',
@@ -8116,6 +8136,24 @@ async function runAutomaticAllegroCatalogSync() {
 }
 async function startServer() {
   await restoreAllegroSession()
+
+  await cleanupExpiredAllegroHistory().catch((error) => {
+    console.error(
+      'Initial Allegro history cleanup failed:',
+      error,
+    )
+  })
+
+  const allegroHistoryCleanupTimer = setInterval(() => {
+    void cleanupExpiredAllegroHistory().catch((error) => {
+      console.error(
+        'Automatic Allegro history cleanup failed:',
+        error,
+      )
+    })
+  }, ALLEGRO_HISTORY_CLEANUP_INTERVAL_MS)
+
+  allegroHistoryCleanupTimer.unref()
 
   const tokenRefreshTimer = setInterval(() => {
     void refreshAllegroSessionIfNeeded().catch(

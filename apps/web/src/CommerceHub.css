@@ -1685,6 +1685,72 @@ textarea {
   border-top: 1px solid #eef1f4;
 }
 
+.allegro-history-sync-group {
+  border-top: 1px solid #dfe6ee;
+}
+
+.allegro-history-sync-group + .allegro-history-event {
+  border-top: 1px solid #eef1f4;
+}
+
+.allegro-history-sync-summary {
+  display: grid;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid #e4eaf1;
+  background: #f4f8fc;
+}
+
+.allegro-history-sync-summary > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.allegro-history-sync-summary > div:first-child span {
+  color: #667085;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.allegro-history-sync-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.allegro-history-sync-metric {
+  padding: 5px 9px;
+  border: 1px solid #d8e0e9;
+  border-radius: 999px;
+  background: #fff;
+  color: #475467;
+  font-size: 12px;
+}
+
+.allegro-history-sync-metric.is-positive {
+  border-color: #b8dec2;
+  background: #edf9f0;
+  color: #26763a;
+}
+
+.allegro-history-sync-metric.is-negative {
+  border-color: #efc7c7;
+  background: #fff3f3;
+  color: #a33737;
+}
+
+.allegro-history-sync-metric.is-warning {
+  border-color: #ead7a4;
+  background: #fff9e8;
+  color: #865f00;
+}
+
+.allegro-history-sync-metric.is-neutral {
+  background: #f8fafc;
+}
+
 .allegro-history-event time {
   color: #667085;
   font-size: 13px;
