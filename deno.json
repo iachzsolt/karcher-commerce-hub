@@ -1,7 +1,7 @@
 {
   "nodeModulesDir": "manual",
   "deploy": {
-    "install": "pnpm install --frozen-lockfile",
+    "install": "pnpm install --frozen-lockfile --prod=false",
     "build": "pnpm --dir packages/database build && pnpm --dir apps/api exec tsc",
     "runtime": {
       "type": "dynamic",
