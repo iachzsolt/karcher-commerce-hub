@@ -2,7 +2,7 @@
   "nodeModulesDir": "manual",
   "deploy": {
     "install": "pnpm install --frozen-lockfile --prod=false",
-    "build": "pnpm --dir packages/database build && pnpm --dir apps/api exec tsc",
+    "build": "node packages/database/node_modules/typescript/bin/tsc -p packages/database/tsconfig.json && node apps/api/node_modules/typescript/bin/tsc -p apps/api/tsconfig.json",
     "runtime": {
       "type": "dynamic",
       "entrypoint": "./apps/api/dist/deno.js",
