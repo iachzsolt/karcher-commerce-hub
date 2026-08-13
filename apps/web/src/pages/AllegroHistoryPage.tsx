@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-
-const API_BASE_URL = 'http://localhost:3000'
+import { API_BASE_URL } from '../config/api'
 const DAY_MS = 24 * 60 * 60 * 1000
 
 type AllegroHistoryEvent = {

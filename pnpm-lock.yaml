@@ -31,6 +31,9 @@ importers:
       hono:
         specifier: ^4.12.33
         version: 4.12.33
+      jose:
+        specifier: ^6.2.8
+        version: 6.2.8
     devDependencies:
       '@types/node':
         specifier: ^24.13.3
@@ -1439,6 +1442,9 @@ packages:
   isexe@2.0.0:
     resolution: {integrity: sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw==}
 
+  jose@6.2.8:
+    resolution: {integrity: sha512-Bsdjwm3Qsd/P0jR+BHDe3LytDfY7WBq2HmCCLIwuVRHMuEC9ae7/R474GIUdF1NgCyZjzVo/A9DOiOBtXq8ZoQ==}
+
   js-tokens@4.0.0:
     resolution: {integrity: sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==}
 
@@ -2842,6 +2848,8 @@ snapshots:
       is-extglob: 2.1.1
 
   isexe@2.0.0: {}
+
+  jose@6.2.8: {}
 
   js-tokens@4.0.0: {}
 

@@ -2,6 +2,7 @@ import {
   useEffect,
   useState,
 } from 'react'
+import { API_BASE_URL } from '../config/api'
 
 type CampaignMessage = {
   text: string
@@ -973,16 +974,16 @@ function AllegroCampaignsPage() {
         priceHistoryResponse,
       ] = await Promise.all([
         fetch(
-          'http://localhost:3000/auth/allegro/campaigns',
+          `${API_BASE_URL}/auth/allegro/campaigns`,
         ),
         fetch(
-          'http://localhost:3000/auth/allegro/alle-discount/campaigns',
+          `${API_BASE_URL}/auth/allegro/alle-discount/campaigns`,
         ),
         fetch(
-          'http://localhost:3000/allegro/listings',
+          `${API_BASE_URL}/allegro/listings`,
         ),
         fetch(
-          'http://localhost:3000/allegro/listing-price-history-summary',
+          `${API_BASE_URL}/allegro/listing-price-history-summary`,
         ),
       ])
 
@@ -1152,7 +1153,7 @@ function AllegroCampaignsPage() {
     campaignId: string,
   ) {
     const response = await fetch(
-      `http://localhost:3000/allegro/listing-price-history-summary?campaignId=${encodeURIComponent(
+      `${API_BASE_URL}/allegro/listing-price-history-summary?campaignId=${encodeURIComponent(
         campaignId,
       )}`,
     )
@@ -1184,7 +1185,7 @@ function AllegroCampaignsPage() {
     campaignId: string,
   ) {
     const response = await fetch(
-      `http://localhost:3000/allegro/remote-campaigns/${campaignId}/preparations`,
+      `${API_BASE_URL}/allegro/remote-campaigns/${campaignId}/preparations`,
     )
 
     const result = await response.json()
@@ -1350,7 +1351,7 @@ function AllegroCampaignsPage() {
         )
 
         const response = await fetch(
-          `http://localhost:3000/auth/allegro/alle-discount/${encodeURIComponent(
+          `${API_BASE_URL}/auth/allegro/alle-discount/${encodeURIComponent(
             campaign.id,
           )}/eligible-offers?meetsConditions=false`,
         )
@@ -1720,7 +1721,7 @@ function AllegroCampaignsPage() {
 
     try {
       const response = await fetch(
-        `http://localhost:3000/allegro/remote-campaigns/${campaign.id}/preparations`,
+        `${API_BASE_URL}/allegro/remote-campaigns/${campaign.id}/preparations`,
         {
           method: 'PUT',
           headers: {
@@ -1832,7 +1833,7 @@ function AllegroCampaignsPage() {
 
     try {
       const response = await fetch(
-        `http://localhost:3000/allegro/remote-campaigns/${campaign.id}/schedule`,
+        `${API_BASE_URL}/allegro/remote-campaigns/${campaign.id}/schedule`,
         {
           method: 'POST',
           headers: {
@@ -1909,7 +1910,7 @@ function AllegroCampaignsPage() {
 
     try {
       const response = await fetch(
-        `http://localhost:3000/allegro/remote-campaigns/${campaign.id}/submit`,
+        `${API_BASE_URL}/allegro/remote-campaigns/${campaign.id}/submit`,
         {
           method: 'POST',
           headers: {

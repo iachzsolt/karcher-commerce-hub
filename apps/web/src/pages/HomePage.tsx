@@ -1,5 +1,6 @@
 ﻿import { useEffect, useState } from 'react'
 import '../CommerceHub.css'
+import { API_BASE_URL } from '../config/api'
 
 type HealthResponse = {
   status: string
@@ -828,15 +829,15 @@ function HomePage({
           priceHistoryResponse,
           priceSchedulesResponse,
         ] = await Promise.all([
-          fetch('http://localhost:3000/health'),
-          fetch('http://localhost:3000/platforms'),
-          fetch('http://localhost:3000/products'),
-          fetch('http://localhost:3000/allegro/listings'),
+          fetch(`${API_BASE_URL}/health`),
+          fetch(`${API_BASE_URL}/platforms`),
+          fetch(`${API_BASE_URL}/products`),
+          fetch(`${API_BASE_URL}/allegro/listings`),
           fetch(
-            'http://localhost:3000/allegro/listing-price-history-summary',
+            `${API_BASE_URL}/allegro/listing-price-history-summary`,
           ),
           fetch(
-            'http://localhost:3000/allegro/listing-price-schedules',
+            `${API_BASE_URL}/allegro/listing-price-schedules`,
           ),
         ])
 
@@ -905,7 +906,7 @@ function HomePage({
 
         try {
           const importIssuesResponse = await fetch(
-            'http://localhost:3000/auth/allegro/import-issues',
+            `${API_BASE_URL}/auth/allegro/import-issues`,
           )
 
           if (importIssuesResponse.ok) {
@@ -946,7 +947,7 @@ function HomePage({
 
     try {
       const syncResponse = await fetch(
-        'http://localhost:3000/auth/allegro/sync',
+        `${API_BASE_URL}/auth/allegro/sync`,
         {
           method: 'POST',
         },
@@ -972,10 +973,10 @@ function HomePage({
         issuesResponse,
       ] = await Promise.all([
         fetch(
-          'http://localhost:3000/allegro/listings',
+          `${API_BASE_URL}/allegro/listings`,
         ),
         fetch(
-          'http://localhost:3000/auth/allegro/import-issues',
+          `${API_BASE_URL}/auth/allegro/import-issues`,
         ),
       ])
 
@@ -1048,7 +1049,7 @@ function HomePage({
 
     try {
       const response = await fetch(
-        `http://localhost:3000/allegro/listings/${listing.id}/desired-price`,
+        `${API_BASE_URL}/allegro/listings/${listing.id}/desired-price`,
         {
           method: 'PATCH',
           headers: {
@@ -1132,7 +1133,7 @@ function HomePage({
 
     try {
       const response = await fetch(
-        `http://localhost:3000/allegro/listings/${listing.id}/desired-stock`,
+        `${API_BASE_URL}/allegro/listings/${listing.id}/desired-stock`,
         {
           method: 'PATCH',
           headers: {
@@ -1202,7 +1203,7 @@ function HomePage({
 
     try {
       const response = await fetch(
-        `http://localhost:3000/allegro/listings/${listing.id}/stock-lock`,
+        `${API_BASE_URL}/allegro/listings/${listing.id}/stock-lock`,
         {
           method: 'PATCH',
           headers: {
@@ -1271,7 +1272,7 @@ function HomePage({
 
     try {
       const response = await fetch(
-        `http://localhost:3000/allegro/listings/${listing.id}/desired-status`,
+        `${API_BASE_URL}/allegro/listings/${listing.id}/desired-status`,
         {
           method: 'PATCH',
           headers: {
@@ -1616,7 +1617,7 @@ Hibás: ${failed}`,
   }
   const loadPriceSchedules = async () => {
     const response = await fetch(
-      'http://localhost:3000/allegro/listing-price-schedules',
+      `${API_BASE_URL}/allegro/listing-price-schedules`,
     )
 
     const result =
@@ -1794,8 +1795,8 @@ Hibás: ${failed}`,
 
       const response = await fetch(
         editing
-          ? `http://localhost:3000/auth/allegro/price-schedule/${editingPriceScheduleId}`
-          : 'http://localhost:3000/allegro/listing-price-schedules',
+          ? `${API_BASE_URL}/auth/allegro/price-schedule/${editingPriceScheduleId}`
+          : `${API_BASE_URL}/allegro/listing-price-schedules`,
         {
           method: editing ? 'PATCH' : 'POST',
           headers: {
@@ -1869,7 +1870,7 @@ Hibás: ${failed}`,
 
     try {
       const response = await fetch(
-        `http://localhost:3000/auth/allegro/price-schedule/${schedule.id}`,
+        `${API_BASE_URL}/auth/allegro/price-schedule/${schedule.id}`,
         { method: 'DELETE' },
       )
 
@@ -1931,7 +1932,7 @@ Hibás: ${failed}`,
 
     try {
       const response = await fetch(
-        'http://localhost:3000/allegro/listings/discard-desired-differences',
+        `${API_BASE_URL}/allegro/listings/discard-desired-differences`,
         {
           method: 'POST',
         },
@@ -1952,7 +1953,7 @@ Hibás: ${failed}`,
       }
 
       const listingsResponse = await fetch(
-        'http://localhost:3000/allegro/listings',
+        `${API_BASE_URL}/allegro/listings`,
       )
 
       if (!listingsResponse.ok) {
@@ -2286,7 +2287,7 @@ Biztosan szinkronizálod őket az Allegróval?`,
 
     try {
       const response = await fetch(
-        'http://localhost:3000/auth/allegro/sync-selected',
+        `${API_BASE_URL}/auth/allegro/sync-selected`,
         {
           method: 'POST',
           headers: {
@@ -2419,7 +2420,7 @@ ${changes.join('\n')}`,
     try {
       if (priceChanged) {
         const response = await fetch(
-          `http://localhost:3000/auth/allegro/push-price/${listing.id}`,
+          `${API_BASE_URL}/auth/allegro/push-price/${listing.id}`,
           { method: 'POST' },
         )
 
@@ -2437,7 +2438,7 @@ ${changes.join('\n')}`,
 
       if (stockChanged) {
         const response = await fetch(
-          `http://localhost:3000/auth/allegro/push-stock/${listing.id}`,
+          `${API_BASE_URL}/auth/allegro/push-stock/${listing.id}`,
           { method: 'POST' },
         )
 
@@ -2455,7 +2456,7 @@ ${changes.join('\n')}`,
 
       if (publicationChanged) {
         const response = await fetch(
-          `http://localhost:3000/auth/allegro/push-status/${listing.id}`,
+          `${API_BASE_URL}/auth/allegro/push-status/${listing.id}`,
           {
             method: 'POST',
           },
@@ -2475,7 +2476,7 @@ ${changes.join('\n')}`,
       }
 
       const syncResponse = await fetch(
-        'http://localhost:3000/auth/allegro/sync',
+        `${API_BASE_URL}/auth/allegro/sync`,
         { method: 'POST' },
       )
 
@@ -2486,7 +2487,7 @@ ${changes.join('\n')}`,
       }
 
       const listingResponse = await fetch(
-        'http://localhost:3000/allegro/listings',
+        `${API_BASE_URL}/allegro/listings`,
       )
 
       if (!listingResponse.ok) {
@@ -2954,7 +2955,7 @@ ${changes.join('\n')}`,
                             href={
                               'http:' +
                               '//' +
-                              'localhost:3000/auth/allegro/open-offer/' +
+                              `${API_BASE_URL}/auth/allegro/open-offer/` +
                               encodeURIComponent(listing.offerId)
                             }
                             target="_blank"

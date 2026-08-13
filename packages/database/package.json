@@ -4,10 +4,17 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./schema": "./src/schema.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./schema": {
+      "types": "./dist/schema.d.ts",
+      "import": "./dist/schema.js"
+    }
   },
   "scripts": {
+    "build": "tsc",
     "typecheck": "tsc --noEmit",
     "seed": "tsx src/seed.ts"
   },

@@ -1211,3 +1211,34 @@ export const dataConnectionSchedules = pgTable(
     ).on(table.nextRunAt),
   ],
 )
+
+/* ============================================================
+   SCHEDULER LEASES
+   Cross-runtime lock for at-least-once cron delivery
+   ============================================================ */
+
+export const schedulerLeases = pgTable(
+  'scheduler_leases',
+  {
+    name: text('name')
+      .primaryKey(),
+
+    ownerId: uuid('owner_id')
+      .notNull(),
+
+    lockedUntil: timestamp('locked_until', {
+      withTimezone: true,
+    }).notNull(),
+
+    updatedAt: timestamp('updated_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index('scheduler_leases_locked_until_index').on(
+      table.lockedUntil,
+    ),
+  ],
+)

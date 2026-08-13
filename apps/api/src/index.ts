@@ -1,6 +1,5 @@
 import 'dotenv/config'
 import { randomUUID } from 'node:crypto'
-import { serve } from '@hono/node-server'
 import {
   createDatabase,
   allegroChangeEvents,
@@ -18,9 +17,20 @@ import {
   platforms,
   productIdentifiers,
   products,
+  schedulerLeases,
 } from '@karcher-commerce-hub/database'
 import { neon } from '@neondatabase/serverless'
-import { and, count, desc, eq, gte, lt, min, or } from 'drizzle-orm'
+import {
+  and,
+  count,
+  desc,
+  eq,
+  gte,
+  lt,
+  lte,
+  min,
+  or,
+} from 'drizzle-orm'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import {
@@ -39,18 +49,43 @@ import {
   restoreAllegroSession,
   submitOfferToAllegroCampaign,
 } from './allegro-auth.js'
+import {
+  accessAuthMiddleware,
+  assertAccessConfiguration,
+  type AccessVariables,
+} from './access-auth.js'
 
-const app = new Hono()
+export const app = new Hono<{
+  Variables: AccessVariables
+}>()
+
+const localWebOrigins = [
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+]
+
+const configuredWebOrigins = (
+  process.env.COMMERCE_HUB_WEB_ORIGINS ?? ''
+)
+  .split(',')
+  .map((origin) => origin.trim().replace(/\/+$/, ''))
+  .filter(Boolean)
+
+const allowedWebOrigins = [
+  ...new Set([
+    ...localWebOrigins,
+    ...configuredWebOrigins,
+  ]),
+]
 
 app.use(
   '*',
   cors({
-    origin: [
-      'http://localhost:5173',
-      'http://127.0.0.1:5173',
-    ],
+    origin: allowedWebOrigins,
   }),
 )
+
+app.use('*', accessAuthMiddleware)
 
 app.route('/auth/allegro', allegroAuth)
 app.route('/data-connections', dataConnectionsApi)
@@ -124,17 +159,6 @@ async function processPriceSchedulesAutomatically() {
   }
 }
 
-const priceScheduleProcessorTimer =
-  setInterval(
-    () => {
-      void processPriceSchedulesAutomatically()
-    },
-    PRICE_SCHEDULE_PROCESS_INTERVAL_MS,
-  )
-
-priceScheduleProcessorTimer.unref()
-
-
 const databaseUrl = process.env.DATABASE_URL
 
 const db = databaseUrl
@@ -172,7 +196,8 @@ app.get('/health', (context) => {
   return context.json({
     status: 'ok',
     service: 'commerce-hub-api',
-    environment: 'development',
+    environment:
+      process.env.NODE_ENV ?? 'development',
     timestamp: new Date().toISOString(),
   })
 })
@@ -7700,8 +7725,6 @@ async function processDueCampaignSubmissions() {
     campaignSchedulerRunning = false
   }
 }
-const port = 3000
-
 let automaticAllegroSyncRunning = false
 
 async function runAutomaticAllegroSync() {
@@ -8134,129 +8157,154 @@ async function runAutomaticAllegroCatalogSync() {
       false
   }
 }
-async function startServer() {
-  await restoreAllegroSession()
+let runtimeInitialization:
+  | Promise<void>
+  | null = null
 
-  await cleanupExpiredAllegroHistory().catch((error) => {
-    console.error(
-      'Initial Allegro history cleanup failed:',
-      error,
-    )
-  })
+export function initializeCommerceHubRuntime() {
+  runtimeInitialization ??= (async () => {
+    assertAccessConfiguration()
 
-  const allegroHistoryCleanupTimer = setInterval(() => {
-    void cleanupExpiredAllegroHistory().catch((error) => {
-      console.error(
-        'Automatic Allegro history cleanup failed:',
-        error,
-      )
-    })
-  }, ALLEGRO_HISTORY_CLEANUP_INTERVAL_MS)
+    await restoreAllegroSession()
+  })()
 
-  allegroHistoryCleanupTimer.unref()
+  return runtimeInitialization
+}
 
-  const tokenRefreshTimer = setInterval(() => {
-    void refreshAllegroSessionIfNeeded().catch(
-      (error) => {
-        console.error(
-          'Automatic Allegro token refresh failed:',
-          error,
-        )
-      },
-    )
-  }, 60 * 1000)
-
-  tokenRefreshTimer.unref()
-
-  const allegroListingSyncTimer =
-    setInterval(() => {
-      void runAutomaticAllegroSync()
-    }, 6 * 60 * 60 * 1000)
-
-  allegroListingSyncTimer.unref()
-  const allegroCatalogSyncTimer =
-    setInterval(() => {
-      void runAutomaticAllegroCatalogSync()
-    }, ALLEGRO_CATALOG_SYNC_INTERVAL_MS)
-
-  allegroCatalogSyncTimer.unref()
-
-  void runAutomaticAllegroCatalogSync()
-
-  void runAutomaticAllegroSync()
-
-  const dataConnectionScheduleTimer =
-  setInterval(() => {
-    void processDueDataConnectionSchedules()
-      .catch((error) => {
-        console.error(
-          'Data connection schedule processor failed:',
-          error,
-        )
-      })
-  }, 60 * 1000)
-
-dataConnectionScheduleTimer.unref()
-
-void processDueDataConnectionSchedules()
-  .catch((error) => {
-    console.error(
-      'Initial data connection schedule processing failed:',
-      error,
-    )
-  })
-const campaignSubmissionTimer =
-    setInterval(() => {
-      void processDueCampaignSubmissions()
-    }, 60 * 1000)
-
-  campaignSubmissionTimer.unref()
-
-  const campaignApplicationStatusTimer =
-    setInterval(() => {
-      void processPendingCampaignApplications()
-    }, 60 * 1000)
-
-  campaignApplicationStatusTimer.unref()
-
-  const campaignFinishSchedulerTimer =
-    setInterval(() => {
-      void processDueCampaignFinishes()
-    }, 60 * 1000)
-
-  campaignFinishSchedulerTimer.unref()
-
-  const campaignFinishOperationTimer =
-    setInterval(() => {
-      void processPendingCampaignFinishOperations()
-    }, 60 * 1000)
-
-  campaignFinishOperationTimer.unref()
-
-  serve(
-    {
-      fetch: app.fetch,
-      port,
-    },
-    (info) => {
-      console.log(
-        `Commerce Hub API: http://localhost:${info.port}`,
-      )
-      console.log(
-        `Health check: http://localhost:${info.port}/health`,
-      )
-      console.log(
-        `Database health: http://localhost:${info.port}/database/health`,
-      )
-      console.log(
-        `Platforms: http://localhost:${info.port}/platforms`,
-      )
-      console.log(
-        `Products: http://localhost:${info.port}/products`,
-      )
-    },
+export async function runMinuteScheduler() {
+  await runWithSchedulerLease(
+    'minute-scheduler',
+    55 * 1000,
+    runMinuteSchedulerJobs,
   )
 }
 
-void startServer()
+async function runMinuteSchedulerJobs() {
+  const jobs = [
+    ['token refresh', refreshAllegroSessionIfNeeded],
+    ['price schedules', processPriceSchedulesAutomatically],
+    [
+      'data connection schedules',
+      processDueDataConnectionSchedules,
+    ],
+    ['campaign submissions', processDueCampaignSubmissions],
+    [
+      'campaign application statuses',
+      processPendingCampaignApplications,
+    ],
+    ['campaign finishes', processDueCampaignFinishes],
+    [
+      'campaign finish operations',
+      processPendingCampaignFinishOperations,
+    ],
+  ] as const
+
+  const results = await Promise.allSettled(
+    jobs.map(([, job]) => job()),
+  )
+
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      console.error(
+        `Scheduled ${jobs[index][0]} job failed:`,
+        result.reason,
+      )
+    }
+  })
+}
+
+export async function runHourlyScheduler() {
+  await runWithSchedulerLease(
+    'hourly-scheduler',
+    55 * 60 * 1000,
+    runAutomaticAllegroCatalogSync,
+  )
+}
+
+export async function runSixHourlyScheduler() {
+  await runWithSchedulerLease(
+    'six-hour-scheduler',
+    5 * 60 * 60 * 1000 + 55 * 60 * 1000,
+    runAutomaticAllegroSync,
+  )
+}
+
+export async function runDailyMaintenance() {
+  await runWithSchedulerLease(
+    'daily-maintenance',
+    23 * 60 * 60 * 1000,
+    cleanupExpiredAllegroHistory,
+  )
+}
+
+async function runWithSchedulerLease(
+  name: string,
+  leaseDurationMs: number,
+  job: () => Promise<void>,
+) {
+  if (!db) {
+    console.warn(
+      `Skipping ${name}: database is not configured`,
+    )
+    return
+  }
+
+  const ownerId = randomUUID()
+  const now = new Date()
+  const lockedUntil = new Date(
+    now.getTime() + leaseDurationMs,
+  )
+
+  let acquired:
+    | Array<{ ownerId: string }>
+    | null = null
+
+  try {
+    acquired = await db
+      .insert(schedulerLeases)
+      .values({
+        name,
+        ownerId,
+        lockedUntil,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: schedulerLeases.name,
+        set: {
+          ownerId,
+          lockedUntil,
+          updatedAt: now,
+        },
+        setWhere: lte(
+          schedulerLeases.lockedUntil,
+          now,
+        ),
+      })
+      .returning({
+        ownerId: schedulerLeases.ownerId,
+      })
+  } catch (error) {
+    console.error(
+      `Skipping ${name}: scheduler lease acquisition failed`,
+      error,
+    )
+    return
+  }
+
+  if (acquired[0]?.ownerId !== ownerId) {
+    console.log(
+      `Skipping ${name}: scheduler lease is held`,
+    )
+    return
+  }
+
+  await job()
+}
+
+export const schedulerIntervals = {
+  minute: PRICE_SCHEDULE_PROCESS_INTERVAL_MS,
+  hourly: ALLEGRO_CATALOG_SYNC_INTERVAL_MS,
+  sixHourly: 6 * 60 * 60 * 1000,
+  daily: ALLEGRO_HISTORY_CLEANUP_INTERVAL_MS,
+} as const
 

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-
-const API_BASE_URL = 'http://localhost:3000'
+import { API_BASE_URL } from '../config/api'
 
 type RangeMode = 'week' | 'month' | 'year' | 'custom'
 type ChartMode = 'revenue' | 'orders'
