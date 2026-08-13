@@ -52,6 +52,7 @@ import {
 import {
   accessAuthMiddleware,
   assertAccessConfiguration,
+  getCommerceHubUser,
   type AccessVariables,
 } from './access-auth.js'
 
@@ -86,6 +87,25 @@ app.use(
 )
 
 app.use('*', accessAuthMiddleware)
+
+app.get('/auth/session', (context) => {
+  const user = getCommerceHubUser(context)
+
+  if (!user) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Authentication is required',
+      },
+      401,
+    )
+  }
+
+  return context.json({
+    status: 'ok',
+    user,
+  })
+})
 
 app.route('/auth/allegro', allegroAuth)
 app.route('/data-connections', dataConnectionsApi)

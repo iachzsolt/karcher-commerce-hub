@@ -142,10 +142,33 @@ function AllegroSettingsPage() {
     void loadData()
   }, [])
 
-  const connectAllegro = () => {
-    window.location.assign(
-      `${API_BASE_URL}/auth/allegro/connect`,
-    )
+  const connectAllegro = async () => {
+    setConnectionError(null)
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/auth/allegro/connect?response=json`,
+      )
+      const result = (await response.json()) as {
+        authorizationUrl?: string
+        message?: string
+      }
+
+      if (!response.ok || !result.authorizationUrl) {
+        throw new Error(
+          result.message ??
+            'Az Allegro kapcsolódás nem indítható el.',
+        )
+      }
+
+      window.location.assign(result.authorizationUrl)
+    } catch (connectError) {
+      setConnectionError(
+        connectError instanceof Error
+          ? connectError.message
+          : 'Az Allegro kapcsolódás nem indítható el.',
+      )
+    }
   }
 
   const disconnectAllegro =

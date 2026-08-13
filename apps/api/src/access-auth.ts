@@ -18,16 +18,23 @@ export type AccessVariables = {
   commerceHubUser: CommerceHubUser
 }
 
-type AccessConfiguration = {
-  issuer: string
+type AuthProvider = 'cloudflare' | 'google'
+
+type AuthConfiguration = {
+  provider: AuthProvider
+  issuer: string | string[]
   audience: string
+  jwksUrl: URL
   adminEmails: Set<string>
   allowedEmails: Set<string>
 }
 
-const PUBLIC_PATHS = new Set(['/health'])
+const PUBLIC_PATHS = new Set([
+  '/health',
+  '/auth/allegro/callback',
+])
 
-let cachedIssuer: string | null = null
+let cachedJwksUrl: string | null = null
 let cachedJwks:
   | ReturnType<typeof createRemoteJWKSet>
   | null = null
@@ -56,7 +63,72 @@ function normalizeIssuer(value: string) {
   return url.origin
 }
 
-function getAccessConfiguration(): AccessConfiguration | null {
+function getConfiguredProvider(): AuthProvider | null {
+  const configured =
+    process.env.COMMERCE_HUB_AUTH_PROVIDER
+      ?.trim()
+      .toLowerCase()
+
+  if (configured) {
+    if (
+      configured !== 'cloudflare' &&
+      configured !== 'google'
+    ) {
+      throw new Error(
+        'COMMERCE_HUB_AUTH_PROVIDER must be cloudflare or google',
+      )
+    }
+
+    return configured
+  }
+
+  if (
+    process.env.COMMERCE_HUB_ACCESS_TEAM_DOMAIN?.trim() &&
+    process.env.COMMERCE_HUB_ACCESS_AUDIENCE?.trim()
+  ) {
+    return 'cloudflare'
+  }
+
+  if (process.env.GOOGLE_OAUTH_CLIENT_ID?.trim()) {
+    return 'google'
+  }
+
+  return null
+}
+
+function getAuthConfiguration(): AuthConfiguration | null {
+  const provider = getConfiguredProvider()
+
+  if (!provider) return null
+
+  const adminEmails = parseEmailSet(
+    process.env.COMMERCE_HUB_ADMIN_EMAILS,
+  )
+  const allowedEmails = parseEmailSet(
+    process.env.COMMERCE_HUB_ALLOWED_EMAILS,
+  )
+
+  if (provider === 'google') {
+    const audience =
+      process.env.GOOGLE_OAUTH_CLIENT_ID?.trim()
+
+    if (!audience) return null
+
+    return {
+      provider,
+      issuer: [
+        'https://accounts.google.com',
+        'accounts.google.com',
+      ],
+      audience,
+      jwksUrl: new URL(
+        'https://www.googleapis.com/oauth2/v3/certs',
+      ),
+      adminEmails,
+      allowedEmails,
+    }
+  }
+
   const teamDomain =
     process.env.COMMERCE_HUB_ACCESS_TEAM_DOMAIN?.trim()
   const audience =
@@ -64,36 +136,46 @@ function getAccessConfiguration(): AccessConfiguration | null {
 
   if (!teamDomain || !audience) return null
 
+  const issuer = normalizeIssuer(teamDomain)
+
   return {
-    issuer: normalizeIssuer(teamDomain),
+    provider,
+    issuer,
     audience,
-    adminEmails: parseEmailSet(
-      process.env.COMMERCE_HUB_ADMIN_EMAILS,
-    ),
-    allowedEmails: parseEmailSet(
-      process.env.COMMERCE_HUB_ALLOWED_EMAILS,
-    ),
+    jwksUrl: new URL('/cdn-cgi/access/certs', issuer),
+    adminEmails,
+    allowedEmails,
   }
 }
 
-function getJwks(issuer: string) {
-  if (!cachedJwks || cachedIssuer !== issuer) {
-    cachedIssuer = issuer
-    cachedJwks = createRemoteJWKSet(
-      new URL('/cdn-cgi/access/certs', issuer),
-    )
+function getJwks(jwksUrl: URL) {
+  const url = jwksUrl.toString()
+
+  if (!cachedJwks || cachedJwksUrl !== url) {
+    cachedJwksUrl = url
+    cachedJwks = createRemoteJWKSet(jwksUrl)
   }
 
   return cachedJwks
 }
 
 export function assertAccessConfiguration() {
+  if (process.env.NODE_ENV !== 'production') return
+
+  const configuration = getAuthConfiguration()
+
+  if (!configuration) {
+    throw new Error(
+      'Commerce Hub authentication configuration is required in production',
+    )
+  }
+
   if (
-    process.env.NODE_ENV === 'production' &&
-    !getAccessConfiguration()
+    configuration.allowedEmails.size === 0 &&
+    configuration.adminEmails.size === 0
   ) {
     throw new Error(
-      'Cloudflare Access configuration is required in production',
+      'At least one allowed or administrator email is required in production',
     )
   }
 }
@@ -104,6 +186,23 @@ export function getCommerceHubUser(
   return context.get(
     'commerceHubUser' as never,
   ) as CommerceHubUser | undefined
+}
+
+function getAssertion(
+  context: Context,
+  provider: AuthProvider,
+) {
+  if (provider === 'cloudflare') {
+    return context.req.header(
+      'Cf-Access-Jwt-Assertion',
+    )
+  }
+
+  const authorization =
+    context.req.header('Authorization')?.trim()
+  const match = authorization?.match(/^Bearer\s+(.+)$/i)
+
+  return match?.[1]?.trim() || null
 }
 
 export const accessAuthMiddleware:
@@ -118,7 +217,7 @@ export const accessAuthMiddleware:
       return
     }
 
-    const configuration = getAccessConfiguration()
+    const configuration = getAuthConfiguration()
 
     if (!configuration) {
       if (process.env.NODE_ENV === 'production') {
@@ -126,7 +225,7 @@ export const accessAuthMiddleware:
           {
             status: 'error',
             message:
-              'Cloudflare Access is not configured',
+              'Commerce Hub authentication is not configured',
           },
           503,
         )
@@ -143,8 +242,9 @@ export const accessAuthMiddleware:
       return
     }
 
-    const assertion = context.req.header(
-      'Cf-Access-Jwt-Assertion',
+    const assertion = getAssertion(
+      context,
+      configuration.provider,
     )
 
     if (!assertion) {
@@ -162,7 +262,7 @@ export const accessAuthMiddleware:
     try {
       const verification = await jwtVerify(
         assertion,
-        getJwks(configuration.issuer),
+        getJwks(configuration.jwksUrl),
         {
           issuer: configuration.issuer,
           audience: configuration.audience,
@@ -172,7 +272,7 @@ export const accessAuthMiddleware:
       payload = verification.payload
     } catch (error) {
       console.warn(
-        'Cloudflare Access token verification failed:',
+        'Commerce Hub token verification failed:',
         error instanceof Error
           ? error.message
           : 'Unknown verification error',
@@ -184,6 +284,20 @@ export const accessAuthMiddleware:
           message: 'Authentication is invalid or expired',
         },
         401,
+      )
+    }
+
+    if (
+      configuration.provider === 'google' &&
+      payload.email_verified !== true
+    ) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'The Google account email address is not verified',
+        },
+        403,
       )
     }
 
@@ -204,7 +318,6 @@ export const accessAuthMiddleware:
     }
 
     if (
-      configuration.allowedEmails.size > 0 &&
       !configuration.allowedEmails.has(email) &&
       !configuration.adminEmails.has(email)
     ) {

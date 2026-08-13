@@ -1366,6 +1366,13 @@ allegroAuth.get('/connect', (context) => {
     'S256',
   )
 
+  if (context.req.query('response') === 'json') {
+    return context.json({
+      status: 'ok',
+      authorizationUrl: authorizationUrl.toString(),
+    })
+  }
+
   return context.redirect(authorizationUrl.toString())
 })
 

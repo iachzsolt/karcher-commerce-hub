@@ -2,13 +2,15 @@ interface Env {
   COMMERCE_HUB_API_ORIGIN: string
 }
 
-const ACCESS_ASSERTION_HEADER =
-  'Cf-Access-Jwt-Assertion'
-
 const SAFE_METHODS = new Set([
   'GET',
   'HEAD',
   'OPTIONS',
+])
+
+const PUBLIC_PROXY_PATHS = new Set([
+  'health',
+  'auth/allegro/callback',
 ])
 
 function errorResponse(
@@ -71,14 +73,19 @@ function getProxyPath(
 
 export const onRequest:
   PagesFunction<Env, 'path'> = async (context) => {
-    const assertion = context.request.headers.get(
-      ACCESS_ASSERTION_HEADER,
+    const proxyPath = getProxyPath(
+      context.params.path,
     )
+    const authorization =
+      context.request.headers.get('Authorization')
 
-    if (!assertion) {
+    if (
+      !PUBLIC_PROXY_PATHS.has(proxyPath) &&
+      !authorization?.match(/^Bearer\s+\S+/i)
+    ) {
       return errorResponse(
         401,
-        'Cloudflare Access authentication is required',
+        'Commerce Hub authentication is required',
       )
     }
 
@@ -107,9 +114,6 @@ export const onRequest:
       )
     }
 
-    const proxyPath = getProxyPath(
-      context.params.path,
-    )
     const targetUrl = new URL(proxyPath, apiOrigin)
     targetUrl.search = requestUrl.search
 

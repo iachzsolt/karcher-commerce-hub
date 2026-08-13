@@ -35,7 +35,7 @@ infrastructure/
 docs/
 ```
 
-Main stack: Node.js 24.x, pnpm, TypeScript, React, Vite, Hono, Drizzle ORM, and Neon PostgreSQL. The repository currently declares `pnpm@11.18.0`.
+Main stack: Node.js 24.x, pnpm, TypeScript, React, Vite, Hono, Drizzle ORM, and Neon PostgreSQL. The repository currently declares `pnpm@10.34.1`.
 
 Local defaults:
 
