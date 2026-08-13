@@ -18,9 +18,25 @@ Set this build-time variable in Cloudflare Pages:
 VITE_API_BASE_URL=/api
 ```
 
-The `/api` route will later be handled by an authenticated Cloudflare proxy.
+Set this Pages Functions runtime variable to the HTTPS origin of the Deno
+deployment. Do not include `/api`; the proxy removes that prefix:
+
+```text
+COMMERCE_HUB_API_ORIGIN=https://your-deno-api.example
+```
+
+The `/api` route is handled by an authenticated Cloudflare proxy.
 Local development keeps using `http://localhost:3000` when the variable is not
 set.
+
+The proxy is implemented by `apps/web/functions/api/[[path]].ts`. It refuses
+requests without the `Cf-Access-Jwt-Assertion` header, requires same-origin
+browser requests for changing methods, forwards the assertion for full JWT
+verification by the API, and disables response caching. Configure the Pages
+project to fail closed if the Functions quota is exhausted.
+
+Only `/api/*` invokes Pages Functions. Static assets remain on the unlimited
+static Pages path. The SPA fallback is defined in `public/_redirects`.
 
 ## API configuration
 
@@ -68,9 +84,11 @@ Deno and in read-only smoke-test environments.
 
 ## Remaining work before deployment
 
-1. Create the Cloudflare Access application and authenticated `/api` proxy.
-2. Review and apply the scheduler lease migration.
-3. Verify the monorepo dependency build in a Deno runtime.
-4. Persist OAuth authorization state so it survives runtime restarts.
-5. Add user identity to write audit events.
-6. Perform a read-only production smoke test before any Allegro write.
+1. Create the Cloudflare Pages project and Access application.
+2. Configure the Pages and API environment variables with both scheduler
+   switches set to `false` and no administrator email addresses.
+3. Review and apply the scheduler lease migration.
+4. Verify the monorepo dependency build in a Deno runtime.
+5. Persist OAuth authorization state so it survives runtime restarts.
+6. Add user identity to write audit events.
+7. Perform a read-only production smoke test before any Allegro write.
