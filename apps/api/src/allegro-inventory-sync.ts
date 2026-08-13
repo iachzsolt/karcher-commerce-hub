@@ -4,6 +4,7 @@
 } from 'drizzle-orm'
 
 import {
+  allegroChangeEvents,
   createDatabase,
   dataConnections,
   inventorySourceItems,
@@ -1244,6 +1245,60 @@ export async function syncAllegroInventoryRows(
         status: 'NO_CHANGE',
       })
     }
+  }
+
+  const rowByListingId = new Map(
+    rows.map((row) => [row.listingId, row]),
+  )
+  const syncOccurredAt = new Date()
+  const syncEvents = results.flatMap((result) => {
+    const listingId =
+      typeof result.listingId === 'string'
+        ? result.listingId
+        : null
+    const action =
+      typeof result.action === 'string'
+        ? result.action
+        : 'UNKNOWN'
+    const status =
+      typeof result.status === 'string'
+        ? result.status
+        : 'UNKNOWN'
+
+    if (!listingId) return []
+
+    const row = rowByListingId.get(listingId)
+
+    return [
+      {
+        listingId,
+        eventType: 'SYNC',
+        source: 'INVENTORY_AUTOMATION',
+        oldValue: action,
+        newValue: status,
+        metadataJson: JSON.stringify({
+          publicationStatus:
+            row?.publicationStatus ?? null,
+          targetStock: row?.targetStock ?? null,
+          remoteStock: row?.remoteStock ?? null,
+          fromStock:
+            typeof result.fromStock === 'number'
+              ? result.fromStock
+              : null,
+          toStock:
+            typeof result.toStock === 'number'
+              ? result.toStock
+              : null,
+        }),
+        occurredAt: syncOccurredAt,
+      },
+    ]
+  })
+
+  if (syncEvents.length > 0) {
+    await database
+      .insert(allegroChangeEvents)
+      .values(syncEvents)
   }
 
   let refreshStatus =

@@ -1267,7 +1267,7 @@ function DataConnectionsSettings() {
                 >
                   <div className="data-connection-card-top">
                     <div className="data-connection-identity">
-                      <div className="connection-source-mark">
+                      <div className="connection-source-mark connection-source-mark-google-sheets">
                         GS
                       </div>
 
@@ -1322,7 +1322,7 @@ function DataConnectionsSettings() {
 
                   <div className="connection-visual-flow">
                     <div className="connection-flow-node">
-                      <span className="connection-flow-node-icon">
+                      <span className="connection-flow-node-icon connection-flow-node-icon-google-sheets">
                         GS
                       </span>
 

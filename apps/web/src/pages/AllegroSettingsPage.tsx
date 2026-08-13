@@ -388,23 +388,36 @@ function AllegroSettingsPage() {
           </div>
         </div>
 
-        <button
-          type="button"
-          className="allegro-connection-button"
-          disabled={connectionLoading}
-          onClick={() => {
-            if (connected) {
-              void disconnectAllegro()
-              return
-            }
+        <div className="allegro-connection-actions">
+          {connected && (
+            <button
+              type="button"
+              className="allegro-connection-button allegro-connection-button-primary"
+              disabled={connectionLoading}
+              onClick={connectAllegro}
+            >
+              Jogosultságok frissítése
+            </button>
+          )}
 
-            connectAllegro()
-          }}
-        >
-          {connected
-            ? 'Kapcsolat bontása'
-            : 'Kapcsolódás az Allegrohoz'}
-        </button>
+          <button
+            type="button"
+            className="allegro-connection-button"
+            disabled={connectionLoading}
+            onClick={() => {
+              if (connected) {
+                void disconnectAllegro()
+                return
+              }
+
+              connectAllegro()
+            }}
+          >
+            {connected
+              ? 'Kapcsolat bontása'
+              : 'Kapcsolódás az Allegrohoz'}
+          </button>
+        </div>
       </div>
 
       {connectionError && (

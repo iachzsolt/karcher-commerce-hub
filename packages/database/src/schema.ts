@@ -422,6 +422,53 @@ export const listingPriceHistory = pgTable(
     ),
   ],
 )
+
+export const allegroChangeEvents = pgTable(
+  'allegro_change_events',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+
+    listingId: uuid('listing_id')
+      .notNull()
+      .references(() => platformListings.id),
+
+    eventType: text('event_type').notNull(),
+
+    source: text('source')
+      .notNull()
+      .default('ALLEGRO_SYNC'),
+
+    oldValue: text('old_value'),
+
+    newValue: text('new_value'),
+
+    currency: text('currency'),
+
+    externalCampaignId: text('external_campaign_id'),
+
+    metadataJson: text('metadata_json'),
+
+    occurredAt: timestamp('occurred_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index('allegro_change_events_occurred_index').on(
+      table.occurredAt,
+    ),
+
+    index('allegro_change_events_listing_index').on(
+      table.listingId,
+    ),
+
+    index('allegro_change_events_type_index').on(
+      table.eventType,
+    ),
+  ],
+)
+
 export const listingDesiredStates = pgTable(
   'listing_desired_states',
   {

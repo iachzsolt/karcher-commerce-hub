@@ -1,10 +1,11 @@
 ﻿import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Hono } from 'hono'
-import { and, desc, eq } from 'drizzle-orm'
+import { and, desc, eq, lt } from 'drizzle-orm'
 import { decryptSecret, encryptSecret } from './token-crypto.js'
 import { applyAllegroDesiredStock, resolveAllegroInventoryRows, syncAllegroInventoryRows } from './allegro-inventory-sync.js'
 import {
   createDatabase,
+  allegroChangeEvents,
   listingCampaigns,
 
   listingAcceptedStates,
@@ -1317,6 +1318,8 @@ allegroAuth.get('/connect', (context) => {
   const scopes = [
     'allegro:api:sale:offers:read',
     'allegro:api:sale:offers:write',
+    'allegro:api:orders:read',
+    'allegro:api:billing:read',
     'allegro:api:campaigns',
     'allegro:api:profile:read',
   ]
@@ -3220,6 +3223,1345 @@ allegroAuth.get('/status', (context) => {
   })
 })
 
+type AllegroDashboardOffer = {
+  id: string
+  publication?: {
+    status?: string
+  }
+}
+
+type AllegroDashboardOrder = {
+  id: string
+  status?: string
+  fulfillment?: {
+    status?: string
+  }
+  lineItems?: Array<{
+    quantity?: number
+    boughtAt?: string
+    offer?: {
+      id?: string
+      name?: string
+    }
+    discounts?: Array<{
+      type?: string
+    }>
+    price?: {
+      amount?: string
+      currency?: string
+    }
+    reconciliation?: {
+      quantity?: number
+      type?: 'BILLING' | 'WALLET'
+      value?: {
+        amount?: string
+        currency?: string
+      }
+    }
+  }>
+}
+
+type AllegroDashboardBillingEntry = {
+  occurredAt?: string
+  asset?: 'DEBIT' | 'CREDIT'
+  type?: {
+    id?: string
+  }
+  value?: {
+    amount?: string
+    currency?: string
+  }
+}
+
+function getBudapestMonthValue(date = new Date()) {
+  const parts = new Intl.DateTimeFormat(
+    'en-CA',
+    {
+      timeZone: 'Europe/Budapest',
+      year: 'numeric',
+      month: '2-digit',
+    },
+  ).formatToParts(date)
+
+  const year =
+    parts.find((part) => part.type === 'year')
+      ?.value
+  const month =
+    parts.find((part) => part.type === 'month')
+      ?.value
+
+  return `${year}-${month}`
+}
+
+function getBudapestDateValue(date = new Date()) {
+  const parts = new Intl.DateTimeFormat(
+    'en-CA',
+    {
+      timeZone: 'Europe/Budapest',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    },
+  ).formatToParts(date)
+
+  const getPart = (type: string) =>
+    parts.find((part) => part.type === type)
+      ?.value
+
+  return `${getPart('year')}-${getPart('month')}-${getPart('day')}`
+}
+
+function getTimeZoneOffsetMilliseconds(
+  date: Date,
+  timeZone: string,
+) {
+  const parts = new Intl.DateTimeFormat(
+    'en-CA',
+    {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    },
+  ).formatToParts(date)
+
+  const value = (type: string) =>
+    Number(
+      parts.find((part) => part.type === type)
+        ?.value,
+    )
+
+  return (
+    Date.UTC(
+      value('year'),
+      value('month') - 1,
+      value('day'),
+      value('hour'),
+      value('minute'),
+      value('second'),
+    ) - date.getTime()
+  )
+}
+
+function budapestMonthBoundary(
+  year: number,
+  monthIndex: number,
+  day = 1,
+) {
+  const approximate = new Date(
+    Date.UTC(year, monthIndex, day),
+  )
+  const firstOffset =
+    getTimeZoneOffsetMilliseconds(
+      approximate,
+      'Europe/Budapest',
+    )
+  const firstCandidate = new Date(
+    approximate.getTime() - firstOffset,
+  )
+  const finalOffset =
+    getTimeZoneOffsetMilliseconds(
+      firstCandidate,
+      'Europe/Budapest',
+    )
+
+  return new Date(
+    approximate.getTime() - finalOffset,
+  )
+}
+
+function parseDateValue(value: string) {
+  const match = /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.exec(
+    value,
+  )
+
+  if (!match) {
+    return null
+  }
+
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const date = new Date(
+    Date.UTC(year, month - 1, day),
+  )
+
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return null
+  }
+
+  return { year, month, day, date }
+}
+
+function formatDateValue(date: Date) {
+  return date.toISOString().slice(0, 10)
+}
+
+function getDashboardBucketKey(
+  value: string,
+  groupBy: 'day' | 'month',
+) {
+  const date = new Date(value)
+
+  if (Number.isNaN(date.getTime())) {
+    return null
+  }
+
+  const parts = new Intl.DateTimeFormat(
+    'en-CA',
+    {
+      timeZone: 'Europe/Budapest',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    },
+  ).formatToParts(date)
+  const getPart = (type: string) =>
+    parts.find((part) => part.type === type)
+      ?.value
+  const month = `${getPart('year')}-${getPart('month')}`
+
+  return groupBy === 'month'
+    ? month
+    : `${month}-${getPart('day')}`
+}
+
+function createDashboardSeries(
+  from: Date,
+  to: Date,
+  groupBy: 'day' | 'month',
+) {
+  const result: Array<{
+    key: string
+    label: string
+    ordersCount: number
+    unitsSold: number
+    revenueMinor: number
+    allegroCostMinor: number
+    allegroCreditMinor: number
+  }> = []
+  const formatter = new Intl.DateTimeFormat(
+    'hu-HU',
+    groupBy === 'month'
+      ? {
+          month: 'short',
+          year: 'numeric',
+          timeZone: 'UTC',
+        }
+      : {
+          month: 'short',
+          day: 'numeric',
+          timeZone: 'UTC',
+        },
+  )
+  const cursor = new Date(from)
+
+  while (cursor <= to) {
+    const key =
+      groupBy === 'month'
+        ? cursor.toISOString().slice(0, 7)
+        : cursor.toISOString().slice(0, 10)
+
+    result.push({
+      key,
+      label: formatter.format(cursor),
+      ordersCount: 0,
+      unitsSold: 0,
+      revenueMinor: 0,
+      allegroCostMinor: 0,
+      allegroCreditMinor: 0,
+    })
+
+    if (groupBy === 'month') {
+      cursor.setUTCMonth(cursor.getUTCMonth() + 1, 1)
+    } else {
+      cursor.setUTCDate(cursor.getUTCDate() + 1)
+    }
+  }
+
+  return result
+}
+
+function moneyToMinor(value?: string) {
+  const amount = Number(value)
+
+  return Number.isFinite(amount)
+    ? Math.round(amount * 100)
+    : 0
+}
+
+type DashboardCampaignMembership = {
+  externalCampaignId: string
+  campaignName: string | null
+  campaignStatus: string | null
+  externalListingId: string
+  listingName: string | null
+  validFrom: Date | null
+  validTo: Date | null
+  campaignPriceMinor: number | null
+  referencePriceMinor: number | null
+}
+
+function buildAllCampaignSalesAnalysis(
+  orders: AllegroDashboardOrder[],
+) {
+  const campaignOfferIds = new Set<string>()
+
+  for (const order of orders) {
+    for (const lineItem of order.lineItems ?? []) {
+      if (
+        lineItem.offer?.id &&
+        lineItem.discounts?.some(
+          (discount) => discount.type === 'CAMPAIGN',
+        )
+      ) {
+        campaignOfferIds.add(lineItem.offer.id)
+      }
+    }
+  }
+
+  if (campaignOfferIds.size === 0) return null
+
+  const productsByOfferId = new Map<
+    string,
+    {
+      offerId: string
+      name: string
+      campaignOrderIds: Set<string>
+      outsideOrderIds: Set<string>
+      campaignUnits: number
+      outsideUnits: number
+      campaignRevenueMinor: number
+      outsideRevenueMinor: number
+    }
+  >()
+
+  for (const order of orders) {
+    for (const lineItem of order.lineItems ?? []) {
+      const offerId = lineItem.offer?.id
+
+      if (!offerId || !campaignOfferIds.has(offerId)) continue
+
+      const quantity =
+        Number.isFinite(lineItem.quantity) &&
+        (lineItem.quantity ?? 0) > 0
+          ? lineItem.quantity ?? 0
+          : 0
+      const reconciliationQuantity =
+        Number.isFinite(lineItem.reconciliation?.quantity) &&
+        (lineItem.reconciliation?.quantity ?? 0) > 0
+          ? lineItem.reconciliation?.quantity ?? 0
+          : 0
+      const revenueMinor =
+        moneyToMinor(lineItem.price?.amount) * quantity +
+        moneyToMinor(
+          lineItem.reconciliation?.value?.amount,
+        ) * reconciliationQuantity
+      const isCampaignSale =
+        lineItem.discounts?.some(
+          (discount) => discount.type === 'CAMPAIGN',
+        ) ?? false
+      const product = productsByOfferId.get(offerId) ?? {
+        offerId,
+        name: lineItem.offer?.name ?? offerId,
+        campaignOrderIds: new Set<string>(),
+        outsideOrderIds: new Set<string>(),
+        campaignUnits: 0,
+        outsideUnits: 0,
+        campaignRevenueMinor: 0,
+        outsideRevenueMinor: 0,
+      }
+
+      if (isCampaignSale) {
+        product.campaignOrderIds.add(order.id)
+        product.campaignUnits += quantity
+        product.campaignRevenueMinor += revenueMinor
+      } else {
+        product.outsideOrderIds.add(order.id)
+        product.outsideUnits += quantity
+        product.outsideRevenueMinor += revenueMinor
+      }
+
+      productsByOfferId.set(offerId, product)
+    }
+  }
+
+  const products = [...productsByOfferId.values()]
+    .map((product) => ({
+      offerId: product.offerId,
+      name: product.name,
+      campaignOrders: product.campaignOrderIds.size,
+      outsideOrders: product.outsideOrderIds.size,
+      campaignUnits: product.campaignUnits,
+      outsideUnits: product.outsideUnits,
+      campaignRevenueMinor: product.campaignRevenueMinor,
+      outsideRevenueMinor: product.outsideRevenueMinor,
+      campaignStatus: 'CAMPAIGN',
+      campaignPriceMinor: null,
+      referencePriceMinor: null,
+    }))
+    .sort(
+      (left, right) =>
+        right.campaignOrders - left.campaignOrders ||
+        right.campaignRevenueMinor - left.campaignRevenueMinor ||
+        left.name.localeCompare(right.name, 'hu-HU'),
+    )
+  const campaignOrderIds = new Set(
+    [...productsByOfferId.values()]
+      .flatMap((product) => [...product.campaignOrderIds]),
+  )
+  const outsideOrderIds = new Set(
+    [...productsByOfferId.values()]
+      .flatMap((product) => [...product.outsideOrderIds]),
+  )
+
+  return {
+    campaignId: 'ALL_ALLEGRO_CAMPAIGNS',
+    campaignName: 'Összes Allegro-kampány',
+    offerCount: campaignOfferIds.size,
+    totals: {
+      campaignOrders: campaignOrderIds.size,
+      outsideOrders: outsideOrderIds.size,
+      campaignUnits: products.reduce(
+        (total, product) => total + product.campaignUnits,
+        0,
+      ),
+      outsideUnits: products.reduce(
+        (total, product) => total + product.outsideUnits,
+        0,
+      ),
+      campaignRevenueMinor: products.reduce(
+        (total, product) => total + product.campaignRevenueMinor,
+        0,
+      ),
+      outsideRevenueMinor: products.reduce(
+        (total, product) => total + product.outsideRevenueMinor,
+        0,
+      ),
+    },
+    products,
+  }
+}
+
+function buildDashboardCampaignPerformance(
+  orders: AllegroDashboardOrder[],
+  memberships: DashboardCampaignMembership[],
+  periodStart: Date,
+  periodEnd: Date,
+  namedCampaignTrackingStart: Date,
+) {
+  const namedCampaignPeriodStart = new Date(
+    Math.max(
+      periodStart.getTime(),
+      namedCampaignTrackingStart.getTime(),
+    ),
+  )
+  const eligibleMemberships = memberships.filter(
+    (membership) =>
+      !membership.externalCampaignId.startsWith('LOCAL-') &&
+      (membership.campaignStatus === 'ACTIVE' ||
+        membership.campaignStatus === 'FINISHED') &&
+      periodEnd >= namedCampaignTrackingStart &&
+      (!membership.validFrom || membership.validFrom <= periodEnd) &&
+      (!membership.validTo ||
+        membership.validTo >= namedCampaignPeriodStart),
+  )
+  const campaignsById = new Map<
+    string,
+    {
+      id: string
+      name: string
+      validFrom: Date | null
+      validTo: Date | null
+      memberships: DashboardCampaignMembership[]
+    }
+  >()
+
+  for (const membership of eligibleMemberships) {
+    const existing = campaignsById.get(
+      membership.externalCampaignId,
+    )
+
+    if (existing) {
+      existing.memberships.push(membership)
+
+      if (
+        membership.validFrom &&
+        (!existing.validFrom ||
+          membership.validFrom < existing.validFrom)
+      ) {
+        existing.validFrom = membership.validFrom
+      }
+
+      if (
+        membership.validTo &&
+        (!existing.validTo || membership.validTo > existing.validTo)
+      ) {
+        existing.validTo = membership.validTo
+      }
+    } else {
+      campaignsById.set(membership.externalCampaignId, {
+        id: membership.externalCampaignId,
+        name:
+          membership.campaignName ??
+          membership.externalCampaignId,
+        validFrom: membership.validFrom,
+        validTo: membership.validTo,
+        memberships: [membership],
+      })
+    }
+  }
+
+  const campaigns = [...campaignsById.values()].sort(
+    (left, right) =>
+      (right.validTo?.getTime() ?? 0) -
+      (left.validTo?.getTime() ?? 0),
+  )
+  const analyses = campaigns.map((campaign) => {
+    const membershipsByOfferId = new Map(
+      campaign.memberships.map((membership) => [
+        membership.externalListingId,
+        membership,
+      ]),
+    )
+    const productsByOfferId = new Map<
+      string,
+      {
+        offerId: string
+        name: string
+        campaignOrderIds: Set<string>
+        outsideOrderIds: Set<string>
+        campaignUnits: number
+        outsideUnits: number
+        campaignRevenueMinor: number
+        outsideRevenueMinor: number
+        campaignStatus: string
+        campaignPriceMinor: number | null
+        referencePriceMinor: number | null
+      }
+    >()
+    const campaignOrderIds = new Set<string>()
+    const outsideOrderIds = new Set<string>()
+
+    for (const membership of campaign.memberships) {
+      productsByOfferId.set(membership.externalListingId, {
+        offerId: membership.externalListingId,
+        name:
+          membership.listingName ??
+          membership.externalListingId,
+        campaignOrderIds: new Set<string>(),
+        outsideOrderIds: new Set<string>(),
+        campaignUnits: 0,
+        outsideUnits: 0,
+        campaignRevenueMinor: 0,
+        outsideRevenueMinor: 0,
+        campaignStatus:
+          membership.campaignStatus ?? 'UNKNOWN',
+        campaignPriceMinor: membership.campaignPriceMinor,
+        referencePriceMinor: membership.referencePriceMinor,
+      })
+    }
+
+    for (const order of orders) {
+      for (const lineItem of order.lineItems ?? []) {
+        const offerId = lineItem.offer?.id
+        const boughtAt = lineItem.boughtAt
+
+        if (!offerId || !boughtAt) continue
+
+        const membership = membershipsByOfferId.get(offerId)
+
+        if (!membership) continue
+
+        const boughtDate = new Date(boughtAt)
+
+        if (Number.isNaN(boughtDate.getTime())) continue
+        if (boughtDate < namedCampaignTrackingStart) continue
+
+        const hasCampaignDiscount =
+          lineItem.discounts?.some(
+            (discount) => discount.type === 'CAMPAIGN',
+          ) ?? false
+        const isInsideCampaignWindow =
+          (!membership.validFrom ||
+            boughtDate >= membership.validFrom) &&
+          (!membership.validTo || boughtDate <= membership.validTo)
+        const isCampaignSale =
+          hasCampaignDiscount &&
+          isInsideCampaignWindow &&
+          (membership.campaignStatus === 'ACTIVE' ||
+            membership.campaignStatus === 'FINISHED')
+        const quantity =
+          Number.isFinite(lineItem.quantity) &&
+          (lineItem.quantity ?? 0) > 0
+            ? lineItem.quantity ?? 0
+            : 0
+        const reconciliationQuantity =
+          Number.isFinite(lineItem.reconciliation?.quantity) &&
+          (lineItem.reconciliation?.quantity ?? 0) > 0
+            ? lineItem.reconciliation?.quantity ?? 0
+            : 0
+        const revenueMinor =
+          moneyToMinor(lineItem.price?.amount) * quantity +
+          moneyToMinor(
+            lineItem.reconciliation?.value?.amount,
+          ) * reconciliationQuantity
+        const product = productsByOfferId.get(offerId) ?? {
+          offerId,
+          name:
+            lineItem.offer?.name ??
+            membership.listingName ??
+            offerId,
+          campaignOrderIds: new Set<string>(),
+          outsideOrderIds: new Set<string>(),
+          campaignUnits: 0,
+          outsideUnits: 0,
+          campaignRevenueMinor: 0,
+          outsideRevenueMinor: 0,
+          campaignStatus:
+            membership.campaignStatus ?? 'UNKNOWN',
+          campaignPriceMinor: membership.campaignPriceMinor,
+          referencePriceMinor: membership.referencePriceMinor,
+        }
+
+        if (isCampaignSale) {
+          product.campaignOrderIds.add(order.id)
+          product.campaignUnits += quantity
+          product.campaignRevenueMinor += revenueMinor
+          campaignOrderIds.add(order.id)
+        } else {
+          product.outsideOrderIds.add(order.id)
+          product.outsideUnits += quantity
+          product.outsideRevenueMinor += revenueMinor
+          outsideOrderIds.add(order.id)
+        }
+
+        productsByOfferId.set(offerId, product)
+      }
+    }
+
+    const products = [...productsByOfferId.values()]
+      .map((product) => ({
+        offerId: product.offerId,
+        name: product.name,
+        campaignOrders: product.campaignOrderIds.size,
+        outsideOrders: product.outsideOrderIds.size,
+        campaignUnits: product.campaignUnits,
+        outsideUnits: product.outsideUnits,
+        campaignRevenueMinor: product.campaignRevenueMinor,
+        outsideRevenueMinor: product.outsideRevenueMinor,
+        campaignStatus: product.campaignStatus,
+        campaignPriceMinor: product.campaignPriceMinor,
+        referencePriceMinor: product.referencePriceMinor,
+      }))
+      .sort(
+        (left, right) =>
+          right.campaignOrders + right.outsideOrders -
+            (left.campaignOrders + left.outsideOrders) ||
+          right.campaignRevenueMinor + right.outsideRevenueMinor -
+            (left.campaignRevenueMinor + left.outsideRevenueMinor) ||
+          ({ ACTIVE: 0, FINISHED: 1, DECLINED: 2 }[
+            left.campaignStatus
+          ] ?? 3) -
+            ({ ACTIVE: 0, FINISHED: 1, DECLINED: 2 }[
+              right.campaignStatus
+            ] ?? 3) ||
+          left.name.localeCompare(right.name, 'hu-HU'),
+      )
+
+    return {
+      campaignId: campaign.id,
+      campaignName: campaign.name,
+      totals: {
+        campaignOrders: campaignOrderIds.size,
+        outsideOrders: outsideOrderIds.size,
+        campaignUnits: products.reduce(
+          (total, product) => total + product.campaignUnits,
+          0,
+        ),
+        outsideUnits: products.reduce(
+          (total, product) => total + product.outsideUnits,
+          0,
+        ),
+        campaignRevenueMinor: products.reduce(
+          (total, product) =>
+            total + product.campaignRevenueMinor,
+          0,
+        ),
+        outsideRevenueMinor: products.reduce(
+          (total, product) =>
+            total + product.outsideRevenueMinor,
+          0,
+        ),
+      },
+      products,
+    }
+  })
+
+  const allCampaignSales =
+    buildAllCampaignSalesAnalysis(orders)
+
+  return {
+    campaigns: [
+      ...(allCampaignSales
+        ? [
+            {
+              id: allCampaignSales.campaignId,
+              name: allCampaignSales.campaignName,
+              validFrom: periodStart.toISOString(),
+              validTo: periodEnd.toISOString(),
+              offerCount: allCampaignSales.offerCount,
+            },
+          ]
+        : []),
+      ...campaigns.map((campaign) => ({
+      id: campaign.id,
+      name: campaign.name,
+      validFrom: campaign.validFrom?.toISOString() ?? null,
+      validTo: campaign.validTo?.toISOString() ?? null,
+      offerCount: new Set(
+        campaign.memberships.map(
+          (membership) => membership.externalListingId,
+        ),
+      ).size,
+      })),
+    ],
+    analyses: [
+      ...(allCampaignSales ? [allCampaignSales] : []),
+      ...analyses,
+    ],
+    attribution:
+      'CAMPAIGN_DISCOUNT_AND_OFFER_MEMBERSHIP_WITHIN_ACTIVE_WINDOW',
+  }
+}
+
+allegroAuth.get(
+  '/dashboard-summary',
+  async (context) => {
+    await refreshAllegroSessionIfNeeded()
+
+    if (!currentSession) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Allegro account is not connected',
+        },
+        401,
+      )
+    }
+
+    const apiUrl = process.env.ALLEGRO_API_URL
+    const databaseUrl = process.env.DATABASE_URL
+
+    if (!apiUrl || !databaseUrl) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'ALLEGRO_API_URL or DATABASE_URL is missing',
+        },
+        500,
+      )
+    }
+
+    assertAllegroEnvironmentConfiguration()
+    const db = createDatabase(databaseUrl)
+
+    const currentDate = getBudapestDateValue()
+    const currentMonth = getBudapestMonthValue()
+    const requestedFrom =
+      context.req.query('from') ??
+      `${currentMonth}-01`
+    const requestedTo =
+      context.req.query('to') ??
+      currentDate
+    const parsedFrom = parseDateValue(requestedFrom)
+    const parsedTo = parseDateValue(requestedTo)
+    const requestedGroupBy =
+      context.req.query('groupBy') ?? 'day'
+
+    if (
+      !parsedFrom ||
+      !parsedTo ||
+      (requestedGroupBy !== 'day' &&
+        requestedGroupBy !== 'month')
+    ) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'from/to must use YYYY-MM-DD and groupBy must be day or month',
+        },
+        400,
+      )
+    }
+
+    const rangeDays = Math.floor(
+      (parsedTo.date.getTime() -
+        parsedFrom.date.getTime()) /
+        (24 * 60 * 60 * 1000),
+    )
+
+    if (rangeDays < 0 || rangeDays > 366) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'The dashboard date range must be between 1 and 367 days',
+        },
+        400,
+      )
+    }
+
+    const groupBy = requestedGroupBy
+    const periodStart =
+      budapestMonthBoundary(
+        parsedFrom.year,
+        parsedFrom.month - 1,
+        parsedFrom.day,
+      )
+    const nextDay = new Date(parsedTo.date)
+    nextDay.setUTCDate(nextDay.getUTCDate() + 1)
+    const nextPeriodStart =
+      budapestMonthBoundary(
+        nextDay.getUTCFullYear(),
+        nextDay.getUTCMonth(),
+        nextDay.getUTCDate(),
+      )
+    const periodEnd = new Date(
+      nextPeriodStart.getTime() - 1,
+    )
+    const series = createDashboardSeries(
+      parsedFrom.date,
+      parsedTo.date,
+      groupBy,
+    )
+    const seriesByKey = new Map(
+      series.map((item) => [item.key, item]),
+    )
+
+    const headers = {
+      Authorization:
+        `Bearer ${currentSession.accessToken}`,
+      Accept:
+        'application/vnd.allegro.public.v1+json',
+      'Accept-Language': 'hu-HU',
+    }
+
+    const fetchPage = async <T>(url: URL) => {
+      const response = await allegroFetch(
+        url.toString(),
+        { headers },
+      )
+      const body = await response.text()
+
+      if (!response.ok) {
+        const error = new Error(
+          `Allegro request failed: HTTP ${response.status}`,
+        ) as Error & { httpStatus?: number }
+        error.httpStatus = response.status
+        throw error
+      }
+
+      return JSON.parse(body) as T
+    }
+
+    try {
+      const offers: AllegroDashboardOffer[] = []
+      const limit = 100
+      let offset = 0
+      let totalCount: number | null = null
+
+      do {
+        const url = new URL('/sale/offers', apiUrl)
+        url.searchParams.set('limit', String(limit))
+        url.searchParams.set('offset', String(offset))
+
+        const page = await fetchPage<{
+          offers?: AllegroDashboardOffer[]
+          totalCount?: number
+          count?: number
+        }>(url)
+        const pageOffers = page.offers ?? []
+
+        offers.push(...pageOffers)
+        totalCount ??=
+          page.totalCount ??
+          page.count ??
+          pageOffers.length
+        offset += limit
+      } while (
+        totalCount !== null &&
+        offset < totalCount
+      )
+
+      const offerStatuses = {
+        total: offers.length,
+        active: 0,
+        activating: 0,
+        inactive: 0,
+        ended: 0,
+        unknown: 0,
+      }
+
+      for (const offer of offers) {
+        switch (offer.publication?.status) {
+          case 'ACTIVE':
+            offerStatuses.active++
+            break
+          case 'ACTIVATING':
+            offerStatuses.activating++
+            break
+          case 'INACTIVE':
+            offerStatuses.inactive++
+            break
+          case 'ENDED':
+            offerStatuses.ended++
+            break
+          default:
+            offerStatuses.unknown++
+        }
+      }
+
+      let ordersAuthorized = true
+      let billingAuthorized = true
+      let ordersError: string | null = null
+      let billingError: string | null = null
+      let ordersCount = 0
+      let unitsSold = 0
+      let grossSalesMinor = 0
+      let salesCurrency = 'HUF'
+      let commissionCostMinor = 0
+      let totalAllegroCostMinor = 0
+      let allegroCreditsMinor = 0
+      let billingEntryCount = 0
+      const orderStatuses = {
+        total: 0,
+        bought: 0,
+        filledIn: 0,
+        readyForProcessing: 0,
+        cancelled: 0,
+        unknown: 0,
+      }
+      const fulfillmentStatuses: Record<
+        string,
+        number
+      > = {}
+      let campaignPerformance = {
+        campaigns: [] as Array<{
+          id: string
+          name: string
+          validFrom: string | null
+          validTo: string | null
+          offerCount: number
+        }>,
+        analyses: [] as Array<{
+          campaignId: string
+          campaignName: string
+          totals: {
+            campaignOrders: number
+            outsideOrders: number
+            campaignUnits: number
+            outsideUnits: number
+            campaignRevenueMinor: number
+            outsideRevenueMinor: number
+          }
+          products: Array<{
+            offerId: string
+            name: string
+            campaignOrders: number
+            outsideOrders: number
+            campaignUnits: number
+            outsideUnits: number
+            campaignRevenueMinor: number
+            outsideRevenueMinor: number
+            campaignStatus: string
+            campaignPriceMinor: number | null
+            referencePriceMinor: number | null
+          }>
+        }>,
+        attribution:
+          'CAMPAIGN_DISCOUNT_AND_OFFER_MEMBERSHIP_WITHIN_ACTIVE_WINDOW',
+      }
+
+      try {
+        const orders: AllegroDashboardOrder[] = []
+        let orderOffset = 0
+        let orderTotal: number | null = null
+
+        do {
+          const url = new URL(
+            '/order/checkout-forms',
+            apiUrl,
+          )
+          url.searchParams.set('limit', '100')
+          url.searchParams.set(
+            'offset',
+            String(orderOffset),
+          )
+          url.searchParams.set(
+            'marketplace.id',
+            'allegro-hu',
+          )
+          url.searchParams.set(
+            'lineItems.boughtAt.gte',
+            periodStart.toISOString(),
+          )
+          url.searchParams.set(
+            'lineItems.boughtAt.lte',
+            periodEnd.toISOString(),
+          )
+
+          const page = await fetchPage<{
+            checkoutForms?: AllegroDashboardOrder[]
+            totalCount?: number
+            count?: number
+          }>(url)
+          const pageOrders =
+            page.checkoutForms ?? []
+
+          orders.push(...pageOrders)
+          orderTotal ??=
+            page.totalCount ??
+            page.count ??
+            pageOrders.length
+          orderOffset += 100
+        } while (
+          orderTotal !== null &&
+          orderOffset < orderTotal &&
+          orderOffset < 10_000
+        )
+
+        const completedOrders = orders.filter(
+          (order) =>
+            order.status ===
+              'READY_FOR_PROCESSING' &&
+            order.fulfillment?.status !==
+              'CANCELLED',
+        )
+
+        ordersCount = completedOrders.length
+
+        const localCampaignMemberships = await db
+          .select({
+            externalCampaignId:
+              listingCampaigns.externalCampaignId,
+            campaignName: listingCampaigns.campaignName,
+            campaignStatus:
+              listingCampaigns.campaignStatus,
+            externalListingId:
+              platformListings.externalListingId,
+            listingName: platformListings.listingName,
+            validFrom: listingCampaigns.validFrom,
+            validTo: listingCampaigns.validTo,
+            campaignPriceMinor:
+              listingCampaigns.remotePriceMinor,
+            referencePriceMinor:
+              listingCampaigns.referencePriceMinor,
+          })
+          .from(listingCampaigns)
+          .innerJoin(
+            platformListings,
+            eq(
+              listingCampaigns.listingId,
+              platformListings.id,
+            ),
+          )
+
+        const namedCampaignTrackingStart =
+          budapestMonthBoundary(2026, 8, 1)
+
+        campaignPerformance =
+          buildDashboardCampaignPerformance(
+            completedOrders,
+            localCampaignMemberships,
+            periodStart,
+            periodEnd,
+            namedCampaignTrackingStart,
+          )
+
+        orderStatuses.total = orders.length
+
+        for (const order of orders) {
+          switch (order.status) {
+            case 'BOUGHT':
+              orderStatuses.bought++
+              break
+            case 'FILLED_IN':
+              orderStatuses.filledIn++
+              break
+            case 'READY_FOR_PROCESSING':
+              orderStatuses.readyForProcessing++
+              break
+            case 'CANCELLED':
+              orderStatuses.cancelled++
+              break
+            default:
+              orderStatuses.unknown++
+          }
+
+          const fulfillmentStatus =
+            order.fulfillment?.status ?? 'UNKNOWN'
+          fulfillmentStatuses[fulfillmentStatus] =
+            (fulfillmentStatuses[fulfillmentStatus] ?? 0) + 1
+        }
+
+        for (const order of completedOrders) {
+          const orderBucketKey =
+            order.lineItems?.[0]?.boughtAt
+              ? getDashboardBucketKey(
+                  order.lineItems[0].boughtAt,
+                  groupBy,
+                )
+              : null
+
+          if (orderBucketKey) {
+            const bucket = seriesByKey.get(orderBucketKey)
+
+            if (bucket) {
+              bucket.ordersCount++
+            }
+          }
+
+          for (const lineItem of order.lineItems ?? []) {
+            const quantity =
+              Number.isFinite(lineItem.quantity) &&
+              (lineItem.quantity ?? 0) > 0
+                ? lineItem.quantity ?? 0
+                : 0
+
+            unitsSold += quantity
+            grossSalesMinor +=
+              moneyToMinor(
+                lineItem.price?.amount,
+              ) * quantity
+
+            if (lineItem.boughtAt) {
+              const bucketKey =
+                getDashboardBucketKey(
+                  lineItem.boughtAt,
+                  groupBy,
+                )
+              const bucket = bucketKey
+                ? seriesByKey.get(bucketKey)
+                : null
+
+              if (bucket) {
+                bucket.unitsSold += quantity
+                bucket.revenueMinor +=
+                  moneyToMinor(
+                    lineItem.price?.amount,
+                  ) * quantity
+              }
+            }
+            salesCurrency =
+              lineItem.price?.currency ??
+              salesCurrency
+          }
+        }
+      } catch (error) {
+        const httpStatus =
+          (error as Error & {
+            httpStatus?: number
+          }).httpStatus
+
+        ordersAuthorized = httpStatus !== 403
+        ordersError =
+          httpStatus === 403
+            ? 'REAUTHORIZATION_REQUIRED'
+            : error instanceof Error
+              ? error.message
+              : 'Could not load Allegro orders'
+      }
+
+      try {
+        const entries: AllegroDashboardBillingEntry[] = []
+        let billingOffset = 0
+        let billingTotal: number | null = null
+
+        do {
+          const url = new URL(
+            '/billing/billing-entries',
+            apiUrl,
+          )
+          url.searchParams.set('limit', '100')
+          url.searchParams.set(
+            'offset',
+            String(billingOffset),
+          )
+          url.searchParams.set(
+            'marketplaceId',
+            'allegro-hu',
+          )
+          url.searchParams.set(
+            'occurredAt.gte',
+            periodStart.toISOString(),
+          )
+          url.searchParams.set(
+            'occurredAt.lte',
+            periodEnd.toISOString(),
+          )
+
+          const page = await fetchPage<{
+            billingEntries?: AllegroDashboardBillingEntry[]
+            totalCount?: number
+            count?: number
+          }>(url)
+          const pageEntries =
+            page.billingEntries ?? []
+
+          entries.push(...pageEntries)
+          billingTotal ??=
+            page.totalCount ??
+            page.count ??
+            pageEntries.length
+          billingOffset += 100
+        } while (
+          billingTotal !== null &&
+          billingOffset < billingTotal &&
+          billingOffset < 10_000
+        )
+
+        billingEntryCount = entries.length
+        let billingCostsMinor = 0
+        let billingCreditsMinor = 0
+        let commissionCostsMinor = 0
+
+        for (const entry of entries) {
+          const valueMinor = moneyToMinor(
+            entry.value?.amount,
+          )
+
+          if (valueMinor < 0) {
+            billingCostsMinor += -valueMinor
+
+            if (entry.type?.id === 'SUC') {
+              commissionCostsMinor += -valueMinor
+            }
+          } else if (valueMinor > 0) {
+            billingCreditsMinor += valueMinor
+          }
+
+          if (entry.occurredAt) {
+            const bucketKey =
+              getDashboardBucketKey(
+                entry.occurredAt,
+                groupBy,
+              )
+            const bucket = bucketKey
+              ? seriesByKey.get(bucketKey)
+              : null
+
+            if (bucket) {
+              if (valueMinor < 0) {
+                bucket.allegroCostMinor +=
+                  -valueMinor
+              } else if (valueMinor > 0) {
+                bucket.allegroCreditMinor +=
+                  valueMinor
+              }
+            }
+          }
+        }
+
+        commissionCostMinor = commissionCostsMinor
+        totalAllegroCostMinor = billingCostsMinor
+        allegroCreditsMinor = billingCreditsMinor
+      } catch (error) {
+        const httpStatus =
+          (error as Error & {
+            httpStatus?: number
+          }).httpStatus
+
+        billingAuthorized = httpStatus !== 403
+        billingError =
+          httpStatus === 403
+            ? 'REAUTHORIZATION_REQUIRED'
+            : error instanceof Error
+              ? error.message
+              : 'Could not load Allegro billing entries'
+      }
+
+      return context.json({
+        status: 'ok',
+        generatedAt: new Date().toISOString(),
+        account: {
+          name: currentSession.account.login,
+          marketplace:
+            currentSession.account.baseMarketplace
+              ?.id ?? null,
+        },
+        period: {
+          fromDate: requestedFrom,
+          toDate: requestedTo,
+          groupBy,
+          timeZone: 'Europe/Budapest',
+          from: periodStart.toISOString(),
+          to: periodEnd.toISOString(),
+        },
+        permissions: {
+          offers: true,
+          orders: ordersAuthorized,
+          billing: billingAuthorized,
+        },
+        errors: {
+          orders: ordersError,
+          billing: billingError,
+        },
+        offers: offerStatuses,
+        sales: {
+          ordersCount,
+          unitsSold,
+          grossSalesMinor,
+          currency: salesCurrency,
+          definition:
+            'READY_FOR_PROCESSING_PRODUCT_LINES_EXCLUDING_DELIVERY_AND_REFUNDS',
+        },
+        orderStatuses,
+        fulfillmentStatuses,
+        campaignPerformance,
+        costs: {
+          commissionCostMinor,
+          totalAllegroCostMinor,
+          allegroCreditsMinor,
+          billingEntryCount,
+          netAfterAllegroCostsMinor:
+            grossSalesMinor -
+            totalAllegroCostMinor +
+            allegroCreditsMinor,
+          currency: salesCurrency,
+        },
+        series,
+      })
+    } catch (error) {
+      console.error(
+        'Allegro dashboard summary failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Could not load Allegro dashboard summary',
+        },
+        502,
+      )
+    }
+  },
+)
+
 type AllegroOfferForSync = {
   id: string
   name: string
@@ -3921,6 +5263,17 @@ allegroAuth.post('/sync', async (context) => {
   const db = createDatabase(databaseUrl)
   const now = new Date()
 
+  await db
+    .delete(allegroChangeEvents)
+    .where(
+      lt(
+        allegroChangeEvents.occurredAt,
+        new Date(
+          now.getTime() - 30 * 24 * 60 * 60 * 1000,
+        ),
+      ),
+    )
+
   const [allegroPlatform] = await db
     .select({
       id: platforms.id,
@@ -4309,6 +5662,23 @@ const currency =
         lastPriceHistory.observedAt.getTime() >=
         24 * 60 * 60 * 1000
 
+    const [previousRemoteState] = await db
+      .select({
+        priceMinor: listingRemoteStates.priceMinor,
+        stockAvailable:
+          listingRemoteStates.stockAvailable,
+        publicationStatus:
+          listingRemoteStates.publicationStatus,
+      })
+      .from(listingRemoteStates)
+      .where(
+        eq(
+          listingRemoteStates.listingId,
+          listing.id,
+        ),
+      )
+      .limit(1)
+
     await db
       .insert(listingRemoteStates)
       .values({
@@ -4352,6 +5722,84 @@ const currency =
           updatedAt: now,
         },
       })
+
+    if (previousRemoteState) {
+      const changeEvents: Array<{
+        listingId: string
+        eventType: string
+        source: string
+        oldValue: string | null
+        newValue: string | null
+        currency: string | null
+        externalCampaignId: string | null
+        metadataJson: string | null
+        occurredAt: Date
+      }> = []
+
+      if (previousRemoteState.priceMinor !== priceMinor) {
+        changeEvents.push({
+          listingId: listing.id,
+          eventType: 'PRICE',
+          source: 'ALLEGRO_SYNC',
+          oldValue:
+            previousRemoteState.priceMinor === null
+              ? null
+              : String(previousRemoteState.priceMinor),
+          newValue:
+            priceMinor === null ? null : String(priceMinor),
+          currency,
+          externalCampaignId: null,
+          metadataJson: null,
+          occurredAt: now,
+        })
+      }
+
+      if (
+        previousRemoteState.stockAvailable !== stockAvailable
+      ) {
+        changeEvents.push({
+          listingId: listing.id,
+          eventType: 'STOCK',
+          source: 'ALLEGRO_SYNC',
+          oldValue:
+            previousRemoteState.stockAvailable === null
+              ? null
+              : String(previousRemoteState.stockAvailable),
+          newValue:
+            stockAvailable === null
+              ? null
+              : String(stockAvailable),
+          currency: null,
+          externalCampaignId: null,
+          metadataJson: null,
+          occurredAt: now,
+        })
+      }
+
+      if (
+        previousRemoteState.publicationStatus !==
+        publicationStatus
+      ) {
+        changeEvents.push({
+          listingId: listing.id,
+          eventType: 'STATUS',
+          source: 'ALLEGRO_SYNC',
+          oldValue:
+            previousRemoteState.publicationStatus,
+          newValue: publicationStatus,
+          currency: null,
+          externalCampaignId: null,
+          metadataJson: null,
+          occurredAt: now,
+        })
+      }
+
+      if (changeEvents.length > 0) {
+        await db
+          .insert(allegroChangeEvents)
+          .values(changeEvents)
+      }
+    }
 
     if (
       effectivePriceMinor !== null &&

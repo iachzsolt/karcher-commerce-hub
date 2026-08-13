@@ -418,24 +418,34 @@ function DataConnectionSchedulePanel({
           time !== value,
       )
 
-    if (
-      enabled &&
-      mode === 'DAILY_TIMES' &&
-      nextTimes.length === 0
-    ) {
-      setError(
-        'Bekapcsolt automatikus frissítésnél legalább egy időpont szükséges.',
-      )
-
-      return
-    }
-
     setDailyTimes(
       nextTimes,
     )
 
+    setError(null)
+
+    /*
+     * Az utolsó napi időpont törlésekor
+     * az ütemezést egyetlen mentéssel
+     * kikapcsoljuk. Így a felhasználó
+     * szabadon ürítheti a listát, miközben
+     * nem marad érvénytelen aktív schedule.
+     */
+    const shouldDisable =
+      enabled &&
+      mode === 'DAILY_TIMES' &&
+      nextTimes.length === 0
+
+    if (shouldDisable) {
+      setEnabled(false)
+    }
+
     void persist(
       getDraft({
+        enabled:
+          shouldDisable
+            ? false
+            : enabled,
         dailyTimes:
           nextTimes,
       }),

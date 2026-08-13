@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { serve } from '@hono/node-server'
 import {
   createDatabase,
+  allegroChangeEvents,
   dataConnections,
   inventorySourceItems,
   campaigns,
@@ -19,7 +20,7 @@ import {
   products,
 } from '@karcher-commerce-hub/database'
 import { neon } from '@neondatabase/serverless'
-import { and, count, eq, gte, min, or } from 'drizzle-orm'
+import { and, count, desc, eq, gte, lt, min, or } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import {
@@ -44,7 +45,10 @@ const app = new Hono()
 app.use(
   '*',
   cors({
-    origin: 'http://localhost:5173',
+    origin: [
+      'http://localhost:5173',
+      'http://127.0.0.1:5173',
+    ],
   }),
 )
 
@@ -296,6 +300,219 @@ app.get('/products', async (context) => {
   }
 })
 
+
+function getBudapestHistoryBoundary(
+  year: number,
+  monthIndex: number,
+  day: number,
+) {
+  const approximate = new Date(
+    Date.UTC(year, monthIndex, day),
+  )
+  const getOffset = (date: Date) => {
+    const parts = new Intl.DateTimeFormat(
+      'en-CA',
+      {
+        timeZone: 'Europe/Budapest',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hourCycle: 'h23',
+      },
+    ).formatToParts(date)
+    const value = (type: string) =>
+      Number(
+        parts.find((part) => part.type === type)
+          ?.value,
+      )
+
+    return (
+      Date.UTC(
+        value('year'),
+        value('month') - 1,
+        value('day'),
+        value('hour'),
+        value('minute'),
+        value('second'),
+      ) - date.getTime()
+    )
+  }
+  const firstCandidate = new Date(
+    approximate.getTime() - getOffset(approximate),
+  )
+
+  return new Date(
+    approximate.getTime() - getOffset(firstCandidate),
+  )
+}
+
+function parseHistoryDate(value: string) {
+  const match =
+    /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.exec(
+      value,
+    )
+
+  if (!match) return null
+
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const date = new Date(Date.UTC(year, month - 1, day))
+
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return null
+  }
+
+  return { year, month, day, date }
+}
+
+function getBudapestDateInputValue(date = new Date()) {
+  const parts = new Intl.DateTimeFormat(
+    'en-CA',
+    {
+      timeZone: 'Europe/Budapest',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    },
+  ).formatToParts(date)
+  const value = (type: string) =>
+    parts.find((part) => part.type === type)?.value
+
+  return `${value('year')}-${value('month')}-${value('day')}`
+}
+
+app.get('/allegro/history', async (context) => {
+  if (!db) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database is not configured',
+      },
+      500,
+    )
+  }
+
+  const defaultTo = getBudapestDateInputValue()
+  const defaultFrom = getBudapestDateInputValue(
+    new Date(Date.now() - 14 * 24 * 60 * 60 * 1000),
+  )
+  const requestedFrom = context.req.query('from') ?? defaultFrom
+  const requestedTo = context.req.query('to') ?? defaultTo
+  const parsedFrom = parseHistoryDate(requestedFrom)
+  const parsedTo = parseHistoryDate(requestedTo)
+
+  if (!parsedFrom || !parsedTo) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'from and to must use YYYY-MM-DD',
+      },
+      400,
+    )
+  }
+
+  const rangeDays = Math.floor(
+    (parsedTo.date.getTime() - parsedFrom.date.getTime()) /
+      (24 * 60 * 60 * 1000),
+  )
+
+  if (rangeDays < 0 || rangeDays > 29) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'History date range must be between 1 and 30 days',
+      },
+      400,
+    )
+  }
+
+  const fromBoundary = getBudapestHistoryBoundary(
+    parsedFrom.year,
+    parsedFrom.month - 1,
+    parsedFrom.day,
+  )
+  const nextDay = new Date(parsedTo.date)
+  nextDay.setUTCDate(nextDay.getUTCDate() + 1)
+  const toBoundary = getBudapestHistoryBoundary(
+    nextDay.getUTCFullYear(),
+    nextDay.getUTCMonth(),
+    nextDay.getUTCDate(),
+  )
+  const limit = 20_000
+
+  try {
+    const rows = await db
+      .select({
+        id: allegroChangeEvents.id,
+        eventType: allegroChangeEvents.eventType,
+        source: allegroChangeEvents.source,
+        oldValue: allegroChangeEvents.oldValue,
+        newValue: allegroChangeEvents.newValue,
+        currency: allegroChangeEvents.currency,
+        externalCampaignId:
+          allegroChangeEvents.externalCampaignId,
+        metadataJson: allegroChangeEvents.metadataJson,
+        occurredAt: allegroChangeEvents.occurredAt,
+        listingId: platformListings.id,
+        offerId: platformListings.externalListingId,
+        sku: products.sku,
+        listingName: platformListings.listingName,
+      })
+      .from(allegroChangeEvents)
+      .innerJoin(
+        platformListings,
+        eq(
+          platformListings.id,
+          allegroChangeEvents.listingId,
+        ),
+      )
+      .innerJoin(
+        products,
+        eq(products.id, platformListings.productId),
+      )
+      .where(
+        and(
+          gte(allegroChangeEvents.occurredAt, fromBoundary),
+          lt(allegroChangeEvents.occurredAt, toBoundary),
+        ),
+      )
+      .orderBy(desc(allegroChangeEvents.occurredAt))
+      .limit(limit)
+
+    return context.json({
+      status: 'ok',
+      period: {
+        from: requestedFrom,
+        to: requestedTo,
+        timeZone: 'Europe/Budapest',
+      },
+      count: rows.length,
+      truncated: rows.length === limit,
+      data: rows.map((row) => ({
+        ...row,
+        occurredAt: row.occurredAt.toISOString(),
+      })),
+    })
+  } catch (error) {
+    console.error('Allegro history query failed:', error)
+
+    return context.json(
+      {
+        status: 'error',
+        message: 'Could not load Allegro history',
+      },
+      500,
+    )
+  }
+})
 
 app.get('/allegro/listings', async (context) => {
   if (!db) {
@@ -6370,6 +6587,22 @@ async function processPendingCampaignApplications() {
               ),
             )
 
+          if (row.campaignStatus !== nextCampaignStatus) {
+            await db
+              .insert(allegroChangeEvents)
+              .values({
+                listingId: row.listingId,
+                eventType: 'CAMPAIGN',
+                source: 'ALLEGRO_CAMPAIGN_SYNC',
+                oldValue: row.campaignStatus,
+                newValue: nextCampaignStatus,
+                externalCampaignId:
+                  row.externalCampaignId,
+                metadataJson: badgeRejectionText,
+                occurredAt: syncedAt,
+              })
+          }
+
           console.log(
             'Allegro campaign badge synchronized:',
             {
@@ -6408,6 +6641,8 @@ async function processPendingCampaignApplications() {
                 )
               : 'Allegro declined the campaign application'
 
+          const declinedAt = new Date()
+
           await db
             .update(listingCampaigns)
             .set({
@@ -6421,10 +6656,10 @@ async function processPendingCampaignApplications() {
                 'DECLINED',
 
               lastSyncedAt:
-                new Date(),
+                declinedAt,
 
               updatedAt:
-                new Date(),
+                declinedAt,
             })
             .where(
               eq(
@@ -6432,6 +6667,22 @@ async function processPendingCampaignApplications() {
                 row.id,
               ),
             )
+
+          if (row.campaignStatus !== 'DECLINED') {
+            await db
+              .insert(allegroChangeEvents)
+              .values({
+                listingId: row.listingId,
+                eventType: 'CAMPAIGN',
+                source: 'ALLEGRO_CAMPAIGN_SYNC',
+                oldValue: row.campaignStatus,
+                newValue: 'DECLINED',
+                externalCampaignId:
+                  row.externalCampaignId,
+                metadataJson: rejectionText,
+                occurredAt: declinedAt,
+              })
+          }
 
           console.warn(
             'Allegro campaign application declined:',
@@ -6559,6 +6810,8 @@ async function processPendingCampaignFinishOperations() {
         if (
           operationStatus === 'PROCESSED'
         ) {
+          const finishedAt = new Date()
+
           await db
             .update(listingCampaigns)
             .set({
@@ -6571,10 +6824,10 @@ async function processPendingCampaignFinishOperations() {
               finishRetryCount: 0,
 
               lastSyncedAt:
-                new Date(),
+                finishedAt,
 
               updatedAt:
-                new Date(),
+                finishedAt,
             })
             .where(
               eq(
@@ -6582,6 +6835,19 @@ async function processPendingCampaignFinishOperations() {
                 row.id,
               ),
             )
+
+          await db
+            .insert(allegroChangeEvents)
+            .values({
+              listingId: row.listingId,
+              eventType: 'CAMPAIGN',
+              source: 'ALLEGRO_CAMPAIGN_SYNC',
+              oldValue: row.campaignStatus,
+              newValue: 'FINISHED',
+              externalCampaignId:
+                row.externalCampaignId,
+              occurredAt: finishedAt,
+            })
 
           console.log(
             'Allegro campaign finish completed:',

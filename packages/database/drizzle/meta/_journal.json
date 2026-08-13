@@ -134,6 +134,13 @@
       "when": 1786358265578,
       "tag": "0018_yellow_alex_wilder",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1786631697191,
+      "tag": "0019_allegro_history",
+      "breakpoints": true
     }
   ]
 }

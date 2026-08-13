@@ -1,6 +1,8 @@
 import CommerceHubTopbar from '../components/CommerceHubTopbar'
 import HomePage from './HomePage'
 import AllegroCampaignsPage from './AllegroCampaignsPage'
+import AllegroHistoryPage from './AllegroHistoryPage'
+import AllegroOverviewPage from './AllegroOverviewPage'
 import AllegroSettingsPage from './AllegroSettingsPage'
 
 import {
@@ -9,19 +11,6 @@ import {
   Route,
   Routes,
 } from 'react-router-dom'
-
-function AllegroOverview() {
-  return (
-    <section>
-      <p className="section-label">ALLEGRO</p>
-      <h2>Áttekintés</h2>
-      <p>
-        Itt jelennek majd meg az Allegro fő statisztikái,
-        figyelmeztetései és legfontosabb állapotai.
-      </p>
-    </section>
-  )
-}
 
 function AllegroOffers() {
   return <HomePage view="allegroOffers" />
@@ -62,6 +51,10 @@ function AllegroPage() {
               Kampányok
             </NavLink>
 
+            <NavLink to="/allegro/history">
+              Előzmények
+            </NavLink>
+
             <NavLink to="/allegro/settings">
               Beállítások
             </NavLink>
@@ -81,7 +74,7 @@ function AllegroPage() {
 
           <Route
             path="overview"
-            element={<AllegroOverview />}
+            element={<AllegroOverviewPage />}
           />
 
           <Route
@@ -92,6 +85,11 @@ function AllegroPage() {
           <Route
             path="campaigns"
             element={<AllegroCampaigns />}
+          />
+
+          <Route
+            path="history"
+            element={<AllegroHistoryPage />}
           />
 
           <Route
