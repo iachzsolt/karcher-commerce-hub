@@ -7,6 +7,12 @@ export const API_BASE_URL = (
 
 let apiBearerToken: string | null = null
 
+const AUTHENTICATION_ERROR_MESSAGES = new Set([
+  'Commerce Hub authentication is required',
+  'Authentication is required',
+  'Authentication is invalid or expired',
+])
+
 export function setApiBearerToken(
   token: string | null,
 ) {
@@ -68,9 +74,21 @@ if (typeof window !== 'undefined') {
       apiBearerToken &&
       response.status === 401
     ) {
-      window.dispatchEvent(
-        new Event('commerce-hub:auth-required'),
-      )
+      const body = (await response
+        .clone()
+        .json()
+        .catch(() => null)) as
+        | { message?: unknown }
+        | null
+
+      if (
+        typeof body?.message === 'string' &&
+        AUTHENTICATION_ERROR_MESSAGES.has(body.message)
+      ) {
+        window.dispatchEvent(
+          new Event('commerce-hub:auth-required'),
+        )
+      }
     }
 
     return response
