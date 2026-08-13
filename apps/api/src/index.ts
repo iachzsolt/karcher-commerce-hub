@@ -6906,6 +6906,8 @@ async function processDueCampaignFinishes() {
 }
 let campaignSchedulerRunning = false
 
+const CAMPAIGN_SUBMISSION_MAX_RETRY_COUNT = 5
+
 async function recoverStaleCampaignSubmissions() {
   if (!db) {
     return
@@ -7138,6 +7140,9 @@ async function processDueCampaignSubmissions() {
         validFrom:
           listingCampaigns.validFrom,
 
+        validTo:
+          listingCampaigns.validTo,
+
         retryAfter:
           listingCampaigns.retryAfter,
 
@@ -7158,10 +7163,56 @@ async function processDueCampaignSubmissions() {
           row.validFrom !== null &&
           row.validFrom <= now &&
           (
+            row.validTo === null ||
+            row.validTo >= now
+          ) &&
+          row.retryCount <
+            CAMPAIGN_SUBMISSION_MAX_RETRY_COUNT &&
+          (
             row.retryAfter === null ||
             row.retryAfter <= now
           ),
       )
+
+    const blockedRows =
+      scheduledRows.filter(
+        (row) =>
+          (
+            row.validTo !== null &&
+            row.validTo < now
+          ) ||
+          row.retryCount >=
+            CAMPAIGN_SUBMISSION_MAX_RETRY_COUNT,
+      )
+
+    for (const row of blockedRows) {
+      const applicationError =
+        row.validTo !== null &&
+        row.validTo < now
+          ? `Automatic submission stopped because the campaign period expired: ${row.validTo.toISOString()}`
+          : `Automatic submission stopped after ${CAMPAIGN_SUBMISSION_MAX_RETRY_COUNT} failed attempts`
+
+      await db
+        .update(listingCampaigns)
+        .set({
+          applicationStatus: 'FAILED',
+          applicationError,
+          retryAfter: null,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(
+              listingCampaigns.id,
+              row.id,
+            ),
+            eq(
+              listingCampaigns.applicationStatus,
+              'SCHEDULED',
+            ),
+          ),
+        )
+    }
 
     if (dueRows.length === 0) {
       return
@@ -7226,6 +7277,18 @@ async function processDueCampaignSubmissions() {
             ? responseBody.message
             : `HTTP ${response.status}`
 
+        const retryableConflict =
+          response.status === 409 &&
+          responseMessage.includes(
+            'has not started yet',
+          )
+
+        const terminalFailure =
+          response.status >= 400 &&
+          response.status < 500 &&
+          response.status !== 429 &&
+          !retryableConflict
+
         let retryDelayMs =
           60 * 60 * 1000
 
@@ -7269,14 +7332,39 @@ async function processDueCampaignSubmissions() {
               campaignId,
           )
 
+        const retryScheduled =
+          !terminalFailure &&
+          affectedRows.some(
+            (row) =>
+              row.retryCount + 1 <
+                CAMPAIGN_SUBMISSION_MAX_RETRY_COUNT,
+          )
+
         for (const row of affectedRows) {
+          const nextRetryCount =
+            row.retryCount + 1
+
+          const retriesExhausted =
+            nextRetryCount >=
+              CAMPAIGN_SUBMISSION_MAX_RETRY_COUNT
+
           await db
             .update(listingCampaigns)
             .set({
-              retryAfter,
+              applicationStatus:
+                terminalFailure ||
+                retriesExhausted
+                  ? 'FAILED'
+                  : 'SCHEDULED',
+
+              retryAfter:
+                terminalFailure ||
+                retriesExhausted
+                  ? null
+                  : retryAfter,
 
               retryCount:
-                row.retryCount + 1,
+                nextRetryCount,
 
               applicationError:
                 responseMessage,
@@ -7297,7 +7385,9 @@ async function processDueCampaignSubmissions() {
             campaignId,
             status: response.status,
             retryAfter:
-              retryAfter.toISOString(),
+              retryScheduled
+                ? retryAfter.toISOString()
+                : null,
             response: responseBody,
           },
         )

@@ -1559,12 +1559,31 @@ textarea {
   align-items: center;
   min-height: 26px;
   padding: 0 9px;
+  border: 1px solid transparent;
   border-radius: 999px;
   background: #f0f0f0;
   color: #444;
   font-size: 12px;
   font-weight: 800;
   white-space: nowrap;
+}
+
+.campaign-preparation-status-active {
+  border-color: #9ed7ae;
+  background: #e7f7ec;
+  color: #176b32;
+}
+
+.campaign-preparation-status-finished {
+  border-color: #c6d0dc;
+  background: #edf1f5;
+  color: #455568;
+}
+
+.campaign-preparation-status-declined {
+  border-color: #efb3b3;
+  background: #fdeaea;
+  color: #a12626;
 }
 
 /* Campaign date + time inputs */

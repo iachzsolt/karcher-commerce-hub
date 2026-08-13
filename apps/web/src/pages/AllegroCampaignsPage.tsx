@@ -385,6 +385,44 @@ function formatPreparationStatus(
   return state.applicationStatus ?? '–'
 }
 
+function getPreparationStatusClassName(
+  state: CampaignPreparationState | undefined,
+) {
+  const classNames = [
+    'campaign-preparation-status',
+  ]
+
+  if (state?.campaignStatus === 'FINISHED') {
+    classNames.push(
+      'campaign-preparation-status-finished',
+    )
+  } else if (
+    state?.campaignStatus === 'DECLINED' ||
+    state?.applicationStatus === 'DECLINED'
+  ) {
+    classNames.push(
+      'campaign-preparation-status-declined',
+    )
+  } else if (
+    state?.campaignStatus === 'ACTIVE'
+  ) {
+    classNames.push(
+      'campaign-preparation-status-active',
+    )
+  }
+
+  if (
+    state?.applicationStatus ===
+    'SUBMISSION_UNKNOWN'
+  ) {
+    classNames.push(
+      'campaign-preparation-status-warning',
+    )
+  }
+
+  return classNames.join(' ')
+}
+
 function getPreparationError(
   state: CampaignPreparationState | undefined,
 ) {
@@ -3102,14 +3140,11 @@ function AllegroCampaignsPage() {
                               <td>
                                 <div className="campaign-preparation-state">
                                   <span
-                                    className={`campaign-preparation-status${
+                                    className={getPreparationStatusClassName(
                                       preparationStatuses[
                                         listing.id
-                                      ]?.applicationStatus ===
-                                      'SUBMISSION_UNKNOWN'
-                                        ? ' campaign-preparation-status-warning'
-                                        : ''
-                                    }`}
+                                      ],
+                                    )}
                                   >
                                     {formatPreparationStatus(
                                       preparationStatuses[
