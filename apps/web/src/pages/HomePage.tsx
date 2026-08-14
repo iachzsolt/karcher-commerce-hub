@@ -946,26 +946,56 @@ function HomePage({
     setRefreshingAllegro(true)
 
     try {
-      const syncResponse = await fetch(
-        `${API_BASE_URL}/auth/allegro/sync`,
-        {
-          method: 'POST',
-        },
-      )
-
-      if (!syncResponse.ok) {
-        const errorData = (await syncResponse
-          .json()
-          .catch(() => null)) as
-          | {
-              message?: string
-            }
-          | null
-
-        throw new Error(
-          errorData?.message ??
-            'Nem sikerült frissíteni az Allegro-ajánlatokat.',
+      const offerIds = allegroListings
+        .map((listing) => listing.offerId)
+        .filter(
+          (offerId): offerId is string =>
+            typeof offerId === 'string' &&
+            offerId.trim().length > 0,
         )
+
+      if (offerIds.length > 0) {
+        const syncBatches: string[][] = []
+
+        for (
+          let index = 0;
+          index < offerIds.length;
+          index += 10
+        ) {
+          syncBatches.push(
+            offerIds.slice(index, index + 10),
+          )
+        }
+
+        for (const batch of syncBatches) {
+          const syncResponse = await fetch(
+            `${API_BASE_URL}/auth/allegro/sync`,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                offerIds: batch,
+              }),
+            },
+          )
+
+          if (!syncResponse.ok) {
+            const errorData = (await syncResponse
+              .json()
+              .catch(() => null)) as
+              | {
+                  message?: string
+                }
+              | null
+
+            throw new Error(
+              errorData?.message ??
+                'Nem sikerült frissíteni az Allegro-ajánlatokat.',
+            )
+          }
+        }
       }
 
       const [
@@ -1156,6 +1186,11 @@ function HomePage({
         data: {
           desiredStock: number
           stockLocked: boolean
+          desiredPublicationStatus:
+            | 'ACTIVE'
+            | 'INACTIVE'
+            | null
+          stockAutoPaused: boolean
         }
       }
 
@@ -1168,6 +1203,10 @@ function HomePage({
                   result.data.desiredStock,
                 stockLocked:
                   result.data.stockLocked,
+                desiredPublicationStatus:
+                  result.data.desiredPublicationStatus,
+                stockAutoPaused:
+                  result.data.stockAutoPaused,
               }
             : item,
         ),
@@ -2477,7 +2516,17 @@ ${changes.join('\n')}`,
 
       const syncResponse = await fetch(
         `${API_BASE_URL}/auth/allegro/sync`,
-        { method: 'POST' },
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            offerIds: [
+              listing.offerId,
+            ].filter(Boolean),
+          }),
+        },
       )
 
       if (!syncResponse.ok) {

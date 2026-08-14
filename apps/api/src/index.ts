@@ -5337,11 +5337,57 @@ app.patch('/allegro/listings/:id/desired-stock', async (context) => {
       )
     }
 
+    const [current] = await db
+      .select({
+        stockAutoPaused:
+          listingDesiredStates.stockAutoPaused,
+      })
+      .from(listingDesiredStates)
+      .where(
+        eq(
+          listingDesiredStates.listingId,
+          listingId,
+        ),
+      )
+      .limit(1)
+
+    if (!current) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Desired state was not found',
+        },
+        404,
+      )
+    }
+
+    /*
+     * Ha a rendszer korábban automatikusan leállította
+     * az ajánlatot (stockAutoPaused), és a felhasználó
+     * pozitív készletet ad meg, akkor a kézi készlet-
+     * beállítás veszi át az irányítást: a kívánt státusz
+     * ACTIVE-ra vált és az automatikus pause megszűnik.
+     *
+     * A manuálisan (nem rendszer által) leállított
+     * ajánlatoknál stockAutoPaused=false, így azok
+     * érintetlenek maradnak.
+     */
+    const reactivatingFromStockPause =
+      current.stockAutoPaused === true &&
+      desiredStock > 0
+
     const [updated] = await db
       .update(listingDesiredStates)
       .set({
         desiredStock,
         stockLocked: true,
+        ...(reactivatingFromStockPause
+          ? {
+              desiredPublicationStatus:
+                'ACTIVE',
+              stockAutoPaused: false,
+            }
+          : {}),
         updatedBy: 'COMMERCE_HUB_UI',
         updatedAt: new Date(),
       })
@@ -5357,6 +5403,10 @@ app.patch('/allegro/listings/:id/desired-stock', async (context) => {
           listingDesiredStates.desiredStock,
         stockLocked:
           listingDesiredStates.stockLocked,
+        desiredPublicationStatus:
+          listingDesiredStates.desiredPublicationStatus,
+        stockAutoPaused:
+          listingDesiredStates.stockAutoPaused,
         updatedBy:
           listingDesiredStates.updatedBy,
         updatedAt:
@@ -5657,6 +5707,14 @@ app.patch('/allegro/listings/:id/desired-status', async (context) => {
       .set({
         desiredPublicationStatus:
           desiredStatus,
+
+        /*
+         * Kézi státuszváltás átveszi az irányítást
+         * az automatikus pause fölött, hogy a későbbi
+         * inventory automatizáció ne írja felül
+         * a felhasználó döntését.
+         */
+        stockAutoPaused: false,
 
         updatedBy: 'COMMERCE_HUB_UI',
         updatedAt: new Date(),
