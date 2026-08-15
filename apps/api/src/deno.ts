@@ -4,7 +4,6 @@ import {
   runDailyMaintenance,
   runHourlyScheduler,
   runMinuteScheduler,
-  runSixHourlyScheduler,
 } from './index.js'
 
 function isCronEnabled() {
@@ -31,29 +30,22 @@ async function runCronJob(
 }
 
 Deno.cron(
-  'commerce-hub-minute-scheduler',
-  '* * * * *',
+  'commerce-hub-daily-scheduler',
+  '40 15 * * 1-5',
+  { timezone: 'Europe/Budapest' },
   () => runCronJob(
-    'minute scheduler',
+    'daily scheduler',
     runMinuteScheduler,
   ),
 )
 
 Deno.cron(
-  'commerce-hub-hourly-scheduler',
-  '0 * * * *',
+  'commerce-hub-catalog-sync',
+  '0 9,13,17 * * *',
+  { timezone: 'Europe/Budapest' },
   () => runCronJob(
-    'hourly scheduler',
+    'catalog sync',
     runHourlyScheduler,
-  ),
-)
-
-Deno.cron(
-  'commerce-hub-six-hour-scheduler',
-  '0 */6 * * *',
-  () => runCronJob(
-    'six-hour scheduler',
-    runSixHourlyScheduler,
   ),
 )
 

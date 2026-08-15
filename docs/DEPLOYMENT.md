@@ -112,9 +112,20 @@ initial read-only smoke test.
 
 ## Deno entry point and scheduled jobs
 
-The Deno entry point is `apps/api/src/deno.ts`. It registers four UTC cron jobs
-at module scope, as required by Deno Deploy, and serves the same Hono
-application as the local Node entry point.
+The Deno entry point is `apps/api/src/deno.ts`. It registers three cron jobs at
+module scope, as required by Deno Deploy, and serves the same Hono application
+as the local Node entry point. Schedules use the `Europe/Budapest` timezone:
+
+- `40 15 * * 1-5` — daily scheduler (token refresh, price schedules, data
+  connection schedules, campaign jobs) once per weekday at 15:40.
+- `0 9,13,17 * * *` — Allegro catalog sync (offers, listings, stock/status)
+  three times per day.
+- `0 2 * * *` — daily maintenance (Allegro history cleanup), UTC.
+
+The former minute poll and six-hour cron jobs were removed. The minute poll
+kept the Neon database compute active 24/7 (free-tier compute hours), and the
+six-hour sync is a no-op in production. Between the scheduled runs the
+database compute can suspend.
 
 Keep `COMMERCE_HUB_DENO_CRON_ENABLED=false` during the first deployment. Deno
 cron executions have at-least-once delivery semantics, so the Allegro jobs
