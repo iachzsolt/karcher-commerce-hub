@@ -1126,19 +1126,21 @@ dataConnectionsApi.put(
 let refreshScheduleProcessorRunning =
   false
 
-export async function processDueDataConnectionSchedules() {
+export async function processDueDataConnectionSchedules(): Promise<boolean> {
   if (
     refreshScheduleProcessorRunning
   ) {
-    return
+    return false
   }
 
   if (!db) {
-    return
+    return false
   }
 
   refreshScheduleProcessorRunning =
     true
+
+  let processedAnySchedule = false
 
   try {
     const now =
@@ -1181,6 +1183,9 @@ export async function processDueDataConnectionSchedules() {
             ),
           ),
         )
+
+    processedAnySchedule =
+      dueSchedules.length > 0
 
     for (
       const item of dueSchedules
@@ -1406,6 +1411,8 @@ export async function processDueDataConnectionSchedules() {
     refreshScheduleProcessorRunning =
       false
   }
+
+  return processedAnySchedule
 }
 
 /* ============================================================

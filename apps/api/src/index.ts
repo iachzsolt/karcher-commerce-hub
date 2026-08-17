@@ -8277,6 +8277,9 @@ async function runMinuteSchedulerJobs() {
   const isEnabled = (name: string) =>
     process.env[name]?.trim().toLowerCase() === 'true'
 
+  let dataConnectionImportRan =
+    false
+
   const jobs = [
     ['token refresh', refreshAllegroSessionIfNeeded],
     ...(isEnabled('COMMERCE_HUB_PRICE_SCHEDULES_ENABLED')
@@ -8284,7 +8287,10 @@ async function runMinuteSchedulerJobs() {
       : []),
     ...(isEnabled('COMMERCE_HUB_DATA_CONNECTION_SCHEDULES_ENABLED') ? [[
       'data connection schedules',
-      processDueDataConnectionSchedules,
+      async () => {
+        dataConnectionImportRan =
+          await processDueDataConnectionSchedules()
+      },
     ] as const] : []),
     ...(isEnabled('COMMERCE_HUB_CAMPAIGN_AUTOMATION_ENABLED') ? [[
       'campaign submissions',
@@ -8313,6 +8319,13 @@ async function runMinuteSchedulerJobs() {
       )
     }
   })
+
+  if (
+    dataConnectionImportRan &&
+    isEnabled('COMMERCE_HUB_CATALOG_SYNC_ENABLED')
+  ) {
+    await runAutomaticAllegroCatalogSync()
+  }
 }
 
 export async function runHourlyScheduler() {

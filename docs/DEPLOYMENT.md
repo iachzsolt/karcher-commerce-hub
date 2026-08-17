@@ -112,20 +112,24 @@ initial read-only smoke test.
 
 ## Deno entry point and scheduled jobs
 
-The Deno entry point is `apps/api/src/deno.ts`. It registers three cron jobs at
+The Deno entry point is `apps/api/src/deno.ts`. It registers two cron jobs at
 module scope, as required by Deno Deploy, and serves the same Hono application
-as the local Node entry point. Schedules use the `Europe/Budapest` timezone:
+as the local Node entry point. Cron schedules are expressed in UTC so the
+intended local times hold regardless of timezone support:
 
-- `40 15 * * 1-5` — daily scheduler (token refresh, price schedules, data
-  connection schedules, campaign jobs) once per weekday at 15:40.
-- `0 9,13,17 * * *` — Allegro catalog sync (offers, listings, stock/status)
-  three times per day.
-- `0 2 * * *` — daily maintenance (Allegro history cleanup), UTC.
+- `40 13 * * *` — daily scheduler at 15:40 Europe/Budapest (13:40 UTC). It
+  refreshes the Allegro session, applies due price schedules, processes due
+  data connection schedules (weekday-only imports per the schedule settings),
+  and — when a data connection import actually ran and
+  `COMMERCE_HUB_CATALOG_SYNC_ENABLED=true` — runs the Allegro catalog sync
+  (offers, listings, stock/status) right after the import.
+- `0 2 * * *` — daily maintenance (Allegro history cleanup), 02:00 UTC.
 
-The former minute poll and six-hour cron jobs were removed. The minute poll
-kept the Neon database compute active 24/7 (free-tier compute hours), and the
-six-hour sync is a no-op in production. Between the scheduled runs the
-database compute can suspend.
+The former minute poll, six-hour cron, and standalone catalog-sync cron were
+removed. The minute poll kept the Neon database compute active 24/7 (free-tier
+compute hours), the six-hour sync is a no-op in production, and the catalog
+sync now runs only when the automatic data connection sync is configured.
+Between the scheduled runs the database compute can suspend.
 
 Keep `COMMERCE_HUB_DENO_CRON_ENABLED=false` during the first deployment. Deno
 cron executions have at-least-once delivery semantics, so the Allegro jobs

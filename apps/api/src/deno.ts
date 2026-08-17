@@ -2,7 +2,6 @@ import {
   app,
   initializeCommerceHubRuntime,
   runDailyMaintenance,
-  runHourlyScheduler,
   runMinuteScheduler,
 } from './index.js'
 
@@ -31,21 +30,10 @@ async function runCronJob(
 
 Deno.cron(
   'commerce-hub-daily-scheduler',
-  '40 15 * * 1-5',
-  { timezone: 'Europe/Budapest' },
+  '40 13 * * *',
   () => runCronJob(
     'daily scheduler',
     runMinuteScheduler,
-  ),
-)
-
-Deno.cron(
-  'commerce-hub-catalog-sync',
-  '0 9,13,17 * * *',
-  { timezone: 'Europe/Budapest' },
-  () => runCronJob(
-    'catalog sync',
-    runHourlyScheduler,
   ),
 )
 
