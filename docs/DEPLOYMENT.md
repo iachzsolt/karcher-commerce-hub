@@ -112,17 +112,26 @@ initial read-only smoke test.
 
 ## Deno entry point and scheduled jobs
 
-The Deno entry point is `apps/api/src/deno.ts`. It registers two cron jobs at
+The Deno entry point is `apps/api/src/deno.ts`. It registers cron jobs at
 module scope, as required by Deno Deploy, and serves the same Hono application
 as the local Node entry point. Cron schedules are expressed in UTC so the
 intended local times hold regardless of timezone support:
 
-- `40 13 * * *` — daily scheduler at 15:40 Europe/Budapest (13:40 UTC). It
-  refreshes the Allegro session, applies due price schedules, processes due
-  data connection schedules (weekday-only imports per the schedule settings),
-  and — when a data connection import actually ran and
-  `COMMERCE_HUB_CATALOG_SYNC_ENABLED=true` — runs the Allegro catalog sync
-  (offers, listings, stock/status) right after the import.
+- Daily scheduler crons — registered dynamically at startup from the enabled
+  data connection schedule (`daily_times_json` of the INVENTORY connection).
+  Every configured local time (e.g. `15:40` Europe/Budapest) maps to two UTC
+  cron rules, one for the summer and one for the winter offset (CEST +2 / CET
+  +1), because Deno Deploy evaluates cron rules in UTC and ignores the
+  timezone option. The database due-check (`next_run_at`, computed in the
+  schedule's timezone) decides which firing actually runs; the other firing
+  is a no-op. This keeps imports aligned with every configured refresh time:
+  sheet import → Allegro catalog sync (offers, listings, stock/status) →
+  platform automation (stock refresh). The catalog sync runs only when the
+  import succeeded and `COMMERCE_HUB_CATALOG_SYNC_ENABLED=true`; running it
+  before the automation ensures newly imported offers receive their stock in
+  the same run. Changing the configured times takes effect on the next
+  deploy. If the schedule cannot be read at startup, a fallback rule
+  (15:40 Europe/Budapest) is registered.
 - `0 2 * * *` — daily maintenance (Allegro history cleanup), 02:00 UTC.
 
 The former minute poll, six-hour cron, and standalone catalog-sync cron were

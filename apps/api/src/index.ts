@@ -8277,8 +8277,12 @@ async function runMinuteSchedulerJobs() {
   const isEnabled = (name: string) =>
     process.env[name]?.trim().toLowerCase() === 'true'
 
-  let dataConnectionImportRan =
-    false
+  const runCatalogSyncBeforeAutomation =
+    isEnabled('COMMERCE_HUB_CATALOG_SYNC_ENABLED')
+      ? async () => {
+          await runAutomaticAllegroCatalogSync()
+        }
+      : undefined
 
   const jobs = [
     ['token refresh', refreshAllegroSessionIfNeeded],
@@ -8288,8 +8292,9 @@ async function runMinuteSchedulerJobs() {
     ...(isEnabled('COMMERCE_HUB_DATA_CONNECTION_SCHEDULES_ENABLED') ? [[
       'data connection schedules',
       async () => {
-        dataConnectionImportRan =
-          await processDueDataConnectionSchedules()
+        await processDueDataConnectionSchedules({
+          beforeAutomation: runCatalogSyncBeforeAutomation,
+        })
       },
     ] as const] : []),
     ...(isEnabled('COMMERCE_HUB_CAMPAIGN_AUTOMATION_ENABLED') ? [[
@@ -8319,13 +8324,6 @@ async function runMinuteSchedulerJobs() {
       )
     }
   })
-
-  if (
-    dataConnectionImportRan &&
-    isEnabled('COMMERCE_HUB_CATALOG_SYNC_ENABLED')
-  ) {
-    await runAutomaticAllegroCatalogSync()
-  }
 }
 
 export async function runHourlyScheduler() {

@@ -1126,7 +1126,13 @@ dataConnectionsApi.put(
 let refreshScheduleProcessorRunning =
   false
 
-export async function processDueDataConnectionSchedules(): Promise<boolean> {
+export interface DataConnectionScheduleProcessorOptions {
+  beforeAutomation?: () => Promise<void> | void
+}
+
+export async function processDueDataConnectionSchedules(
+  options?: DataConnectionScheduleProcessorOptions,
+): Promise<boolean> {
   if (
     refreshScheduleProcessorRunning
   ) {
@@ -1314,6 +1320,24 @@ export async function processDueDataConnectionSchedules(): Promise<boolean> {
                 0,
             },
           )
+
+          try {
+            if (options?.beforeAutomation) {
+              await options.beforeAutomation()
+            }
+          } catch (beforeAutomationError) {
+            console.error(
+              'Inventory refresh pre-automation hook error:',
+              {
+                connectionId:
+                  item.connection.id,
+                error:
+                  beforeAutomationError instanceof Error
+                    ? beforeAutomationError.message
+                    : String(beforeAutomationError),
+              },
+            )
+          }
 
           try {
             const automationResult =
