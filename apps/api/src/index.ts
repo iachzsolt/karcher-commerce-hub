@@ -6,6 +6,7 @@ import {
   dataConnections,
   inventorySourceItems,
   campaigns,
+  catalogSyncRuns,
   listingCampaigns,
   listingAcceptedStates,
   listingDesiredStates,
@@ -109,6 +110,46 @@ app.get('/auth/session', (context) => {
 
 app.route('/auth/allegro', allegroAuth)
 app.route('/data-connections', dataConnectionsApi)
+
+app.post('/allegro/catalog-sync', async (context) => {
+  const result =
+    await runAutomaticAllegroCatalogSync(
+      'MANUAL',
+    )
+
+  return context.json(
+    result,
+    result.status === 'FAILED'
+      ? 500
+      : 200,
+  )
+})
+
+app.get('/allegro/catalog-sync-runs', async (context) => {
+  if (!db) {
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Database is not configured',
+      },
+      503,
+    )
+  }
+
+  const runs = await db
+    .select()
+    .from(catalogSyncRuns)
+    .orderBy(
+      desc(catalogSyncRuns.startedAt),
+    )
+    .limit(20)
+
+  return context.json({
+    status: 'ok',
+    runs,
+  })
+})
 
 const PRICE_SCHEDULE_PROCESS_INTERVAL_MS =
   60 * 1000
@@ -7897,22 +7938,91 @@ type AllegroCatalogHubListing = {
   acceptedAt?: string | null
 }
 
-async function runAutomaticAllegroCatalogSync() {
+export type AllegroCatalogSyncTrigger =
+  | 'AUTOMATIC'
+  | 'MANUAL'
+
+export type AllegroCatalogSyncResult =
+  | {
+      status: 'SKIPPED'
+      trigger: AllegroCatalogSyncTrigger
+      reason:
+        | 'NOT_PRODUCTION'
+        | 'ALREADY_RUNNING'
+    }
+  | {
+      status: 'SUCCESS'
+      trigger: AllegroCatalogSyncTrigger
+      runId: string | null
+      startedAt: string
+      finishedAt: string
+      totalOffers: number
+      newOffers: number
+      renamedOffers: number
+      offersWithoutSku: number
+      syncedOffers: number
+      initializedBaselines: number
+    }
+  | {
+      status: 'FAILED'
+      trigger: AllegroCatalogSyncTrigger
+      runId: string | null
+      startedAt: string
+      finishedAt: string
+      error: string
+    }
+
+async function runAutomaticAllegroCatalogSync(
+  trigger: AllegroCatalogSyncTrigger = 'AUTOMATIC',
+): Promise<AllegroCatalogSyncResult> {
+  const startedAt = new Date()
+
   if (
     (process.env.ALLEGRO_ENV ?? 'SANDBOX')
       .toUpperCase() !== 'PRODUCTION'
   ) {
-    return
+    return {
+      status: 'SKIPPED',
+      trigger,
+      reason: 'NOT_PRODUCTION',
+    }
   }
 
   if (automaticAllegroCatalogSyncRunning) {
-    return
+    return {
+      status: 'SKIPPED',
+      trigger,
+      reason: 'ALREADY_RUNNING',
+    }
   }
 
   automaticAllegroCatalogSyncRunning =
     true
 
+  let runId: string | null = null
+
   try {
+    if (db) {
+      try {
+        const [insertedRun] = await db
+          .insert(catalogSyncRuns)
+          .values({
+            trigger,
+            status: 'RUNNING',
+          })
+          .returning({
+            id: catalogSyncRuns.id,
+          })
+
+        runId = insertedRun?.id ?? null
+      } catch (error) {
+        console.error(
+          'Failed to record catalog sync run start:',
+          error,
+        )
+      }
+    }
+
     const allOffers: AllegroCatalogOffer[] =
       []
 
@@ -8200,7 +8310,7 @@ async function runAutomaticAllegroCatalogSync() {
     }
 
     console.log(
-      'Automatic Allegro catalog sync completed:',
+      `Allegro catalog sync (${trigger}) completed:`,
       {
         allegroOffers:
           allOffers.length,
@@ -8225,11 +8335,84 @@ async function runAutomaticAllegroCatalogSync() {
         initializedBaselines,
       },
     )
+
+    if (runId && db) {
+      await db
+        .update(catalogSyncRuns)
+        .set({
+          status: 'SUCCESS',
+          totalOffers: allOffers.length,
+          newOffers: newOffers.length,
+          renamedOffers: renamedOffers.length,
+          offersWithoutSku:
+            offersWithoutSku.length,
+          syncedOffers,
+          initializedBaselines,
+          finishedAt: new Date(),
+        })
+        .where(
+          eq(catalogSyncRuns.id, runId),
+        )
+        .catch((error) => {
+          console.error(
+            'Failed to finalize catalog sync run:',
+            error,
+          )
+        })
+    }
+
+    return {
+      status: 'SUCCESS',
+      trigger,
+      runId,
+      startedAt: startedAt.toISOString(),
+      finishedAt: new Date().toISOString(),
+      totalOffers: allOffers.length,
+      newOffers: newOffers.length,
+      renamedOffers: renamedOffers.length,
+      offersWithoutSku:
+        offersWithoutSku.length,
+      syncedOffers,
+      initializedBaselines,
+    }
   } catch (error) {
+    const errorMessage =
+      error instanceof Error
+        ? error.message
+        : 'Unknown Allegro catalog sync error'
+
+    if (runId && db) {
+      await db
+        .update(catalogSyncRuns)
+        .set({
+          status: 'FAILED',
+          error: errorMessage,
+          finishedAt: new Date(),
+        })
+        .where(
+          eq(catalogSyncRuns.id, runId),
+        )
+        .catch((finalizeError) => {
+          console.error(
+            'Failed to record catalog sync run failure:',
+            finalizeError,
+          )
+        })
+    }
+
     console.error(
-      'Automatic Allegro catalog sync failed:',
+      `Allegro catalog sync (${trigger}) failed:`,
       error,
     )
+
+    return {
+      status: 'FAILED',
+      trigger,
+      runId,
+      startedAt: startedAt.toISOString(),
+      finishedAt: new Date().toISOString(),
+      error: errorMessage,
+    }
   } finally {
     automaticAllegroCatalogSyncRunning =
       false
@@ -8280,7 +8463,17 @@ async function runMinuteSchedulerJobs() {
   const runCatalogSyncBeforeAutomation =
     isEnabled('COMMERCE_HUB_CATALOG_SYNC_ENABLED')
       ? async () => {
-          await runAutomaticAllegroCatalogSync()
+          const result =
+            await runAutomaticAllegroCatalogSync()
+
+          if (
+            result.status === 'FAILED'
+          ) {
+            console.error(
+              'Catalog sync before automation failed:',
+              result.error,
+            )
+          }
         }
       : undefined
 
@@ -8335,13 +8528,15 @@ export async function runHourlyScheduler() {
     console.log(
       'Skipping hourly scheduler: catalog sync is disabled',
     )
-    return
+return
   }
 
   await runWithSchedulerLease(
     'hourly-scheduler',
     55 * 60 * 1000,
-    runAutomaticAllegroCatalogSync,
+    async () => {
+      await runAutomaticAllegroCatalogSync()
+    },
   )
 }
 

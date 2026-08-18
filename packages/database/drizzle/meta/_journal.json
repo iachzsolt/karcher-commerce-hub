@@ -141,6 +141,20 @@
       "when": 1786631697191,
       "tag": "0019_allegro_history",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1786649077000,
+      "tag": "0020_scheduler_leases",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1787120947000,
+      "tag": "0021_catalog_sync_runs",
+      "breakpoints": true
     }
   ]
 }

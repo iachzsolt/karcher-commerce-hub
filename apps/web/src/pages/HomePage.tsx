@@ -162,6 +162,54 @@ type AllegroImportIssueResponse = {
   data: AllegroImportIssue[]
 }
 
+type CatalogSyncRun = {
+  id: string
+  trigger: 'AUTOMATIC' | 'MANUAL'
+  status:
+    | 'RUNNING'
+    | 'SUCCESS'
+    | 'FAILED'
+    | 'SKIPPED'
+  totalOffers: number
+  newOffers: number
+  renamedOffers: number
+  offersWithoutSku: number
+  syncedOffers: number
+  initializedBaselines: number
+  error: string | null
+  startedAt: string
+  finishedAt: string | null
+}
+
+type CatalogSyncRunsResponse = {
+  status: string
+  runs: CatalogSyncRun[]
+}
+
+type CatalogSyncResult =
+  | {
+      status: 'SKIPPED'
+      reason:
+        | 'NOT_PRODUCTION'
+        | 'ALREADY_RUNNING'
+    }
+  | {
+      status: 'SUCCESS'
+      runId: string | null
+      startedAt: string
+      finishedAt: string
+      totalOffers: number
+      newOffers: number
+      renamedOffers: number
+      offersWithoutSku: number
+      syncedOffers: number
+      initializedBaselines: number
+    }
+  | {
+      status: 'FAILED'
+      error: string
+    }
+
 type ServiceStatus = {
   name: string
   description: string
@@ -615,6 +663,18 @@ function HomePage({
   const [allegroImportIssues, setAllegroImportIssues] =
     useState<AllegroImportIssue[]>([])
 
+  const [catalogSyncRuns, setCatalogSyncRuns] =
+    useState<CatalogSyncRun[]>([])
+
+  const [catalogSyncing, setCatalogSyncing] =
+    useState(false)
+
+  const [catalogSyncMessage, setCatalogSyncMessage] =
+    useState<{
+      kind: 'ok' | 'error'
+      text: string
+    } | null>(null)
+
   const [
     desiredPriceDrafts,
     setDesiredPriceDraftsState,
@@ -923,6 +983,26 @@ function HomePage({
           setAllegroImportIssues([])
         }
 
+        try {
+          const catalogSyncRunsResponse = await fetch(
+            `${API_BASE_URL}/allegro/catalog-sync-runs`,
+          )
+
+          if (catalogSyncRunsResponse.ok) {
+            const catalogSyncRunsData =
+              (await catalogSyncRunsResponse.json()) as CatalogSyncRunsResponse
+
+            setCatalogSyncRuns(
+              catalogSyncRunsData.runs,
+            )
+          } else {
+            setCatalogSyncRuns([])
+          }
+        } catch {
+          setCatalogSyncRuns([])
+        }
+
+
 
       } catch (error) {
         console.error(
@@ -1056,6 +1136,116 @@ function HomePage({
       )
     } finally {
       setRefreshingAllegro(false)
+    }
+  }
+
+  const runCatalogSync = async () => {
+    setCatalogSyncing(true)
+    setCatalogSyncMessage(null)
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/allegro/catalog-sync`,
+        {
+          method: 'POST',
+        },
+      )
+
+      const result =
+        (await response
+          .json()
+          .catch(() => null)) as
+          CatalogSyncResult | null
+
+      if (
+        !response.ok ||
+        result?.status === 'FAILED'
+      ) {
+        setCatalogSyncMessage({
+          kind: 'error',
+          text:
+            result &&
+            result.status === 'FAILED'
+              ? result.error
+              : `Nem sikerült elindítani a katalógus-szinkront (${response.status}).`,
+        })
+        return
+      }
+
+      if (result.status === 'SKIPPED') {
+        setCatalogSyncMessage({
+          kind: 'error',
+          text:
+            result.reason ===
+            'ALREADY_RUNNING'
+              ? 'Már fut egy katalógus-szinkron, próbáld újra kicsit később.'
+              : 'A katalógus-szinkron csak éles (PRODUCTION) környezetben érhető el.',
+        })
+        return
+      }
+
+      const importedSummary =
+        result.newOffers > 0
+          ? `${result.newOffers} új ajánlat importálva`
+          : 'nem volt új ajánlat'
+
+      setCatalogSyncMessage({
+        kind: 'ok',
+        text: `Katalógus-szinkron kész: ${importedSummary}, ${result.renamedOffers} átnevezés, ${result.offersWithoutSku} cikkszám nélküli.`,
+      })
+
+      const [
+        listingsResponse,
+        runsResponse,
+      ] = await Promise.all([
+        fetch(
+          `${API_BASE_URL}/allegro/listings`,
+        ),
+        fetch(
+          `${API_BASE_URL}/allegro/catalog-sync-runs`,
+        ),
+      ])
+
+      if (listingsResponse.ok) {
+        const listingsData =
+          (await listingsResponse
+            .json()) as AllegroListingResponse
+
+        setAllegroListings(
+          listingsData.data,
+        )
+
+        setSelectedListingIds((current) =>
+          current.filter((id) =>
+            listingsData.data.some(
+              (listing) => listing.id === id,
+            ),
+          ),
+        )
+      }
+
+      if (runsResponse.ok) {
+        const runsData =
+          (await runsResponse
+            .json()) as CatalogSyncRunsResponse
+
+        setCatalogSyncRuns(runsData.runs)
+      }
+    } catch (error) {
+      console.error(
+        'Catalog sync failed:',
+        error,
+      )
+
+      setCatalogSyncMessage({
+        kind: 'error',
+        text:
+          error instanceof Error
+            ? error.message
+            : 'Nem sikerült a katalógus-szinkron.',
+      })
+    } finally {
+      setCatalogSyncing(false)
     }
   }
   const saveDesiredPrice = async (
@@ -2648,6 +2838,88 @@ ${changes.join('\n')}`,
                   : 'Ajánlatok frissítése'}
               </button>
             </div>
+          </div>
+
+          <div className="catalog-sync-panel">
+            <div className="catalog-sync-panel-main">
+              <button
+                className="catalog-sync-button"
+                type="button"
+                disabled={catalogSyncing}
+                onClick={() =>
+                  void runCatalogSync()
+                }
+              >
+                {catalogSyncing
+                  ? 'Katalógus-szinkron...'
+                  : 'Új ajánlatok szinkronizálása'}
+              </button>
+
+              {catalogSyncMessage && (
+                <span
+                  className={`catalog-sync-message ${catalogSyncMessage.kind}`}
+                >
+                  {catalogSyncMessage.text}
+                </span>
+              )}
+            </div>
+
+            {catalogSyncRuns.length > 0 && (
+              <div className="catalog-sync-runs">
+                <p className="catalog-sync-runs-label">
+                  Legutóbbi katalógus-szinkronok
+                </p>
+
+                <ul>
+                  {catalogSyncRuns
+                    .slice(0, 5)
+                    .map((run) => (
+                      <li key={run.id}>
+                        <span
+                          className={`catalog-sync-run-status ${run.status.toLowerCase()}`}
+                        >
+                          {run.status === 'SUCCESS'
+                            ? 'OK'
+                            : run.status === 'FAILED'
+                              ? 'HIBA'
+                              : run.status === 'RUNNING'
+                                ? 'FUT'
+                                : 'KIHAGYVA'}
+                        </span>
+
+                        <span>
+                          {run.trigger === 'MANUAL'
+                            ? 'kézi'
+                            : 'automatikus'}
+                        </span>
+
+                        <span>
+                          {new Date(
+                            run.startedAt,
+                          ).toLocaleString('hu-HU')}
+                        </span>
+
+                        {run.status ===
+                          'SUCCESS' && (
+                          <span>
+                            {run.newOffers} új,{' '}
+                            {run.syncedOffers}{' '}
+                            szinkronizált
+                          </span>
+                        )}
+
+                        {run.status ===
+                          'FAILED' &&
+                          run.error && (
+                            <span className="catalog-sync-run-error">
+                              {run.error}
+                            </span>
+                          )}
+                      </li>
+                    ))}
+                </ul>
+              </div>
+            )}
           </div>
 
           {allegroImportIssues.length > 0 && (

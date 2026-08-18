@@ -1242,3 +1242,66 @@ export const schedulerLeases = pgTable(
     ),
   ],
 )
+
+/* ============================================================
+   CATALOG SYNC RUNS
+   Persisted results of automatic and manual Allegro catalog
+   sync runs (new-offer import), visible in the web UI
+   ============================================================ */
+
+export const catalogSyncRuns = pgTable(
+  'catalog_sync_runs',
+  {
+    id: uuid('id')
+      .defaultRandom()
+      .primaryKey(),
+
+    trigger: text('trigger')
+      .notNull()
+      .default('AUTOMATIC'),
+
+    status: text('status')
+      .notNull(),
+
+    totalOffers: integer('total_offers')
+      .notNull()
+      .default(0),
+
+    newOffers: integer('new_offers')
+      .notNull()
+      .default(0),
+
+    renamedOffers: integer('renamed_offers')
+      .notNull()
+      .default(0),
+
+    offersWithoutSku: integer('offers_without_sku')
+      .notNull()
+      .default(0),
+
+    syncedOffers: integer('synced_offers')
+      .notNull()
+      .default(0),
+
+    initializedBaselines: integer('initialized_baselines')
+      .notNull()
+      .default(0),
+
+    error: text('error'),
+
+    startedAt: timestamp('started_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    finishedAt: timestamp('finished_at', {
+      withTimezone: true,
+    }),
+  },
+  (table) => [
+    index('catalog_sync_runs_started_at_index').on(
+      table.startedAt,
+    ),
+  ],
+)

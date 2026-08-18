@@ -132,6 +132,11 @@ intended local times hold regardless of timezone support:
   the same run. Changing the configured times takes effect on the next
   deploy. If the schedule cannot be read at startup, a fallback rule
   (15:40 Europe/Budapest) is registered.
+- Catalog sync results are persisted in `catalog_sync_runs` (migration
+  `0021_catalog_sync_runs.sql`, applied manually) and shown on the Ajánlatok
+  page, so silent failures are visible. A manual trigger
+  (`POST /allegro/catalog-sync`, admin only) imports new Allegro offers on
+  demand; recent runs are readable via `GET /allegro/catalog-sync-runs`.
 - `0 2 * * *` — daily maintenance (Allegro history cleanup), 02:00 UTC.
 
 The former minute poll, six-hour cron, and standalone catalog-sync cron were
