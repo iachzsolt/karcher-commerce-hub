@@ -1159,6 +1159,7 @@ function HomePage({
 
       if (
         !response.ok ||
+        !result ||
         result?.status === 'FAILED'
       ) {
         setCatalogSyncMessage({
