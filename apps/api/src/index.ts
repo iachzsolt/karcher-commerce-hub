@@ -61,6 +61,8 @@ export const app = new Hono<{
   Variables: AccessVariables
 }>()
 
+const allegroCatalogApi = new Hono()
+
 const localWebOrigins = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
@@ -620,7 +622,7 @@ app.get('/allegro/history', async (context) => {
   }
 })
 
-app.get('/allegro/listings', async (context) => {
+allegroCatalogApi.get('/listings', async (context) => {
   if (!db) {
     return context.json(
       {
@@ -1005,8 +1007,8 @@ app.post(
     }
   },
 )
-app.post(
-  '/allegro/listings/:id/initialize-baseline',
+allegroCatalogApi.post(
+  '/listings/:id/initialize-baseline',
   async (context) => {
     if (!db) {
       return context.json(
@@ -1227,6 +1229,9 @@ app.post(
     }
   },
 )
+
+app.route('/allegro', allegroCatalogApi)
+
 app.post(
   '/allegro/listings/:id/accept-current-state',
   async (context) => {
@@ -8031,8 +8036,8 @@ async function runAutomaticAllegroCatalogSync(
     let totalCount: number | null = null
 
     do {
-      const response = await app.request(
-        `/auth/allegro/offers?limit=${limit}&offset=${offset}`,
+      const response = await allegroAuth.request(
+        `/offers?limit=${limit}&offset=${offset}`,
       )
 
       if (!response.ok) {
@@ -8078,8 +8083,8 @@ async function runAutomaticAllegroCatalogSync(
     )
 
     const listingsResponse =
-      await app.request(
-        '/allegro/listings',
+      await allegroCatalogApi.request(
+        '/listings',
       )
 
     if (!listingsResponse.ok) {
@@ -8173,8 +8178,8 @@ async function runAutomaticAllegroCatalogSync(
         )
 
       const syncResponse =
-        await app.request(
-          '/auth/allegro/sync',
+        await allegroAuth.request(
+          '/sync',
           {
             method: 'POST',
 
@@ -8222,8 +8227,8 @@ async function runAutomaticAllegroCatalogSync(
 
     if (newOffers.length > 0) {
       const refreshedListingsResponse =
-        await app.request(
-          '/allegro/listings',
+        await allegroCatalogApi.request(
+          '/listings',
         )
 
       if (
@@ -8270,8 +8275,8 @@ async function runAutomaticAllegroCatalogSync(
         }
 
         const baselineResponse =
-          await app.request(
-            `/allegro/listings/${encodeURIComponent(listing.id)}/initialize-baseline`,
+          await allegroCatalogApi.request(
+            `/listings/${encodeURIComponent(listing.id)}/initialize-baseline`,
             {
               method: 'POST',
             },
