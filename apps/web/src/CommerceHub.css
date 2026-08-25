@@ -1794,33 +1794,140 @@ textarea {
   border-top: 1px solid #eef1f4;
 }
 
-.allegro-history-sync-group {
+.allegro-history-run {
   border-top: 1px solid #dfe6ee;
 }
 
-.allegro-history-sync-group + .allegro-history-event {
-  border-top: 1px solid #eef1f4;
+.allegro-history-run > summary {
+  list-style: none;
 }
 
-.allegro-history-sync-summary {
-  display: grid;
-  gap: 12px;
-  padding: 16px 20px;
-  border-bottom: 1px solid #e4eaf1;
-  background: #f4f8fc;
+.allegro-history-run > summary::-webkit-details-marker {
+  display: none;
 }
 
-.allegro-history-sync-summary > div:first-child {
+.allegro-history-run-summary {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 20px;
+  padding: 16px 20px;
+  background: #f4f8fc;
+  cursor: pointer;
 }
 
-.allegro-history-sync-summary > div:first-child span {
+.allegro-history-run-summary:hover {
+  background: #edf4fa;
+}
+
+.allegro-history-run-title {
+  display: grid;
+  gap: 3px;
+}
+
+.allegro-history-run-title span {
   color: #667085;
   font-size: 13px;
   font-variant-numeric: tabular-nums;
+}
+
+.allegro-history-run-overview {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.allegro-history-run-overview > strong {
+  min-width: 86px;
+  color: #344054;
+  font-size: 13px;
+  text-align: right;
+}
+
+.allegro-history-run-status {
+  min-width: 88px;
+  padding: 5px 9px;
+  border: 1px solid #d8e0e9;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #475467;
+  font-size: 11px;
+  font-weight: 800;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.allegro-history-run-status.is-success {
+  border-color: #b8dec2;
+  background: #edf9f0;
+  color: #26763a;
+}
+
+.allegro-history-run-status.is-failed {
+  border-color: #efc7c7;
+  background: #fff3f3;
+  color: #a33737;
+}
+
+.allegro-history-run-status.is-pending {
+  border-color: #ead7a4;
+  background: #fff9e8;
+  color: #865f00;
+}
+
+.allegro-history-run-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #245ea8;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.allegro-history-run-toggle::after {
+  content: '>';
+  font-size: 15px;
+  transition: transform 160ms ease;
+}
+
+.allegro-history-run[open] .allegro-history-run-toggle::after {
+  transform: rotate(90deg);
+}
+
+.allegro-history-run-details {
+  display: grid;
+  gap: 12px;
+  padding: 14px 20px;
+  border-top: 1px solid #e4eaf1;
+  background: #fff;
+}
+
+.allegro-history-run-details .allegro-history-events {
+  margin: 0 -20px -14px;
+  border-top: 1px solid #eef1f4;
+}
+
+.allegro-history-run-details.allegro-history-events {
+  gap: 0;
+  padding: 0;
+}
+
+.allegro-history-run-error {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #efc7c7;
+  border-radius: 9px;
+  background: #fff3f3;
+  color: #a33737;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.allegro-history-run-note {
+  margin: 0;
+  color: #667085;
+  font-size: 12px;
 }
 
 .allegro-history-sync-metrics {
@@ -1989,6 +2096,23 @@ textarea {
 
   .allegro-history-filter-separator {
     display: none;
+  }
+
+  .allegro-history-run-summary {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .allegro-history-run-overview {
+    justify-content: flex-start;
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .allegro-history-run-overview > strong {
+    min-width: 0;
+    text-align: left;
   }
 
   .allegro-history-event {

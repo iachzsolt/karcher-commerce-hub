@@ -162,30 +162,6 @@ type AllegroImportIssueResponse = {
   data: AllegroImportIssue[]
 }
 
-type CatalogSyncRun = {
-  id: string
-  trigger: 'AUTOMATIC' | 'MANUAL'
-  status:
-    | 'RUNNING'
-    | 'SUCCESS'
-    | 'FAILED'
-    | 'SKIPPED'
-  totalOffers: number
-  newOffers: number
-  renamedOffers: number
-  offersWithoutSku: number
-  syncedOffers: number
-  initializedBaselines: number
-  error: string | null
-  startedAt: string
-  finishedAt: string | null
-}
-
-type CatalogSyncRunsResponse = {
-  status: string
-  runs: CatalogSyncRun[]
-}
-
 type CatalogSyncResult =
   | {
       status: 'SKIPPED'
@@ -663,9 +639,6 @@ function HomePage({
   const [allegroImportIssues, setAllegroImportIssues] =
     useState<AllegroImportIssue[]>([])
 
-  const [catalogSyncRuns, setCatalogSyncRuns] =
-    useState<CatalogSyncRun[]>([])
-
   const [catalogSyncing, setCatalogSyncing] =
     useState(false)
 
@@ -983,27 +956,6 @@ function HomePage({
           setAllegroImportIssues([])
         }
 
-        try {
-          const catalogSyncRunsResponse = await fetch(
-            `${API_BASE_URL}/allegro/catalog-sync-runs`,
-          )
-
-          if (catalogSyncRunsResponse.ok) {
-            const catalogSyncRunsData =
-              (await catalogSyncRunsResponse.json()) as CatalogSyncRunsResponse
-
-            setCatalogSyncRuns(
-              catalogSyncRunsData.runs,
-            )
-          } else {
-            setCatalogSyncRuns([])
-          }
-        } catch {
-          setCatalogSyncRuns([])
-        }
-
-
-
       } catch (error) {
         console.error(
           'Commerce Hub data loading failed:',
@@ -1195,17 +1147,9 @@ function HomePage({
         text: `Katalógus-szinkron kész: ${importedSummary}, ${result.renamedOffers} átnevezés, ${result.offersWithoutSku} cikkszám nélküli.`,
       })
 
-      const [
-        listingsResponse,
-        runsResponse,
-      ] = await Promise.all([
-        fetch(
-          `${API_BASE_URL}/allegro/listings`,
-        ),
-        fetch(
-          `${API_BASE_URL}/allegro/catalog-sync-runs`,
-        ),
-      ])
+      const listingsResponse = await fetch(
+        `${API_BASE_URL}/allegro/listings`,
+      )
 
       if (listingsResponse.ok) {
         const listingsData =
@@ -1225,13 +1169,6 @@ function HomePage({
         )
       }
 
-      if (runsResponse.ok) {
-        const runsData =
-          (await runsResponse
-            .json()) as CatalogSyncRunsResponse
-
-        setCatalogSyncRuns(runsData.runs)
-      }
     } catch (error) {
       console.error(
         'Catalog sync failed:',
@@ -2865,62 +2802,6 @@ ${changes.join('\n')}`,
               )}
             </div>
 
-            {catalogSyncRuns.length > 0 && (
-              <div className="catalog-sync-runs">
-                <p className="catalog-sync-runs-label">
-                  Legutóbbi katalógus-szinkronok
-                </p>
-
-                <ul>
-                  {catalogSyncRuns
-                    .slice(0, 5)
-                    .map((run) => (
-                      <li key={run.id}>
-                        <span
-                          className={`catalog-sync-run-status ${run.status.toLowerCase()}`}
-                        >
-                          {run.status === 'SUCCESS'
-                            ? 'OK'
-                            : run.status === 'FAILED'
-                              ? 'HIBA'
-                              : run.status === 'RUNNING'
-                                ? 'FUT'
-                                : 'KIHAGYVA'}
-                        </span>
-
-                        <span>
-                          {run.trigger === 'MANUAL'
-                            ? 'kézi'
-                            : 'automatikus'}
-                        </span>
-
-                        <span>
-                          {new Date(
-                            run.startedAt,
-                          ).toLocaleString('hu-HU')}
-                        </span>
-
-                        {run.status ===
-                          'SUCCESS' && (
-                          <span>
-                            {run.newOffers} új,{' '}
-                            {run.syncedOffers}{' '}
-                            szinkronizált
-                          </span>
-                        )}
-
-                        {run.status ===
-                          'FAILED' &&
-                          run.error && (
-                            <span className="catalog-sync-run-error">
-                              {run.error}
-                            </span>
-                          )}
-                      </li>
-                    ))}
-                </ul>
-              </div>
-            )}
           </div>
 
           {allegroImportIssues.length > 0 && (

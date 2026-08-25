@@ -24,9 +24,27 @@ type Database =
 export type InventoryRefreshAutomationResult = {
   platform: string
   accountId: string
+  outcome: 'SUCCESS' | 'FAILED' | 'SKIPPED'
   ok: boolean
   status: number
   details: unknown
+}
+
+function hasInventorySyncFailure(details: unknown) {
+  if (!details || typeof details !== 'object') {
+    return false
+  }
+
+  const result = details as {
+    summary?: { failed?: unknown }
+    refresh?: { status?: unknown }
+  }
+
+  return (
+    (typeof result.summary?.failed === 'number' &&
+      result.summary.failed > 0) ||
+    result.refresh?.status === 'failed'
+  )
 }
 
 export async function runInventoryRefreshAutomations(
@@ -187,6 +205,7 @@ export async function runInventoryRefreshAutomations(
           platform: 'ALLEGRO',
           accountId:
             setting.accountId,
+          outcome: 'SKIPPED',
           ok: true,
           status: 204,
           details: {
@@ -254,14 +273,15 @@ export async function runInventoryRefreshAutomations(
           await response
             .json()
             .catch(() => null)
+        const ok =
+          response.ok && !hasInventorySyncFailure(details)
 
         batchResults.push({
           batchNumber:
             batchIndex + 1,
           listingCount:
             batch.length,
-          ok:
-            response.ok,
+          ok,
           status:
             response.status,
           details,
@@ -277,6 +297,10 @@ export async function runInventoryRefreshAutomations(
         platform: 'ALLEGRO',
         accountId:
           setting.accountId,
+        outcome:
+          failedBatches.length === 0
+            ? 'SUCCESS'
+            : 'FAILED',
         ok:
           failedBatches.length === 0,
         status:
@@ -310,6 +334,7 @@ export async function runInventoryRefreshAutomations(
         setting.platformCode,
       accountId:
         setting.accountId,
+      outcome: 'FAILED',
       ok: false,
       status: 501,
       details: {

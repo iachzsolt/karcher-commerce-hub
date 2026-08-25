@@ -7,6 +7,7 @@ import {
   inventorySourceItems,
   campaigns,
   catalogSyncRuns,
+  dataConnectionRuns,
   listingCampaigns,
   listingAcceptedStates,
   listingDesiredStates,
@@ -113,6 +114,64 @@ app.get('/auth/session', (context) => {
 app.route('/auth/allegro', allegroAuth)
 app.route('/data-connections', dataConnectionsApi)
 
+function resolveOptionalHistoryRange(
+  requestedFrom: string | undefined,
+  requestedTo: string | undefined,
+) {
+  if (!requestedFrom && !requestedTo) {
+    return {
+      ok: true as const,
+      boundaries: null,
+    }
+  }
+
+  const parsedFrom = requestedFrom
+    ? parseHistoryDate(requestedFrom)
+    : null
+  const parsedTo = requestedTo
+    ? parseHistoryDate(requestedTo)
+    : null
+
+  if (!parsedFrom || !parsedTo) {
+    return {
+      ok: false as const,
+      message: 'from and to must use YYYY-MM-DD',
+    }
+  }
+
+  const rangeDays = Math.floor(
+    (parsedTo.date.getTime() - parsedFrom.date.getTime()) /
+      (24 * 60 * 60 * 1000),
+  )
+
+  if (rangeDays < 0 || rangeDays > 29) {
+    return {
+      ok: false as const,
+      message: 'History date range must be between 1 and 30 days',
+    }
+  }
+
+  const fromBoundary = getBudapestHistoryBoundary(
+    parsedFrom.year,
+    parsedFrom.month - 1,
+    parsedFrom.day,
+  )
+  const nextDay = new Date(parsedTo.date)
+  nextDay.setUTCDate(nextDay.getUTCDate() + 1)
+
+  return {
+    ok: true as const,
+    boundaries: {
+      from: fromBoundary,
+      to: getBudapestHistoryBoundary(
+        nextDay.getUTCFullYear(),
+        nextDay.getUTCMonth(),
+        nextDay.getUTCDate(),
+      ),
+    },
+  }
+}
+
 app.post('/allegro/catalog-sync', async (context) => {
   const result =
     await runAutomaticAllegroCatalogSync(
@@ -139,13 +198,119 @@ app.get('/allegro/catalog-sync-runs', async (context) => {
     )
   }
 
-  const runs = await db
+  const range = resolveOptionalHistoryRange(
+    context.req.query('from'),
+    context.req.query('to'),
+  )
+
+  if (!range.ok) {
+    return context.json(
+      {
+        status: 'error',
+        message: range.message,
+      },
+      400,
+    )
+  }
+
+  const runsQuery = db
     .select()
     .from(catalogSyncRuns)
+    .where(
+      range.boundaries
+        ? and(
+            gte(
+              catalogSyncRuns.startedAt,
+              range.boundaries.from,
+            ),
+            lt(
+              catalogSyncRuns.startedAt,
+              range.boundaries.to,
+            ),
+          )
+        : undefined,
+    )
     .orderBy(
       desc(catalogSyncRuns.startedAt),
     )
-    .limit(20)
+  const runs = range.boundaries
+    ? await runsQuery
+    : await runsQuery.limit(100)
+
+  return context.json({
+    status: 'ok',
+    runs,
+  })
+})
+
+app.get('/allegro/inventory-refresh-runs', async (context) => {
+  if (!db) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Database is not configured',
+      },
+      503,
+    )
+  }
+
+  const range = resolveOptionalHistoryRange(
+    context.req.query('from'),
+    context.req.query('to'),
+  )
+
+  if (!range.ok) {
+    return context.json(
+      {
+        status: 'error',
+        message: range.message,
+      },
+      400,
+    )
+  }
+
+  const runsQuery = db
+    .select({
+      id: dataConnectionRuns.id,
+      connectionName: dataConnections.name,
+      triggerType: dataConnectionRuns.triggerType,
+      status: dataConnectionRuns.status,
+      importStatus: dataConnectionRuns.importStatus,
+      rowsImported: dataConnectionRuns.rowsImported,
+      changedItemCount: dataConnectionRuns.changedItemCount,
+      error: dataConnectionRuns.error,
+      startedAt: dataConnectionRuns.startedAt,
+      finishedAt: dataConnectionRuns.finishedAt,
+    })
+    .from(dataConnectionRuns)
+    .innerJoin(
+      dataConnections,
+      eq(
+        dataConnections.id,
+        dataConnectionRuns.connectionId,
+      ),
+    )
+    .where(
+      and(
+        eq(dataConnections.purpose, 'INVENTORY'),
+        range.boundaries
+          ? gte(
+              dataConnectionRuns.startedAt,
+              range.boundaries.from,
+            )
+          : undefined,
+        range.boundaries
+          ? lt(
+              dataConnectionRuns.startedAt,
+              range.boundaries.to,
+            )
+          : undefined,
+      ),
+    )
+    .orderBy(desc(dataConnectionRuns.startedAt))
+  const runs = range.boundaries
+    ? await runsQuery
+    : await runsQuery.limit(100)
 
   return context.json({
     status: 'ok',
@@ -8474,9 +8639,14 @@ async function runMinuteSchedulerJobs() {
           if (
             result.status === 'FAILED'
           ) {
-            console.error(
-              'Catalog sync before automation failed:',
-              result.error,
+            throw new Error(
+              `Catalog sync before inventory automation failed: ${result.error}`,
+            )
+          }
+
+          if (result.status === 'SKIPPED') {
+            throw new Error(
+              `Catalog sync before inventory automation was skipped: ${result.reason}`,
             )
           }
         }

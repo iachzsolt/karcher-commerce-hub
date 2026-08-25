@@ -1219,7 +1219,7 @@ export async function processDueDataConnectionSchedules(
         )
       }
 
-      let runStatus = 'SUCCESS'
+      let runStatus = 'COMPLETED'
       let runImportStatus: string | null = null
       let runRowsImported = 0
       let runChangedItemCount = 0
@@ -1326,6 +1326,12 @@ export async function processDueDataConnectionSchedules(
               await options.beforeAutomation()
             }
           } catch (beforeAutomationError) {
+            runStatus = 'FAILED'
+            runError =
+              beforeAutomationError instanceof Error
+                ? beforeAutomationError.message
+                : 'Inventory pre-automation hook failed.'
+
             console.error(
               'Inventory refresh pre-automation hook error:',
               {
@@ -1346,6 +1352,29 @@ export async function processDueDataConnectionSchedules(
                 item.connection.id,
               )
 
+            const failedAutomation =
+              automationResult.results.find(
+                (result) => !result.ok,
+              )
+
+            if (failedAutomation) {
+              runStatus = 'FAILED'
+              runError =
+                `${failedAutomation.platform} inventory automation reported a failed result (HTTP ${failedAutomation.status}).`
+            } else if (
+              automationResult.status === 'SKIPPED' ||
+              automationResult.results.length === 0 ||
+              automationResult.results.every(
+                (result) => result.outcome === 'SKIPPED',
+              )
+            ) {
+              if (runStatus !== 'FAILED') {
+                runStatus = 'IMPORT_ONLY'
+              }
+            } else if (runStatus !== 'FAILED') {
+              runStatus = 'COMPLETED'
+            }
+
             console.log(
               'Inventory refresh platform automations:',
               JSON.stringify(
@@ -1355,6 +1384,12 @@ export async function processDueDataConnectionSchedules(
               ),
             )
           } catch (automationError) {
+            runStatus = 'FAILED'
+            runError =
+              automationError instanceof Error
+                ? automationError.message
+                : 'Inventory platform automation failed.'
+
             console.error(
               'Inventory refresh platform automation error:',
               {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { API_BASE_URL } from '../config/api'
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -28,6 +28,49 @@ type AllegroHistoryResponse = {
   count: number
   truncated: boolean
   data: AllegroHistoryEvent[]
+}
+
+type CatalogSyncRun = {
+  id: string
+  trigger: 'AUTOMATIC' | 'MANUAL'
+  status: 'RUNNING' | 'SUCCESS' | 'FAILED' | 'SKIPPED'
+  totalOffers: number
+  newOffers: number
+  renamedOffers: number
+  offersWithoutSku: number
+  syncedOffers: number
+  initializedBaselines: number
+  error: string | null
+  startedAt: string
+  finishedAt: string | null
+}
+
+type CatalogSyncRunsResponse = {
+  status: 'ok'
+  runs: CatalogSyncRun[]
+}
+
+type InventoryRefreshRun = {
+  id: string
+  connectionName: string
+  triggerType: string
+  status:
+    | 'RUNNING'
+    | 'COMPLETED'
+    | 'IMPORT_ONLY'
+    | 'SUCCESS'
+    | 'FAILED'
+  importStatus: string | null
+  rowsImported: number
+  changedItemCount: number
+  error: string | null
+  startedAt: string
+  finishedAt: string | null
+}
+
+type InventoryRefreshRunsResponse = {
+  status: 'ok'
+  runs: InventoryRefreshRun[]
 }
 
 type SyncMetadata = {
@@ -94,9 +137,9 @@ function summarizeSyncEvents(events: AllegroHistoryEvent[]) {
 
 type HistoryDayItem =
   | {
-      kind: 'event'
+      kind: 'event-group'
       occurredAt: string
-      event: AllegroHistoryEvent
+      events: AllegroHistoryEvent[]
     }
   | {
       kind: 'sync-group'
@@ -104,8 +147,22 @@ type HistoryDayItem =
       groupId: string
       events: AllegroHistoryEvent[]
     }
+  | {
+      kind: 'catalog-sync'
+      occurredAt: string
+      run: CatalogSyncRun
+    }
+  | {
+      kind: 'inventory-refresh'
+      occurredAt: string
+      run: InventoryRefreshRun
+    }
 
-function groupDayEvents(items: AllegroHistoryEvent[]): HistoryDayItem[] {
+function groupDayEvents(
+  items: AllegroHistoryEvent[],
+  catalogSyncRuns: CatalogSyncRun[],
+  inventoryRefreshRuns: InventoryRefreshRun[],
+): HistoryDayItem[] {
   const regularEvents: AllegroHistoryEvent[] = []
   const syncGroups = new Map<string, AllegroHistoryEvent[]>()
 
@@ -122,12 +179,20 @@ function groupDayEvents(items: AllegroHistoryEvent[]): HistoryDayItem[] {
     syncGroups.set(historyGroupId, group)
   }
 
+  regularEvents.sort(
+    (left, right) =>
+      new Date(right.occurredAt).getTime() -
+      new Date(left.occurredAt).getTime(),
+  )
+
   return [
-    ...regularEvents.map((event): HistoryDayItem => ({
-      kind: 'event',
-      occurredAt: event.occurredAt,
-      event,
-    })),
+    ...(regularEvents.length > 0
+      ? [{
+          kind: 'event-group' as const,
+          occurredAt: regularEvents[0].occurredAt,
+          events: regularEvents,
+        }]
+      : []),
     ...[...syncGroups.entries()].map(
       ([groupId, events]): HistoryDayItem => ({
         kind: 'sync-group',
@@ -136,6 +201,16 @@ function groupDayEvents(items: AllegroHistoryEvent[]): HistoryDayItem[] {
         events,
       }),
     ),
+    ...catalogSyncRuns.map((run): HistoryDayItem => ({
+      kind: 'catalog-sync',
+      occurredAt: run.startedAt,
+      run,
+    })),
+    ...inventoryRefreshRuns.map((run): HistoryDayItem => ({
+      kind: 'inventory-refresh',
+      occurredAt: run.startedAt,
+      run,
+    })),
   ].sort(
     (left, right) =>
       new Date(right.occurredAt).getTime() -
@@ -153,32 +228,39 @@ function getSyncMetadata(event: AllegroHistoryEvent): SyncMetadata | null {
   }
 }
 
-function formatDateInput(date: Date) {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
+function getBudapestDateInputValue(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Budapest',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date)
+  const value = (type: string) =>
+    parts.find((part) => part.type === type)?.value
 
-  return `${year}-${month}-${day}`
+  return `${value('year')}-${value('month')}-${value('day')}`
+}
+
+function shiftDateInput(value: string, days: number) {
+  const date = new Date(`${value}T00:00:00Z`)
+  date.setUTCDate(date.getUTCDate() + days)
+  return date.toISOString().slice(0, 10)
 }
 
 function getInitialDates() {
-  const today = new Date()
-  const from = new Date(today)
-  from.setDate(from.getDate() - 14)
+  const today = getBudapestDateInputValue()
 
   return {
-    from: formatDateInput(from),
-    to: formatDateInput(today),
-    minimum: formatDateInput(
-      new Date(today.getTime() - 29 * DAY_MS),
-    ),
-    today: formatDateInput(today),
+    from: shiftDateInput(today, -14),
+    to: today,
+    minimum: shiftDateInput(today, -29),
+    today,
   }
 }
 
 function getDayDifference(from: string, to: string) {
-  const fromDate = new Date(`${from}T00:00:00`)
-  const toDate = new Date(`${to}T00:00:00`)
+  const fromDate = new Date(`${from}T00:00:00Z`)
+  const toDate = new Date(`${to}T00:00:00Z`)
 
   return Math.round((toDate.getTime() - fromDate.getTime()) / DAY_MS)
 }
@@ -389,8 +471,61 @@ function HistoryEventRow({ event }: { event: AllegroHistoryEvent }) {
   )
 }
 
+type HistoryRunTone = 'success' | 'failed' | 'pending' | 'neutral'
+
+function HistoryRunSummary({
+  title,
+  subtitle,
+  status,
+  tone,
+  changeLabel,
+}: {
+  title: string
+  subtitle: string
+  status: string
+  tone: HistoryRunTone
+  changeLabel: string
+}) {
+  return (
+    <summary className="allegro-history-run-summary">
+      <div className="allegro-history-run-title">
+        <strong>{title}</strong>
+        <span>{subtitle}</span>
+      </div>
+      <div className="allegro-history-run-overview">
+        <span className={`allegro-history-run-status is-${tone}`}>
+          {status}
+        </span>
+        <strong>{changeLabel}</strong>
+        <span className="allegro-history-run-toggle">Részletek</span>
+      </div>
+    </summary>
+  )
+}
+
 function SyncHistoryGroup({ events }: { events: AllegroHistoryEvent[] }) {
   const summary = summarizeSyncEvents(events)
+  const changeCount = events.filter((event) => {
+    const action = event.oldValue ?? ''
+
+    return (
+      event.newValue === 'SUCCESS' &&
+      action !== 'NONE' &&
+      action !== 'SKIP'
+    )
+  }).length
+  const tone: HistoryRunTone =
+    summary.failed > 0
+      ? 'failed'
+      : summary.pending > 0
+        ? 'pending'
+        : 'neutral'
+  const status =
+    summary.failed > 0
+      ? 'Hibás tétel'
+      : summary.pending > 0
+        ? 'Függő tétel'
+        : 'Rögzítve'
   const metrics = [
     ['Vizsgált ajánlat', summary.total, 'total'],
     ['Készlet nőtt', summary.stockIncreased, 'positive'],
@@ -404,12 +539,15 @@ function SyncHistoryGroup({ events }: { events: AllegroHistoryEvent[] }) {
   ] as const
 
   return (
-    <section className="allegro-history-sync-group">
-      <div className="allegro-history-sync-summary">
-        <div>
-          <strong>Automatikus készletfrissítés</strong>
-          <span>{formatTime(events[0].occurredAt)}</span>
-        </div>
+    <details className="allegro-history-run allegro-history-sync-group">
+      <HistoryRunSummary
+        title="Készletautomatika eseményei"
+        subtitle={formatTime(events[0].occurredAt)}
+        status={status}
+        tone={tone}
+        changeLabel={`${changeCount} változás`}
+      />
+      <div className="allegro-history-run-details">
         <div className="allegro-history-sync-metrics">
           {metrics.map(([label, value, tone]) =>
             value > 0 || tone === 'total' ? (
@@ -422,13 +560,166 @@ function SyncHistoryGroup({ events }: { events: AllegroHistoryEvent[] }) {
             ) : null,
           )}
         </div>
+        <div className="allegro-history-events">
+          {events.map((event) => (
+            <HistoryEventRow event={event} key={event.id} />
+          ))}
+        </div>
       </div>
-      <div className="allegro-history-events">
+    </details>
+  )
+}
+
+function EventHistoryGroup({ events }: { events: AllegroHistoryEvent[] }) {
+  return (
+    <details className="allegro-history-run">
+      <HistoryRunSummary
+        title="Részletes ajánlatváltozások"
+        subtitle={formatTime(events[0].occurredAt)}
+        status="Rögzítve"
+        tone="neutral"
+        changeLabel={`${events.length} változás`}
+      />
+      <div className="allegro-history-run-details allegro-history-events">
         {events.map((event) => (
           <HistoryEventRow event={event} key={event.id} />
         ))}
       </div>
-    </section>
+    </details>
+  )
+}
+
+function CatalogSyncHistoryGroup({ run }: { run: CatalogSyncRun }) {
+  const tone: HistoryRunTone =
+    run.status === 'SUCCESS'
+      ? 'success'
+      : run.status === 'FAILED'
+        ? 'failed'
+        : run.status === 'RUNNING'
+          ? 'pending'
+          : 'neutral'
+  const status =
+    run.status === 'SUCCESS'
+      ? 'Sikeres'
+      : run.status === 'FAILED'
+        ? 'Sikertelen'
+        : run.status === 'RUNNING'
+          ? 'Folyamatban'
+          : 'Kihagyva'
+  const metrics = [
+    ['Allegro-ajánlat', run.totalOffers],
+    ['Új ajánlat', run.newOffers],
+    ['Átnevezve', run.renamedOffers],
+    ['Szinkronizálva', run.syncedOffers],
+    ['Cikkszám nélkül', run.offersWithoutSku],
+    ['Alapállapot rögzítve', run.initializedBaselines],
+  ] as const
+
+  return (
+    <details className="allegro-history-run">
+      <HistoryRunSummary
+        title="Katalógusszinkron"
+        subtitle={`${formatTime(run.startedAt)} · ${run.trigger === 'MANUAL' ? 'kézi' : 'automatikus'}`}
+        status={status}
+        tone={tone}
+        changeLabel={
+          run.status === 'SUCCESS'
+            ? `${run.newOffers + run.renamedOffers} változás`
+            : 'változás nem ismert'
+        }
+      />
+      <div className="allegro-history-run-details">
+        {run.status === 'SUCCESS' ? (
+          <div className="allegro-history-sync-metrics">
+            {metrics.map(([label, value]) => (
+              <span className="allegro-history-sync-metric" key={label}>
+                {label}: <strong>{value}</strong>
+              </span>
+            ))}
+          </div>
+        ) : !run.error ? (
+          <p className="allegro-history-run-note">
+            Ehhez a futáshoz nincs végleges változásösszesítés.
+          </p>
+        ) : null}
+        {run.error && (
+          <p className="allegro-history-run-error">{run.error}</p>
+        )}
+      </div>
+    </details>
+  )
+}
+
+function InventoryRefreshHistoryGroup({
+  run,
+  now,
+}: {
+  run: InventoryRefreshRun
+  now: number
+}) {
+  const isStale =
+    run.status === 'RUNNING' &&
+    now - new Date(run.startedAt).getTime() > 2 * 60 * 60 * 1000
+  const tone: HistoryRunTone =
+    run.status === 'COMPLETED'
+      ? 'success'
+      : run.status === 'FAILED' || isStale
+        ? 'failed'
+        : run.status === 'SUCCESS' || run.status === 'IMPORT_ONLY'
+          ? 'neutral'
+          : 'pending'
+  const status =
+    run.status === 'COMPLETED'
+      ? 'Sikeres'
+      : run.status === 'FAILED'
+        ? 'Sikertelen'
+        : run.status === 'IMPORT_ONLY'
+          ? 'Csak beolvasás'
+          : run.status === 'SUCCESS'
+            ? 'Nem ellenőrizhető'
+            : isStale
+              ? 'Megszakadt'
+              : 'Folyamatban'
+  const metrics = [
+    ['Importált sor', run.rowsImported],
+    ['Forrásváltozás', run.changedItemCount],
+  ] as const
+
+  return (
+    <details className="allegro-history-run">
+      <HistoryRunSummary
+        title={
+          run.triggerType === 'SCHEDULED'
+            ? 'Ütemezett készletfutás'
+            : 'Készletforrás-frissítés'
+        }
+        subtitle={`${formatTime(run.startedAt)} · ${run.triggerType === 'SCHEDULED' ? 'automatikus' : 'kézi'}`}
+        status={status}
+        tone={tone}
+        changeLabel={`${run.changedItemCount} változás`}
+      />
+      <div className="allegro-history-run-details">
+        <div className="allegro-history-sync-metrics">
+          {metrics.map(([label, value]) => (
+            <span className="allegro-history-sync-metric" key={label}>
+              {label}: <strong>{value}</strong>
+            </span>
+          ))}
+          {run.importStatus && (
+            <span className="allegro-history-sync-metric">
+              Import: <strong>{run.importStatus}</strong>
+            </span>
+          )}
+          <span className="allegro-history-sync-metric">
+            Befejezés:{' '}
+            <strong>{run.finishedAt ? formatTime(run.finishedAt) : 'nincs rögzítve'}</strong>
+          </span>
+        </div>
+        {run.error && (
+          <p className="allegro-history-run-error">{run.error}</p>
+        )}
+      </div>
+    </details>
   )
 }
 
@@ -437,9 +728,15 @@ function AllegroHistoryPage() {
   const [from, setFrom] = useState(initialDates.from)
   const [to, setTo] = useState(initialDates.to)
   const [events, setEvents] = useState<AllegroHistoryEvent[]>([])
+  const [catalogSyncRuns, setCatalogSyncRuns] = useState<CatalogSyncRun[]>([])
+  const [inventoryRefreshRuns, setInventoryRefreshRuns] =
+    useState<InventoryRefreshRun[]>([])
+  const [loadedAt, setLoadedAt] = useState(() => Date.now())
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [warning, setWarning] = useState<string | null>(null)
   const [truncated, setTruncated] = useState(false)
+  const latestRequestId = useRef(0)
 
   const validationError = useMemo(() => {
     if (!from || !to) return 'Add meg a kezdő és záró dátumot.'
@@ -455,13 +752,39 @@ function AllegroHistoryPage() {
   }, [from, initialDates, to])
 
   const loadHistory = useCallback(async () => {
-    if (validationError) return
+    const requestId = latestRequestId.current + 1
+    latestRequestId.current = requestId
+
+    if (validationError) {
+      setEvents([])
+      setCatalogSyncRuns([])
+      setInventoryRefreshRuns([])
+      setTruncated(false)
+      setError(null)
+      setWarning(null)
+      setLoading(false)
+      return
+    }
 
     setLoading(true)
     setError(null)
+    setWarning(null)
+    setEvents([])
+    setCatalogSyncRuns([])
+    setInventoryRefreshRuns([])
+    setTruncated(false)
 
     try {
       const params = new URLSearchParams({ from, to })
+      const supplementalRequests = Promise.allSettled([
+        fetch(
+          `${API_BASE_URL}/allegro/catalog-sync-runs?${params.toString()}`,
+        ),
+        fetch(
+          `${API_BASE_URL}/allegro/inventory-refresh-runs?${params.toString()}`,
+        ),
+      ])
+
       const response = await fetch(
         `${API_BASE_URL}/allegro/history?${params.toString()}`,
       )
@@ -477,16 +800,84 @@ function AllegroHistoryPage() {
         )
       }
 
+      let nextCatalogRuns: CatalogSyncRun[] = []
+      let nextInventoryRuns: InventoryRefreshRun[] = []
+      let hasSupplementalError = false
+
+      if (requestId !== latestRequestId.current) return
+
       setEvents(body.data)
       setTruncated(body.truncated)
+      setLoadedAt(Date.now())
+      setLoading(false)
+
+      const [catalogRequest, inventoryRequest] = await supplementalRequests
+
+      if (
+        catalogRequest.status === 'fulfilled' &&
+        catalogRequest.value.ok
+      ) {
+        try {
+          const catalogBody =
+            (await catalogRequest.value.json()) as CatalogSyncRunsResponse
+
+          if (catalogBody.status === 'ok' && Array.isArray(catalogBody.runs)) {
+            nextCatalogRuns = catalogBody.runs
+          } else {
+            hasSupplementalError = true
+          }
+        } catch {
+          hasSupplementalError = true
+        }
+      } else {
+        hasSupplementalError = true
+      }
+
+      if (
+        inventoryRequest.status === 'fulfilled' &&
+        inventoryRequest.value.ok
+      ) {
+        try {
+          const inventoryBody =
+            (await inventoryRequest.value
+              .json()) as InventoryRefreshRunsResponse
+
+          if (
+            inventoryBody.status === 'ok' &&
+            Array.isArray(inventoryBody.runs)
+          ) {
+            nextInventoryRuns = inventoryBody.runs
+          } else {
+            hasSupplementalError = true
+          }
+        } catch {
+          hasSupplementalError = true
+        }
+      } else {
+        hasSupplementalError = true
+      }
+
+      if (requestId !== latestRequestId.current) return
+
+      setCatalogSyncRuns(nextCatalogRuns)
+      setInventoryRefreshRuns(nextInventoryRuns)
+      setWarning(
+        hasSupplementalError
+          ? 'Az események betöltődtek, de egyes futásösszesítések nem érhetők el.'
+          : null,
+      )
     } catch (loadError) {
+      if (requestId !== latestRequestId.current) return
+
       setError(
         loadError instanceof Error
           ? loadError.message
           : 'Nem sikerült betölteni az Allegro-előzményeket.',
       )
     } finally {
-      setLoading(false)
+      if (requestId === latestRequestId.current) {
+        setLoading(false)
+      }
     }
   }, [from, to, validationError])
 
@@ -495,21 +886,76 @@ function AllegroHistoryPage() {
       void loadHistory()
     }, 0)
 
-    return () => window.clearTimeout(timeoutId)
+    return () => {
+      window.clearTimeout(timeoutId)
+      latestRequestId.current += 1
+    }
   }, [loadHistory])
 
   const dayGroups = useMemo(() => {
-    const groups = new Map<string, AllegroHistoryEvent[]>()
+    const groups = new Map<
+      string,
+      {
+        events: AllegroHistoryEvent[]
+        catalogSyncRuns: CatalogSyncRun[]
+        inventoryRefreshRuns: InventoryRefreshRun[]
+      }
+    >()
+
+    const getGroup = (day: string) => {
+      const existing = groups.get(day)
+
+      if (existing) return existing
+
+      const created = {
+        events: [],
+        catalogSyncRuns: [],
+        inventoryRefreshRuns: [],
+      }
+      groups.set(day, created)
+      return created
+    }
 
     for (const event of events) {
       const day = getEventDay(event.occurredAt)
-      const items = groups.get(day) ?? []
-      items.push(event)
-      groups.set(day, items)
+      getGroup(day).events.push(event)
     }
 
-    return [...groups.entries()]
-  }, [events])
+    for (const run of catalogSyncRuns) {
+      const day = getEventDay(run.startedAt)
+
+      if (day >= from && day <= to) {
+        getGroup(day).catalogSyncRuns.push(run)
+      }
+    }
+
+    for (const run of inventoryRefreshRuns) {
+      const day = getEventDay(run.startedAt)
+
+      if (day >= from && day <= to) {
+        getGroup(day).inventoryRefreshRuns.push(run)
+      }
+    }
+
+    return [...groups.entries()].sort(([left], [right]) =>
+      right.localeCompare(left),
+    )
+  }, [catalogSyncRuns, events, from, inventoryRefreshRuns, to])
+
+  const historyEntryCount = useMemo(
+    () =>
+      dayGroups.reduce(
+        (total, [, group]) =>
+          total +
+          groupDayEvents(
+            group.events,
+            group.catalogSyncRuns,
+            group.inventoryRefreshRuns,
+          ).length,
+        0,
+      ),
+    [dayGroups],
+  )
 
   return (
     <div className="allegro-history-page">
@@ -517,7 +963,7 @@ function AllegroHistoryPage() {
         <div>
           <p className="section-label">ALLEGRO</p>
           <h2>Előzmények</h2>
-          <p>Az ajánlatok napi, tételes változásai az elmúlt 30 napból.</p>
+          <p>Frissítési összesítések; a tételes változások kattintásra nyithatók meg.</p>
         </div>
 
         <div className="allegro-history-filter">
@@ -560,9 +1006,15 @@ function AllegroHistoryPage() {
         </div>
       )}
 
+      {warning && (
+        <div className="allegro-overview-message allegro-overview-message-warning">
+          {warning}
+        </div>
+      )}
+
       <section className="allegro-history-content">
         <div className="allegro-history-summary">
-          <strong>{loading ? 'Betöltés…' : `${events.length} esemény`}</strong>
+          <strong>{loading ? 'Betöltés…' : `${historyEntryCount} bejegyzés`}</strong>
           <span>{from} – {to}</span>
         </div>
 
@@ -572,23 +1024,56 @@ function AllegroHistoryPage() {
           </div>
         )}
 
-        {dayGroups.map(([day, items]) => {
-          const grouped = groupDayEvents(items)
+        {dayGroups.map(([day, group]) => {
+          const grouped = groupDayEvents(
+            group.events,
+            group.catalogSyncRuns,
+            group.inventoryRefreshRuns,
+          )
 
           return (
             <div className="allegro-history-day" key={day}>
               <div className="allegro-history-day-heading">
                 <h3>{formatDay(day)}</h3>
-                <span>{items.length} esemény</span>
+                <span>{grouped.length} bejegyzés</span>
               </div>
 
-              {grouped.map((item) =>
-                item.kind === 'event' ? (
-                  <HistoryEventRow event={item.event} key={item.event.id} />
-                ) : (
-                  <SyncHistoryGroup events={item.events} key={item.groupId} />
-                ),
-              )}
+              {grouped.map((item) => {
+                if (item.kind === 'event-group') {
+                  return (
+                    <EventHistoryGroup
+                      events={item.events}
+                      key={`events-${item.occurredAt}`}
+                    />
+                  )
+                }
+
+                if (item.kind === 'sync-group') {
+                  return (
+                    <SyncHistoryGroup
+                      events={item.events}
+                      key={item.groupId}
+                    />
+                  )
+                }
+
+                if (item.kind === 'catalog-sync') {
+                  return (
+                    <CatalogSyncHistoryGroup
+                      run={item.run}
+                      key={`catalog-${item.run.id}`}
+                    />
+                  )
+                }
+
+                return (
+                  <InventoryRefreshHistoryGroup
+                    run={item.run}
+                    now={loadedAt}
+                    key={`inventory-${item.run.id}`}
+                  />
+                )
+              })}
             </div>
           )
         })}

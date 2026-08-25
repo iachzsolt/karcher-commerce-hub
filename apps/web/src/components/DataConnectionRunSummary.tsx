@@ -54,8 +54,16 @@ function formatRunDate(
 function getStatusLabel(
   status: string,
 ) {
-  if (status === 'SUCCESS') {
+  if (status === 'COMPLETED') {
     return '✓ Sikeres'
+  }
+
+  if (status === 'IMPORT_ONLY') {
+    return 'Csak beolvasás'
+  }
+
+  if (status === 'SUCCESS') {
+    return 'Nem ellenőrizhető'
   }
 
   if (status === 'FAILED') {
@@ -76,7 +84,7 @@ function getStatusLabel(
 function getStatusClass(
   status: string,
 ) {
-  if (status === 'SUCCESS') {
+  if (status === 'COMPLETED') {
     return 'success'
   }
 
@@ -84,7 +92,7 @@ function getStatusClass(
     return 'error'
   }
 
-  if (status === 'PARTIAL') {
+  if (status === 'PARTIAL' || status === 'IMPORT_ONLY') {
     return 'warning'
   }
 
