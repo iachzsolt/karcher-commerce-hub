@@ -1332,7 +1332,9 @@ export async function syncAllegroInventoryRows(
 
   if (attempted > 0) {
     const initialRefresh =
-      await adapter.refresh()
+      await adapter.refresh(
+        [...writtenListingIds],
+      )
 
     refreshStatus =
       initialRefresh.ok
