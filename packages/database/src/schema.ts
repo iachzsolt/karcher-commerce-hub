@@ -41,6 +41,21 @@ export const campaignTypeEnum = pgEnum('campaign_type', [
   'OTHER',
 ])
 
+export const feedInclusionModeEnum = pgEnum(
+  'feed_inclusion_mode',
+  [
+    'INHERIT',
+    'FORCE_INCLUDE',
+    'FORCE_EXCLUDE',
+  ],
+)
+
+export const feedDecisionEnum = pgEnum('feed_decision', [
+  'INCLUDED',
+  'REVIEW',
+  'EXCLUDED',
+])
+
 export const products = pgTable(
   'products',
   {
@@ -1302,6 +1317,650 @@ export const catalogSyncRuns = pgTable(
   (table) => [
     index('catalog_sync_runs_started_at_index').on(
       table.startedAt,
+    ),
+  ],
+)
+
+/* ============================================================
+   FEED CHANNEL SOURCE PROJECTIONS
+   Current catalog and pricing source state for feed channels
+   ============================================================ */
+
+export const catalogSourceItems = pgTable(
+  'catalog_source_items',
+  {
+    id: uuid('id')
+      .defaultRandom()
+      .primaryKey(),
+
+    connectionId: uuid('connection_id')
+      .notNull()
+      .references(() => dataConnections.id),
+
+    productId: uuid('product_id')
+      .references(() => products.id),
+
+    sourceItemKey: text('source_item_key')
+      .notNull(),
+
+    identifier: text('identifier'),
+    eanCode: text('ean_code'),
+    manufacturer: text('manufacturer'),
+    name: text('name'),
+    description: text('description'),
+    category: text('category'),
+    productUrl: text('product_url'),
+    imageUrl: text('image_url'),
+    imageUrl2: text('image_url_2'),
+
+    additionalImageUrlsJson: text(
+      'additional_image_urls_json',
+    )
+      .notNull()
+      .default('[]'),
+
+    sourceFingerprint: text(
+      'source_fingerprint',
+    ),
+
+    rawDataJson: text('raw_data_json'),
+
+    matchStatus: text('match_status')
+      .notNull()
+      .default('UNMATCHED'),
+
+    matchError: text('match_error'),
+
+    observedAt: timestamp('observed_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    createdAt: timestamp('created_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp('updated_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex(
+      'catalog_source_items_connection_key_unique',
+    ).on(
+      table.connectionId,
+      table.sourceItemKey,
+    ),
+
+    index(
+      'catalog_source_items_connection_index',
+    ).on(table.connectionId),
+
+    index(
+      'catalog_source_items_product_index',
+    ).on(table.productId),
+
+    index(
+      'catalog_source_items_identifier_index',
+    ).on(table.identifier),
+
+    index(
+      'catalog_source_items_ean_index',
+    ).on(table.eanCode),
+  ],
+)
+
+export const pricingSourceItems = pgTable(
+  'pricing_source_items',
+  {
+    id: uuid('id')
+      .defaultRandom()
+      .primaryKey(),
+
+    connectionId: uuid('connection_id')
+      .notNull()
+      .references(() => dataConnections.id),
+
+    productId: uuid('product_id')
+      .references(() => products.id),
+
+    sourceItemKey: text('source_item_key')
+      .notNull(),
+
+    identifier: text('identifier'),
+
+    marketCode: text('market_code')
+      .notNull(),
+
+    currency: text('currency')
+      .notNull(),
+
+    ownPriceMinor: integer('own_price_minor'),
+    effectivePriceMinor: integer(
+      'effective_price_minor',
+    ),
+
+    marketMinimumPriceMinor: integer(
+      'market_minimum_price_minor',
+    ),
+
+    marketAveragePriceMinor: integer(
+      'market_average_price_minor',
+    ),
+
+    marketMedianPriceMinor: integer(
+      'market_median_price_minor',
+    ),
+
+    priceDifferenceBps: integer(
+      'price_difference_bps',
+    ),
+
+    priceIndexBps: integer('price_index_bps'),
+    medianIndexBps: integer('median_index_bps'),
+    averageIndexBps: integer('average_index_bps'),
+
+    pricePosition: integer('price_position'),
+    offerCount: integer('offer_count'),
+
+    dealerMinimumPriceMinor: integer(
+      'dealer_minimum_price_minor',
+    ),
+
+    dealerMedianPriceMinor: integer(
+      'dealer_median_price_minor',
+    ),
+
+    dealerIndexBps: integer('dealer_index_bps'),
+
+    retailMinimumPriceMinor: integer(
+      'retail_minimum_price_minor',
+    ),
+
+    retailMedianPriceMinor: integer(
+      'retail_median_price_minor',
+    ),
+
+    retailIndexBps: integer('retail_index_bps'),
+
+    promotionActive: boolean('promotion_active'),
+    promotionName: text('promotion_name'),
+    promotionPriceMinor: integer(
+      'promotion_price_minor',
+    ),
+
+    promotionStartsAt: timestamp(
+      'promotion_starts_at',
+      {
+        withTimezone: true,
+      },
+    ),
+
+    promotionEndsAt: timestamp(
+      'promotion_ends_at',
+      {
+        withTimezone: true,
+      },
+    ),
+
+    promotionJson: text('promotion_json'),
+
+    dataStatus: text('data_status')
+      .notNull()
+      .default('UNKNOWN'),
+
+    sourceFingerprint: text(
+      'source_fingerprint',
+    ),
+
+    rawDataJson: text('raw_data_json'),
+
+    observedAt: timestamp('observed_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    createdAt: timestamp('created_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp('updated_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex(
+      'pricing_source_items_scope_unique',
+    ).on(
+      table.connectionId,
+      table.sourceItemKey,
+      table.marketCode,
+      table.currency,
+    ),
+
+    index(
+      'pricing_source_items_connection_index',
+    ).on(table.connectionId),
+
+    index(
+      'pricing_source_items_product_index',
+    ).on(table.productId),
+
+    index(
+      'pricing_source_items_identifier_index',
+    ).on(table.identifier),
+  ],
+)
+
+/* ============================================================
+   GENERIC FEED CHANNELS
+   Feed-based destinations such as Arukereso, Google or Meta
+   ============================================================ */
+
+export const feedChannels = pgTable(
+  'feed_channels',
+  {
+    id: uuid('id')
+      .defaultRandom()
+      .primaryKey(),
+
+    platformId: uuid('platform_id')
+      .notNull()
+      .references(() => platforms.id),
+
+    code: text('code')
+      .notNull(),
+
+    name: text('name')
+      .notNull(),
+
+    targetCountry: text('target_country')
+      .notNull(),
+
+    contentLanguage: text('content_language')
+      .notNull(),
+
+    currency: text('currency')
+      .notNull(),
+
+    format: text('format')
+      .notNull(),
+
+    deliveryMode: text('delivery_mode'),
+    externalChannelId: text('external_channel_id'),
+
+    isActive: boolean('is_active')
+      .notNull()
+      .default(false),
+
+    status: text('status')
+      .notNull()
+      .default('NOT_CONFIGURED'),
+
+    settingsJson: text('settings_json')
+      .notNull()
+      .default('{}'),
+
+    lastSuccessfulAt: timestamp(
+      'last_successful_at',
+      {
+        withTimezone: true,
+      },
+    ),
+
+    lastError: text('last_error'),
+
+    createdAt: timestamp('created_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp('updated_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex(
+      'feed_channels_platform_code_unique',
+    ).on(
+      table.platformId,
+      table.code,
+    ),
+
+    index('feed_channels_platform_index').on(
+      table.platformId,
+    ),
+
+    index('feed_channels_active_index').on(
+      table.isActive,
+    ),
+  ],
+)
+
+export const feedChannelSources = pgTable(
+  'feed_channel_sources',
+  {
+    id: uuid('id')
+      .defaultRandom()
+      .primaryKey(),
+
+    channelId: uuid('channel_id')
+      .notNull()
+      .references(() => feedChannels.id),
+
+    connectionId: uuid('connection_id')
+      .notNull()
+      .references(() => dataConnections.id),
+
+    role: text('role')
+      .notNull(),
+
+    priority: integer('priority')
+      .notNull()
+      .default(0),
+
+    isActive: boolean('is_active')
+      .notNull()
+      .default(true),
+
+    createdAt: timestamp('created_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp('updated_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('feed_channel_source_unique').on(
+      table.channelId,
+      table.connectionId,
+      table.role,
+    ),
+
+    index(
+      'feed_channel_sources_channel_role_index',
+    ).on(
+      table.channelId,
+      table.role,
+      table.priority,
+    ),
+
+    index(
+      'feed_channel_sources_connection_index',
+    ).on(table.connectionId),
+  ],
+)
+
+export const feedProductOverrides = pgTable(
+  'feed_product_overrides',
+  {
+    id: uuid('id')
+      .defaultRandom()
+      .primaryKey(),
+
+    channelId: uuid('channel_id')
+      .notNull()
+      .references(() => feedChannels.id),
+
+    productId: uuid('product_id')
+      .notNull()
+      .references(() => products.id),
+
+    inclusionMode: feedInclusionModeEnum(
+      'inclusion_mode',
+    )
+      .notNull()
+      .default('INHERIT'),
+
+    externalItemId: text('external_item_id'),
+
+    priceOverrideMinor: integer(
+      'price_override_minor',
+    ),
+
+    netPriceOverrideMinor: integer(
+      'net_price_override_minor',
+    ),
+
+    deliveryCostOverrideMinor: integer(
+      'delivery_cost_override_minor',
+    ),
+
+    deliveryTimeOverrideDays: integer(
+      'delivery_time_override_days',
+    ),
+
+    attributesJson: text('attributes_json'),
+    reason: text('reason'),
+    updatedBy: text('updated_by'),
+
+    createdAt: timestamp('created_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    updatedAt: timestamp('updated_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('feed_product_override_unique').on(
+      table.channelId,
+      table.productId,
+    ),
+
+    uniqueIndex(
+      'feed_product_override_external_unique',
+    ).on(
+      table.channelId,
+      table.externalItemId,
+    ),
+
+    index(
+      'feed_product_overrides_product_index',
+    ).on(table.productId),
+  ],
+)
+
+/* ============================================================
+   FEED GENERATION RUN SNAPSHOTS
+   Immutable run and per-product decision history
+   ============================================================ */
+
+export const feedRuns = pgTable(
+  'feed_runs',
+  {
+    id: uuid('id')
+      .defaultRandom()
+      .primaryKey(),
+
+    channelId: uuid('channel_id')
+      .notNull()
+      .references(() => feedChannels.id),
+
+    triggerType: text('trigger_type')
+      .notNull(),
+
+    status: text('status')
+      .notNull()
+      .default('RUNNING'),
+
+    generatorVersion: text('generator_version'),
+    ruleVersion: text('rule_version'),
+
+    itemsEvaluated: integer('items_evaluated')
+      .notNull()
+      .default(0),
+
+    itemsIncluded: integer('items_included')
+      .notNull()
+      .default(0),
+
+    itemsReview: integer('items_review')
+      .notNull()
+      .default(0),
+
+    itemsExcluded: integer('items_excluded')
+      .notNull()
+      .default(0),
+
+    itemsFailed: integer('items_failed')
+      .notNull()
+      .default(0),
+
+    inputFingerprint: text('input_fingerprint'),
+    outputFingerprint: text('output_fingerprint'),
+
+    channelSnapshotJson: text(
+      'channel_snapshot_json',
+    )
+      .notNull(),
+
+    sourceSnapshotJson: text(
+      'source_snapshot_json',
+    )
+      .notNull(),
+
+    ruleSnapshotJson: text('rule_snapshot_json')
+      .notNull(),
+
+    artifactFileName: text('artifact_file_name'),
+    artifactContentType: text('artifact_content_type'),
+    artifactFingerprint: text('artifact_fingerprint'),
+
+    error: text('error'),
+
+    startedAt: timestamp('started_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+
+    finishedAt: timestamp('finished_at', {
+      withTimezone: true,
+    }),
+
+    createdAt: timestamp('created_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index('feed_runs_channel_started_index').on(
+      table.channelId,
+      table.startedAt,
+    ),
+
+    index('feed_runs_status_index').on(
+      table.status,
+    ),
+  ],
+)
+
+export const feedRunItems = pgTable(
+  'feed_run_items',
+  {
+    id: uuid('id')
+      .defaultRandom()
+      .primaryKey(),
+
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => feedRuns.id),
+
+    productId: uuid('product_id')
+      .references(() => products.id),
+
+    itemIndex: integer('item_index'),
+    externalItemId: text('external_item_id'),
+
+    sku: text('sku')
+      .notNull(),
+
+    identifier: text('identifier'),
+    eanCode: text('ean_code'),
+    name: text('name'),
+
+    decision: feedDecisionEnum('decision')
+      .notNull(),
+
+    reasonCodesJson: text('reason_codes_json')
+      .notNull(),
+
+    stock: integer('stock'),
+    priceMinor: integer('price_minor'),
+    netPriceMinor: integer('net_price_minor'),
+    deliveryCostMinor: integer('delivery_cost_minor'),
+    deliveryTimeDays: integer('delivery_time_days'),
+    currency: text('currency'),
+
+    manualOverrideApplied: boolean(
+      'manual_override_applied',
+    )
+      .notNull()
+      .default(false),
+
+    inputSnapshotJson: text('input_snapshot_json')
+      .notNull(),
+
+    overrideSnapshotJson: text(
+      'override_snapshot_json',
+    ),
+
+    decisionDetailsJson: text(
+      'decision_details_json',
+    )
+      .notNull(),
+
+    resolvedItemJson: text('resolved_item_json'),
+    payloadFingerprint: text('payload_fingerprint'),
+
+    createdAt: timestamp('created_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('feed_run_item_unique').on(
+      table.runId,
+      table.productId,
+    ),
+
+    uniqueIndex('feed_run_item_external_unique').on(
+      table.runId,
+      table.externalItemId,
+    ),
+
+    index('feed_run_items_product_index').on(
+      table.productId,
+    ),
+
+    index('feed_run_items_run_decision_index').on(
+      table.runId,
+      table.decision,
     ),
   ],
 )
