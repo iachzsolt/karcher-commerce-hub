@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import '../CommerceHub.css'
 import { API_BASE_URL } from '../config/api'
 
@@ -1577,6 +1577,24 @@ function HomePage({
     schedule.startAppliedAt !== null &&
     schedule.endAppliedAt === null
 
+  const isPriceScheduleCurrentlyActive = (
+    schedule: ListingPriceSchedule,
+  ) => {
+    const now = Date.now()
+    const validFrom =
+      new Date(schedule.validFrom).getTime()
+    const validTo =
+      new Date(schedule.validTo).getTime()
+
+    return (
+      schedule.enabled &&
+      Number.isFinite(validFrom) &&
+      Number.isFinite(validTo) &&
+      validFrom <= now &&
+      validTo >= now
+    )
+  }
+
   const getEffectiveDesiredPriceMinor = (
     listing: AllegroListing,
   ) => {
@@ -1586,7 +1604,7 @@ function HomePage({
         []
       )
         .filter(
-          isAppliedPriceScheduleActive,
+          isPriceScheduleCurrentlyActive,
         )
         .sort(
           (left, right) =>
