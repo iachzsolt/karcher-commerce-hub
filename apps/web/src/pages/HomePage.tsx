@@ -2470,56 +2470,115 @@ Biztosan szinkronizálod őket az Allegróval?`,
 
     setBulkSyncing(true)
 
+    let succeeded = 0
+    let skipped = 0
+    let failed = 0
+    let pending = 0
+
+    const errors: string[] = []
+
     try {
-      const response = await fetch(
-        `${API_BASE_URL}/auth/allegro/sync-selected`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            listingIds: selectedListingIds,
-          }),
-        },
-      )
+      for (const listing of changedListings) {
+        try {
+          const response = await fetch(
+            `${API_BASE_URL}/auth/allegro/sync-selected`,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                listingIds: [listing.id],
+              }),
+            },
+          )
 
-      const data = (await response.json()) as {
-        status: string
-        selected?: number
-        attempted?: number
-        succeeded?: number
-        skipped?: number
-        failed?: number
-        pending?: number
-        message?: string
+          const responseText =
+            await response.text()
+
+          type BulkSyncResponse = {
+            status?: string
+            succeeded?: number
+            skipped?: number
+            failed?: number
+            pending?: number
+            message?: string
+          }
+
+          let data: BulkSyncResponse | null = null
+
+          if (responseText) {
+            try {
+              data = JSON.parse(
+                responseText,
+              ) as BulkSyncResponse
+            } catch {
+              data = null
+            }
+          }
+
+          if (!response.ok || !data) {
+            failed += 1
+
+            const message =
+              data?.message ??
+              `HTTP ${response.status}: nem értelmezhető szerverválasz`
+
+            errors.push(
+              `${listing.sku}: ${message}`,
+            )
+
+            continue
+          }
+
+          succeeded += data.succeeded ?? 0
+          skipped += data.skipped ?? 0
+          failed += data.failed ?? 0
+          pending += data.pending ?? 0
+
+          if ((data.failed ?? 0) > 0) {
+            errors.push(
+              `${listing.sku}: ${
+                data.message ??
+                'A szinkronizálás sikertelen.'
+              }`,
+            )
+          }
+        } catch (error) {
+          failed += 1
+
+          errors.push(
+            `${listing.sku}: ${
+              error instanceof Error
+                ? error.message
+                : 'Ismeretlen hiba'
+            }`,
+          )
+        }
       }
 
-      if (!response.ok) {
-        throw new Error(
-          data.message ??
-            'A kijelölt ajánlatok szinkronizálása sikertelen.',
-        )
-      }
+      const errorDetails =
+        errors.length > 0
+          ? `
+
+Hibák:
+${errors.slice(0, 5).join('\n')}${
+              errors.length > 5
+                ? `\n+${errors.length - 5} további hiba`
+                : ''
+            }`
+          : ''
 
       window.alert(
         `Szinkronizálás kész.
 
-Sikeres: ${data.succeeded ?? 0}
-Kihagyva: ${data.skipped ?? 0}
-Hibás: ${data.failed ?? 0}
-Folyamatban: ${data.pending ?? 0}`,
+Sikeres: ${succeeded}
+Kihagyva: ${skipped}
+Hibás: ${failed}
+Folyamatban: ${pending}${errorDetails}`,
       )
 
       window.location.reload()
-    } catch (error) {
-      console.error('Bulk Allegro sync failed:', error)
-
-      window.alert(
-        error instanceof Error
-          ? error.message
-          : 'A szinkronizálás sikertelen.',
-      )
     } finally {
       setBulkSyncing(false)
     }
