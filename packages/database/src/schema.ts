@@ -1353,6 +1353,12 @@ export const catalogSourceItems = pgTable(
     imageUrl: text('image_url'),
     imageUrl2: text('image_url_2'),
 
+    priceMinor: integer('price_minor'),
+    netPriceMinor: integer('net_price_minor'),
+    deliveryCostMinor: integer('delivery_cost_minor'),
+    deliveryTimeRaw: text('delivery_time_raw'),
+    deliveryTimeDays: integer('delivery_time_days'),
+
     additionalImageUrlsJson: text(
       'additional_image_urls_json',
     )
