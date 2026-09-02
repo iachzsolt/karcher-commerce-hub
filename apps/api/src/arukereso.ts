@@ -77,6 +77,23 @@ type CatalogPreviewItem = {
   errors: string[]
 }
 
+type CatalogAnalyzedItem =
+  CatalogPreviewItem & {
+    description: string | null
+    rawSource: Record<CatalogHeader, string>
+  }
+
+class CatalogCsvValidationError extends Error {
+  constructor(
+    message: string,
+    readonly headers?: string[],
+    readonly missingHeaders?: CatalogHeader[],
+  ) {
+    super(message)
+    this.name = 'CatalogCsvValidationError'
+  }
+}
+
 function cmsIdentifierToSku(
   identifier: string,
 ): string | null {
@@ -367,6 +384,452 @@ function countDuplicates(
     .length
 }
 
+async function analyzeCatalogCsv(
+  csvText: string,
+) {
+  const csvRows =
+    parseSemicolonCsv(csvText)
+
+  if (csvRows.length === 0) {
+    throw new CatalogCsvValidationError(
+      'A CSV fajl ures.',
+    )
+  }
+
+  const headers =
+    csvRows[0].map(
+      (header) =>
+        header
+          .replace(/^\uFEFF/, '')
+          .trim(),
+    )
+
+  const headerIndex =
+    new Map<string, number>()
+
+  headers.forEach(
+    (header, index) => {
+      headerIndex.set(
+        header.toLowerCase(),
+        index,
+      )
+    },
+  )
+
+  const missingHeaders =
+    EXPECTED_CATALOG_HEADERS
+      .filter(
+        (header) =>
+          !headerIndex.has(
+            header.toLowerCase(),
+          ),
+      )
+
+  if (missingHeaders.length > 0) {
+    throw new CatalogCsvValidationError(
+      'A CMS CSV fejlece nem megfelelo.',
+      headers,
+      [...missingHeaders],
+    )
+  }
+
+  const getValue = (
+    row: string[],
+    header: CatalogHeader,
+  ) => {
+    const index =
+      headerIndex.get(
+        header.toLowerCase(),
+      )
+
+    if (index === undefined) {
+      return ''
+    }
+
+    return row[index] ?? ''
+  }
+
+  const database =
+    requireDatabase()
+
+  const [
+    hubProducts,
+    hubIdentifiers,
+  ] = await Promise.all([
+    database
+      .select({
+        id: products.id,
+        sku: products.sku,
+      })
+      .from(products),
+
+    database
+      .select({
+        productId:
+          productIdentifiers.productId,
+        type:
+          productIdentifiers.type,
+        value:
+          productIdentifiers.value,
+      })
+      .from(productIdentifiers),
+  ])
+
+  const productBySku =
+    new Map(
+      hubProducts.map(
+        (product) => [
+          product.sku,
+          product,
+        ],
+      ),
+    )
+
+  const productById =
+    new Map(
+      hubProducts.map(
+        (product) => [
+          product.id,
+          product,
+        ],
+      ),
+    )
+
+  const productByEan =
+    new Map<
+      string,
+      {
+        id: string
+        sku: string
+      }
+    >()
+
+  for (
+    const identifierRow
+    of hubIdentifiers
+  ) {
+    if (
+      identifierRow.type !==
+      'EAN'
+    ) {
+      continue
+    }
+
+    const product =
+      productById.get(
+        identifierRow.productId,
+      )
+
+    if (!product) {
+      continue
+    }
+
+    productByEan.set(
+      identifierRow.value.trim(),
+      product,
+    )
+  }
+
+  const allItems:
+    CatalogAnalyzedItem[] = []
+
+  let validRows = 0
+  let invalidRows = 0
+  let zeroPriceRows = 0
+  let invalidPriceRows = 0
+  let invalidDeliveryTimeRows = 0
+  let missingEanRows = 0
+
+  let matchedBySku = 0
+  let matchedByEan = 0
+  let unmatched = 0
+  let invalidIdentifierFormat = 0
+  let matchConflicts = 0
+
+  const identifiers:
+    Array<string | null> = []
+
+  const eanCodes:
+    Array<string | null> = []
+
+  for (
+    let index = 1;
+    index < csvRows.length;
+    index += 1
+  ) {
+    const row = csvRows[index]
+
+    const rawSource =
+      Object.fromEntries(
+        EXPECTED_CATALOG_HEADERS.map(
+          (header) => [
+            header,
+            getValue(row, header),
+          ],
+        ),
+      ) as Record<CatalogHeader, string>
+
+    const identifier =
+      normalizeCell(
+        rawSource.Identifier,
+      )
+
+    const eanCode =
+      normalizeCell(
+        rawSource.EanCode,
+      )
+
+    const normalizedSku =
+      identifier
+        ? cmsIdentifierToSku(
+            identifier,
+          )
+        : null
+
+    if (
+      identifier &&
+      !normalizedSku
+    ) {
+      invalidIdentifierFormat += 1
+    }
+
+    const skuMatchedProduct =
+      normalizedSku
+        ? productBySku.get(
+            normalizedSku,
+          ) ?? null
+        : null
+
+    const eanMatchedProduct =
+      eanCode
+        ? productByEan.get(
+            eanCode.trim(),
+          ) ?? null
+        : null
+
+    let matchStatus:
+      | 'MATCHED'
+      | 'UNMATCHED'
+      | 'CONFLICT'
+
+    let matchMethod:
+      | 'SKU'
+      | 'EAN'
+      | null = null
+
+    let matchedProductId:
+      string | null = null
+
+    let matchedSku:
+      string | null = null
+
+    if (
+      skuMatchedProduct &&
+      eanMatchedProduct &&
+      skuMatchedProduct.id !==
+        eanMatchedProduct.id
+    ) {
+      matchStatus = 'CONFLICT'
+      matchConflicts += 1
+    } else if (skuMatchedProduct) {
+      matchStatus = 'MATCHED'
+      matchMethod = 'SKU'
+      matchedProductId =
+        skuMatchedProduct.id
+      matchedSku =
+        skuMatchedProduct.sku
+      matchedBySku += 1
+    } else if (eanMatchedProduct) {
+      matchStatus = 'MATCHED'
+      matchMethod = 'EAN'
+      matchedProductId =
+        eanMatchedProduct.id
+      matchedSku =
+        eanMatchedProduct.sku
+      matchedByEan += 1
+    } else {
+      matchStatus = 'UNMATCHED'
+      unmatched += 1
+    }
+
+    const name =
+      normalizeCell(rawSource.Name)
+
+    const productUrl =
+      normalizeCell(
+        rawSource.ProductUrl,
+      )
+
+    const imageUrl =
+      normalizeCell(rawSource.ImageUrl)
+
+    const priceRaw =
+      normalizeCell(rawSource.Price)
+
+    const priceMinor =
+      priceRaw
+        ? parseMoneyMinor(priceRaw)
+        : null
+
+    const netPriceRaw =
+      normalizeCell(rawSource.NetPrice)
+
+    const deliveryCostRaw =
+      normalizeCell(
+        rawSource.DeliveryCost,
+      )
+
+    const deliveryTimeRaw =
+      normalizeCell(
+        rawSource.DeliveryTime,
+      )
+
+    const deliveryTimeDays =
+      deliveryTimeRaw
+        ? parseDeliveryTimeDays(
+            deliveryTimeRaw,
+          )
+        : null
+
+    const errors: string[] = []
+
+    if (!identifier) {
+      errors.push('MISSING_IDENTIFIER')
+    }
+
+    if (!eanCode) {
+      errors.push('MISSING_EAN')
+      missingEanRows += 1
+    }
+
+    if (!name) {
+      errors.push('MISSING_NAME')
+    }
+
+    if (!productUrl) {
+      errors.push('MISSING_PRODUCT_URL')
+    }
+
+    if (!imageUrl) {
+      errors.push('MISSING_IMAGE')
+    }
+
+    if (
+      priceMinor === null ||
+      priceMinor <= 0
+    ) {
+      errors.push('INVALID_PRICE')
+      invalidPriceRows += 1
+
+      if (priceMinor === 0) {
+        zeroPriceRows += 1
+      }
+    }
+
+    if (deliveryTimeDays === null) {
+      errors.push(
+        'INVALID_DELIVERY_TIME',
+      )
+      invalidDeliveryTimeRows += 1
+    }
+
+    if (errors.length === 0) {
+      validRows += 1
+    } else {
+      invalidRows += 1
+    }
+
+    identifiers.push(identifier)
+    eanCodes.push(eanCode)
+
+    allItems.push({
+      rowNumber: index + 1,
+      identifier,
+      eanCode,
+      manufacturer:
+        normalizeCell(
+          rawSource.Manufacturer,
+        ),
+      name,
+      description:
+        normalizeCell(
+          rawSource.Description,
+        ),
+      category:
+        normalizeCell(rawSource.Category),
+      productUrl,
+      imageUrl,
+      imageUrl2:
+        normalizeCell(rawSource.ImageUrl2),
+      priceRaw,
+      priceMinor,
+      netPriceRaw,
+      netPriceMinor:
+        netPriceRaw
+          ? parseMoneyMinor(netPriceRaw)
+          : null,
+      deliveryCostRaw,
+      deliveryCostMinor:
+        deliveryCostRaw
+          ? parseMoneyMinor(
+              deliveryCostRaw,
+            )
+          : null,
+      deliveryTimeRaw,
+      deliveryTimeDays,
+      normalizedSku,
+      matchStatus,
+      matchMethod,
+      matchedProductId,
+      matchedSku,
+      errors,
+      rawSource,
+    })
+  }
+
+  return {
+    headers,
+    summary: {
+      rows: csvRows.length - 1,
+      validRows,
+      invalidRows,
+      zeroPriceRows,
+      invalidPriceRows,
+      invalidDeliveryTimeRows,
+      missingEanRows,
+      matchedBySku,
+      matchedByEan,
+      unmatched,
+      invalidIdentifierFormat,
+      matchConflicts,
+      hubProductCount:
+        hubProducts.length,
+      duplicateIdentifierCount:
+        countDuplicates(identifiers),
+      duplicateEanCount:
+        countDuplicates(eanCodes),
+      previewRows:
+        Math.min(
+          allItems.length,
+          PREVIEW_LIMIT,
+        ),
+    },
+    allItems,
+  }
+}
+
+function toCatalogPreviewItem(
+  item: CatalogAnalyzedItem,
+): CatalogPreviewItem {
+  const {
+    description: _description,
+    rawSource: _rawSource,
+    ...previewItem
+  } = item
+
+  return previewItem
+}
+
 arukeresoApi.post(
   '/catalog/preview',
   async (context) => {
@@ -394,510 +857,43 @@ arukeresoApi.post(
       const csvText =
         await uploadedFile.text()
 
-      const csvRows =
-        parseSemicolonCsv(csvText)
+      const analysis =
+        await analyzeCatalogCsv(csvText)
 
-      if (csvRows.length === 0) {
-        return context.json(
-          {
-            status: 'error',
-            message:
-              'A CSV fajl ures.',
-          },
-          400,
-        )
-      }
-
-      const headers =
-        csvRows[0].map(
-          (header) =>
-            header
-              .replace(/^\uFEFF/, '')
-              .trim(),
-        )
-
-      const headerIndex =
-        new Map<string, number>()
-
-      headers.forEach(
-        (header, index) => {
-          headerIndex.set(
-            header.toLowerCase(),
-            index,
-          )
-        },
-      )
-
-      const missingHeaders =
-        EXPECTED_CATALOG_HEADERS
-          .filter(
-            (header) =>
-              !headerIndex.has(
-                header.toLowerCase(),
-              ),
-          )
-
-      if (missingHeaders.length > 0) {
-        return context.json(
-          {
-            status: 'error',
-            message:
-              'A CMS CSV fejlece nem megfelelo.',
-            headers,
-            missingHeaders,
-          },
-          400,
-        )
-      }
-
-      const getValue = (
-        row: string[],
-        header: CatalogHeader,
-      ) => {
-        const index =
-          headerIndex.get(
-            header.toLowerCase(),
-          )
-
-        if (index === undefined) {
-          return ''
-        }
-
-        return row[index] ?? ''
-      }
-
-      const database =
-        requireDatabase()
-
-      const [
-        hubProducts,
-        hubIdentifiers,
-      ] = await Promise.all([
-        database
-          .select({
-            id: products.id,
-            sku: products.sku,
-          })
-          .from(products),
-
-        database
-          .select({
-            productId:
-              productIdentifiers.productId,
-            type:
-              productIdentifiers.type,
-            value:
-              productIdentifiers.value,
-          })
-          .from(productIdentifiers),
-      ])
-
-      const productBySku =
-        new Map(
-          hubProducts.map(
-            (product) => [
-              product.sku,
-              product,
-            ],
-          ),
-        )
-
-      const productById =
-        new Map(
-          hubProducts.map(
-            (product) => [
-              product.id,
-              product,
-            ],
-          ),
-        )
-
-      const productByEan =
-        new Map<
-          string,
-          {
-            id: string
-            sku: string
-          }
-        >()
-
-      for (
-        const identifierRow
-        of hubIdentifiers
-      ) {
-        if (
-          identifierRow.type !==
-          'EAN'
-        ) {
-          continue
-        }
-
-        const product =
-          productById.get(
-            identifierRow.productId,
-          )
-
-        if (!product) {
-          continue
-        }
-
-        productByEan.set(
-          identifierRow.value.trim(),
-          product,
-        )
-      }
-
-      const items: CatalogPreviewItem[] =
-        []
-
-      let validRows = 0
-      let invalidRows = 0
-      let zeroPriceRows = 0
-      let invalidPriceRows = 0
-      let invalidDeliveryTimeRows = 0
-      let missingEanRows = 0
-
-      let matchedBySku = 0
-      let matchedByEan = 0
-      let unmatched = 0
-      let invalidIdentifierFormat = 0
-      let matchConflicts = 0
-
-      const identifiers:
-        Array<string | null> = []
-
-      const eanCodes:
-        Array<string | null> = []
-
-      for (
-        let index = 1;
-        index < csvRows.length;
-        index += 1
-      ) {
-        const row =
-          csvRows[index]
-
-        const identifier =
-          normalizeCell(
-            getValue(
-              row,
-              'Identifier',
-            ),
-          )
-
-        const eanCode =
-          normalizeCell(
-            getValue(
-              row,
-              'EanCode',
-            ),
-          )
-
-        const normalizedSku =
-          identifier
-            ? cmsIdentifierToSku(
-                identifier,
-              )
-            : null
-
-        if (
-          identifier &&
-          !normalizedSku
-        ) {
-          invalidIdentifierFormat += 1
-        }
-
-        const skuMatchedProduct =
-          normalizedSku
-            ? productBySku.get(
-                normalizedSku,
-              ) ?? null
-            : null
-
-        const eanMatchedProduct =
-          eanCode
-            ? productByEan.get(
-                eanCode.trim(),
-              ) ?? null
-            : null
-
-        let matchStatus:
-          | 'MATCHED'
-          | 'UNMATCHED'
-          | 'CONFLICT'
-
-        let matchMethod:
-          | 'SKU'
-          | 'EAN'
-          | null = null
-
-        let matchedProductId:
-          string | null = null
-
-        let matchedSku:
-          string | null = null
-
-        if (
-          skuMatchedProduct &&
-          eanMatchedProduct &&
-          skuMatchedProduct.id !==
-            eanMatchedProduct.id
-        ) {
-          matchStatus = 'CONFLICT'
-          matchConflicts += 1
-        } else if (
-          skuMatchedProduct
-        ) {
-          matchStatus = 'MATCHED'
-          matchMethod = 'SKU'
-          matchedProductId =
-            skuMatchedProduct.id
-          matchedSku =
-            skuMatchedProduct.sku
-          matchedBySku += 1
-        } else if (
-          eanMatchedProduct
-        ) {
-          matchStatus = 'MATCHED'
-          matchMethod = 'EAN'
-          matchedProductId =
-            eanMatchedProduct.id
-          matchedSku =
-            eanMatchedProduct.sku
-          matchedByEan += 1
-        } else {
-          matchStatus = 'UNMATCHED'
-          unmatched += 1
-        }
-
-        const name =
-          normalizeCell(
-            getValue(
-              row,
-              'Name',
-            ),
-          )
-
-        const productUrl =
-          normalizeCell(
-            getValue(
-              row,
-              'ProductUrl',
-            ),
-          )
-
-        const imageUrl =
-          normalizeCell(
-            getValue(
-              row,
-              'ImageUrl',
-            ),
-          )
-
-        const priceRaw =
-          normalizeCell(
-            getValue(
-              row,
-              'Price',
-            ),
-          )
-
-        const priceMinor =
-          priceRaw
-            ? parseMoneyMinor(
-                priceRaw,
-              )
-            : null
-
-        const netPriceRaw =
-          normalizeCell(
-            getValue(
-              row,
-              'NetPrice',
-            ),
-          )
-
-        const deliveryCostRaw =
-          normalizeCell(
-            getValue(
-              row,
-              'DeliveryCost',
-            ),
-          )
-
-        const deliveryTimeRaw =
-          normalizeCell(
-            getValue(
-              row,
-              'DeliveryTime',
-            ),
-          )
-
-        const deliveryTimeDays =
-          deliveryTimeRaw
-            ? parseDeliveryTimeDays(
-                deliveryTimeRaw,
-              )
-            : null
-
-        const errors: string[] =
-          []
-
-        if (!identifier) {
-          errors.push(
-            'MISSING_IDENTIFIER',
-          )
-        }
-
-        if (!eanCode) {
-          errors.push('MISSING_EAN')
-          missingEanRows += 1
-        }
-
-        if (!name) {
-          errors.push('MISSING_NAME')
-        }
-
-        if (!productUrl) {
-          errors.push(
-            'MISSING_PRODUCT_URL',
-          )
-        }
-
-        if (!imageUrl) {
-          errors.push(
-            'MISSING_IMAGE',
-          )
-        }
-
-        if (
-          priceMinor === null ||
-          priceMinor <= 0
-        ) {
-          errors.push(
-            'INVALID_PRICE',
-          )
-          invalidPriceRows += 1
-
-          if (priceMinor === 0) {
-            zeroPriceRows += 1
-          }
-        }
-
-        if (
-          deliveryTimeDays === null
-        ) {
-          errors.push(
-            'INVALID_DELIVERY_TIME',
-          )
-          invalidDeliveryTimeRows += 1
-        }
-
-        if (errors.length === 0) {
-          validRows += 1
-        } else {
-          invalidRows += 1
-        }
-
-        identifiers.push(identifier)
-        eanCodes.push(eanCode)
-
-        if (
-          items.length <
-          PREVIEW_LIMIT
-        ) {
-          items.push({
-            rowNumber:
-              index + 1,
-            identifier,
-            eanCode,
-            manufacturer:
-              normalizeCell(
-                getValue(
-                  row,
-                  'Manufacturer',
-                ),
-              ),
-            name,
-            category:
-              normalizeCell(
-                getValue(
-                  row,
-                  'Category',
-                ),
-              ),
-            productUrl,
-            imageUrl,
-            imageUrl2:
-              normalizeCell(
-                getValue(
-                  row,
-                  'ImageUrl2',
-                ),
-              ),
-            priceRaw,
-            priceMinor,
-            netPriceRaw,
-            netPriceMinor:
-              netPriceRaw
-                ? parseMoneyMinor(
-                    netPriceRaw,
-                  )
-                : null,
-            deliveryCostRaw,
-            deliveryCostMinor:
-              deliveryCostRaw
-                ? parseMoneyMinor(
-                    deliveryCostRaw,
-                  )
-                : null,
-            deliveryTimeRaw,
-            deliveryTimeDays,
-            normalizedSku,
-            matchStatus,
-            matchMethod,
-            matchedProductId,
-            matchedSku,
-            errors,
-          })
-        }
-      }
+      const data =
+        analysis.allItems
+          .slice(0, PREVIEW_LIMIT)
+          .map(toCatalogPreviewItem)
 
       return context.json({
         status: 'ok',
-        fileName:
-          uploadedFile.name,
-        headers,
-        summary: {
-          rows:
-            csvRows.length - 1,
-          validRows,
-          invalidRows,
-          zeroPriceRows,
-          invalidPriceRows,
-          invalidDeliveryTimeRows,
-          missingEanRows,
-          matchedBySku,
-          matchedByEan,
-          unmatched,
-          invalidIdentifierFormat,
-          matchConflicts,
-          hubProductCount:
-            hubProducts.length,
-          duplicateIdentifierCount:
-            countDuplicates(
-              identifiers,
-            ),
-          duplicateEanCount:
-            countDuplicates(
-              eanCodes,
-            ),
-          previewRows:
-            items.length,
-        },
-        data: items,
+        fileName: uploadedFile.name,
+        headers: analysis.headers,
+        summary: analysis.summary,
+        data,
       })
+
     } catch (error) {
+      if (
+        error instanceof
+          CatalogCsvValidationError
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message: error.message,
+            ...(error.headers
+              ? {
+                  headers: error.headers,
+                  missingHeaders:
+                    error.missingHeaders ?? [],
+                }
+              : {}),
+          },
+          400,
+        )
+      }
+
       return context.json(
         {
           status: 'error',
