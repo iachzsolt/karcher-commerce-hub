@@ -1377,6 +1377,11 @@ export const catalogSourceItems = pgTable(
 
     matchError: text('match_error'),
 
+    lastImportRunId: uuid(
+      'last_import_run_id',
+    )
+      .references(() => dataConnectionRuns.id),
+
     observedAt: timestamp('observed_at', {
       withTimezone: true,
     })

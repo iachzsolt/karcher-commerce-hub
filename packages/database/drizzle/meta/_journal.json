@@ -169,6 +169,13 @@
       "when": 1788354928646,
       "tag": "0023_arukereso_catalog_source_fields",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1788358543813,
+      "tag": "0024_arukereso_catalog_import_run",
+      "breakpoints": true
     }
   ]
 }

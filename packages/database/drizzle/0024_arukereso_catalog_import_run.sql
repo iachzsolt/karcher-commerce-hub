@@ -1,0 +1,2 @@
+ALTER TABLE "catalog_source_items" ADD COLUMN "last_import_run_id" uuid;--> statement-breakpoint
+ALTER TABLE "catalog_source_items" ADD CONSTRAINT "catalog_source_items_last_import_run_id_data_connection_runs_id_fk" FOREIGN KEY ("last_import_run_id") REFERENCES "public"."data_connection_runs"("id") ON DELETE no action ON UPDATE no action;
