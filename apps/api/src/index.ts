@@ -39,6 +39,7 @@ import {
   dataConnectionsApi,
   processDueDataConnectionSchedules,
 } from './data-connections.js'
+import { arukeresoApi } from './arukereso.js'
 import {
   allegroAuth,
   finishOfferAllegroCampaign,
@@ -113,6 +114,7 @@ app.get('/auth/session', (context) => {
 
 app.route('/auth/allegro', allegroAuth)
 app.route('/data-connections', dataConnectionsApi)
+app.route('/arukereso', arukeresoApi)
 
 function resolveOptionalHistoryRange(
   requestedFrom: string | undefined,
