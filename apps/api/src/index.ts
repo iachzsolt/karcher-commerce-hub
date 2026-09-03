@@ -28,6 +28,7 @@ import {
   desc,
   eq,
   gte,
+  inArray,
   lt,
   lte,
   min,
@@ -6582,6 +6583,398 @@ app.post(
     }
   },
 )
+app.post(
+  '/allegro/remote-campaigns/:campaignId/remove',
+  async (context) => {
+    if (!db) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Database is not configured',
+        },
+        500,
+      )
+    }
+
+    try {
+      const externalCampaignId =
+        context.req.param('campaignId')
+
+      const body = await context.req.json<{
+        listingIds?: string[]
+      }>()
+
+      const listingIds =
+        body.listingIds ?? []
+
+      if (listingIds.length === 0) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'At least one listing is required',
+          },
+          400,
+        )
+      }
+
+      const removableStatuses = [
+        'AWAITING_BADGE',
+        'IN_VERIFICATION',
+        'WAITING_FOR_PUBLICATION',
+        'ACTIVE',
+        'FINISH_FAILED',
+      ]
+
+      const results: Array<{
+        listingId: string
+        offerId?: string
+        status: string
+        operationId?: string | null
+        error?: string
+      }> = []
+
+      const markFinishFailed = async (
+        preparationId: string,
+        retryCount: number,
+        errorText: string,
+      ) => {
+        const nextRetryCount =
+          retryCount + 1
+
+        const retryDelayMinutes =
+          [5, 15, 30, 60][retryCount]
+
+        await db
+          .update(listingCampaigns)
+          .set({
+            finishOperationId: null,
+            campaignStatus: 'FINISH_FAILED',
+            finishError: errorText,
+            finishRetryCount:
+              nextRetryCount,
+            finishRetryAfter:
+              nextRetryCount < 5 &&
+              retryDelayMinutes !== undefined
+                ? new Date(
+                    Date.now() +
+                      retryDelayMinutes *
+                        60 *
+                        1000,
+                  )
+                : null,
+            lastSyncedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(
+            eq(
+              listingCampaigns.id,
+              preparationId,
+            ),
+          )
+      }
+
+      for (const listingId of listingIds) {
+        const [preparation] = await db
+          .select({
+            id: listingCampaigns.id,
+            externalApplicationId:
+              listingCampaigns.externalApplicationId,
+            applicationStatus:
+              listingCampaigns.applicationStatus,
+            campaignStatus:
+              listingCampaigns.campaignStatus,
+            finishOperationId:
+              listingCampaigns.finishOperationId,
+            finishRetryCount:
+              listingCampaigns.finishRetryCount,
+            offerId:
+              platformListings.externalListingId,
+          })
+          .from(listingCampaigns)
+          .innerJoin(
+            platformListings,
+            eq(
+              platformListings.id,
+              listingCampaigns.listingId,
+            ),
+          )
+          .where(
+            and(
+              eq(
+                listingCampaigns.externalCampaignId,
+                externalCampaignId,
+              ),
+              eq(
+                listingCampaigns.listingId,
+                listingId,
+              ),
+            ),
+          )
+          .limit(1)
+
+        if (!preparation) {
+          results.push({
+            listingId,
+            status: 'FAILED',
+            error:
+              'Campaign preparation not found',
+          })
+          continue
+        }
+
+        if (
+          preparation.campaignStatus ===
+          'FINISHING'
+        ) {
+          results.push({
+            listingId,
+            offerId: preparation.offerId,
+            status: 'FINISHING',
+            operationId:
+              preparation.finishOperationId,
+          })
+          continue
+        }
+
+        if (
+          preparation.campaignStatus ===
+          'FINISHED'
+        ) {
+          results.push({
+            listingId,
+            offerId: preparation.offerId,
+            status: 'FINISHED',
+            operationId:
+              preparation.finishOperationId,
+          })
+          continue
+        }
+
+        if (!preparation.externalApplicationId) {
+          results.push({
+            listingId,
+            offerId: preparation.offerId,
+            status: 'FAILED',
+            error:
+              'Campaign application was never submitted successfully',
+          })
+          continue
+        }
+
+        if (
+          preparation.applicationStatus !==
+          'PROCESSED'
+        ) {
+          results.push({
+            listingId,
+            offerId: preparation.offerId,
+            status: 'FAILED',
+            error:
+              `Campaign application is not processed. Current status: ${preparation.applicationStatus ?? 'UNKNOWN'}`,
+          })
+          continue
+        }
+
+        if (
+          !preparation.campaignStatus ||
+          !removableStatuses.includes(
+            preparation.campaignStatus,
+          )
+        ) {
+          results.push({
+            listingId,
+            offerId: preparation.offerId,
+            status: 'FAILED',
+            error:
+              `Campaign is not removable. Current status: ${preparation.campaignStatus ?? 'UNKNOWN'}`,
+          })
+          continue
+        }
+
+        const removingAt = new Date()
+
+        const [claimed] = await db
+          .update(listingCampaigns)
+          .set({
+            finishOperationId: null,
+            campaignStatus: 'FINISHING',
+            finishError: null,
+            finishRetryAfter: null,
+            updatedAt: removingAt,
+          })
+          .where(
+            and(
+              eq(
+                listingCampaigns.id,
+                preparation.id,
+              ),
+              eq(
+                listingCampaigns.applicationStatus,
+                'PROCESSED',
+              ),
+              inArray(
+                listingCampaigns.campaignStatus,
+                removableStatuses,
+              ),
+            ),
+          )
+          .returning({
+            id: listingCampaigns.id,
+          })
+
+        if (!claimed) {
+          results.push({
+            listingId,
+            offerId: preparation.offerId,
+            status: 'SKIPPED',
+            error:
+              'Campaign state changed before removal',
+          })
+          continue
+        }
+
+        try {
+          const result =
+            await finishOfferAllegroCampaign({
+              campaignId:
+                externalCampaignId,
+              offerId: preparation.offerId,
+            })
+
+          if (!result.ok) {
+            const errorText =
+              typeof result.data === 'string'
+                ? result.data
+                : JSON.stringify(result.data)
+
+            await markFinishFailed(
+              preparation.id,
+              preparation.finishRetryCount,
+              errorText,
+            )
+
+            results.push({
+              listingId,
+              offerId: preparation.offerId,
+              status: 'FAILED',
+              error: errorText,
+            })
+            continue
+          }
+
+          const responseData =
+            result.data &&
+            typeof result.data === 'object'
+              ? result.data
+              : null
+
+          const operationId =
+            responseData &&
+            'id' in responseData &&
+            typeof responseData.id === 'string'
+              ? responseData.id
+              : null
+
+          if (!operationId) {
+            const errorText =
+              'Allegro accepted the finish request but did not return an operation ID'
+
+            await markFinishFailed(
+              preparation.id,
+              preparation.finishRetryCount,
+              errorText,
+            )
+
+            results.push({
+              listingId,
+              offerId: preparation.offerId,
+              status: 'FAILED',
+              error: errorText,
+            })
+            continue
+          }
+
+          await db
+            .update(listingCampaigns)
+            .set({
+              finishOperationId: operationId,
+              campaignStatus: 'FINISHING',
+              finishError: null,
+              finishRetryAfter: null,
+              lastSyncedAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .where(
+              eq(
+                listingCampaigns.id,
+                preparation.id,
+              ),
+            )
+
+          results.push({
+            listingId,
+            offerId: preparation.offerId,
+            status: 'FINISHING',
+            operationId,
+          })
+        } catch (error) {
+          const errorText =
+            error instanceof Error
+              ? error.message
+              : 'Unknown campaign removal error'
+
+          await markFinishFailed(
+            preparation.id,
+            preparation.finishRetryCount,
+            errorText,
+          )
+
+          results.push({
+            listingId,
+            offerId: preparation.offerId,
+            status: 'FAILED',
+            error: errorText,
+          })
+        }
+      }
+
+      const failed =
+        results.filter(
+          (result) =>
+            result.status === 'FAILED' ||
+            result.status === 'SKIPPED',
+        ).length
+
+      return context.json({
+        status:
+          failed === 0
+            ? 'ok'
+            : failed === results.length
+              ? 'error'
+              : 'partial',
+        count: results.length,
+        accepted: results.length - failed,
+        failed,
+        data: results,
+      })
+    } catch (error) {
+      console.error(
+        'Manual campaign removal failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Could not remove campaign listings',
+        },
+        500,
+      )
+    }
+  },
+)
 let campaignApplicationProcessorRunning = false
 
 async function processPendingCampaignApplications() {
@@ -7147,6 +7540,7 @@ app.post(
   '/allegro/campaign-applications/sync',
   async (context) => {
     await processPendingCampaignApplications()
+    await processPendingCampaignFinishOperations()
 
     return context.json({
       status: 'ok',
