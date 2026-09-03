@@ -2827,10 +2827,14 @@ app.post(
 
       const body = await context.req.json<{
         listingIds?: string[]
+        submitNow?: boolean
       }>()
 
       const listingIds =
         body.listingIds ?? []
+
+      const submitNow =
+        body.submitNow === true
 
       if (listingIds.length === 0) {
         return context.json(
@@ -2844,6 +2848,48 @@ app.post(
       }
 
       const now = new Date()
+      let officialValidTo: Date | null = null
+
+      if (submitNow) {
+        const [localCampaign] = await db
+          .select({
+            validTo: campaigns.validTo,
+          })
+          .from(campaigns)
+          .where(
+            eq(
+              campaigns.externalCampaignId,
+              externalCampaignId,
+            ),
+          )
+          .limit(1)
+
+        if (!localCampaign?.validTo) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                'Official campaign end is missing',
+            },
+            400,
+          )
+        }
+
+        if (localCampaign.validTo <= now) {
+          return context.json(
+            {
+              status: 'error',
+              message:
+                'Official campaign has already ended',
+            },
+            409,
+          )
+        }
+
+        officialValidTo =
+          localCampaign.validTo
+      }
+
       const scheduled = []
 
       for (const listingId of listingIds) {
@@ -2897,8 +2943,13 @@ app.post(
 
         if (
           preparation.desiredPriceMinor === null ||
-          !preparation.validFrom ||
-          !preparation.validTo
+          (
+            !submitNow &&
+            (
+              !preparation.validFrom ||
+              !preparation.validTo
+            )
+          )
         ) {
           return context.json(
             {
@@ -2911,6 +2962,9 @@ app.post(
         }
 
         if (
+          !submitNow &&
+          preparation.validTo &&
+          preparation.validFrom &&
           preparation.validTo <
           preparation.validFrom
         ) {
@@ -2934,6 +2988,13 @@ app.post(
 
             retryAfter: null,
             retryCount: 0,
+
+            ...(submitNow
+              ? {
+                  validFrom: null,
+                  validTo: officialValidTo,
+                }
+              : {}),
 
             updatedAt: now,
           })

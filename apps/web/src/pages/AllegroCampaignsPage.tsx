@@ -1881,6 +1881,7 @@ function AllegroCampaignsPage() {
   }
   async function submitSelectedCampaignOffers(
     campaign: AllegroCampaign,
+    submitNow = false,
   ) {
     setPreparationMessage(null)
 
@@ -1891,17 +1892,27 @@ function AllegroCampaignsPage() {
       return
     }
 
-    const notScheduledListingIds =
+    const invalidStateListingIds =
       selectedListingIds.filter(
-        (listingId) =>
-          preparationStatuses[listingId]
-            ?.applicationStatus !==
-          'SCHEDULED',
+        (listingId) => {
+          const preparation =
+            preparationStatuses[listingId]
+
+          return submitNow
+            ? preparation?.applicationStatus !==
+                'PREPARED' ||
+                preparation.campaignStatus !==
+                  'PREPARED'
+            : preparation?.applicationStatus !==
+                'SCHEDULED'
+        },
       )
 
-    if (notScheduledListingIds.length > 0) {
+    if (invalidStateListingIds.length > 0) {
       setPreparationMessage(
-        'Beküldés előtt véglegesítsd az ütemezést minden kijelölt ajánlatnál.',
+        submitNow
+          ? 'A Beküldés most művelet előtt mentsd az előkészítést minden kijelölt ajánlatnál.'
+          : 'Beküldés előtt véglegesítsd az ütemezést minden kijelölt ajánlatnál.',
       )
       return
     }
@@ -1909,6 +1920,33 @@ function AllegroCampaignsPage() {
     setSubmittingPreparations(true)
 
     try {
+      if (submitNow) {
+        const scheduleResponse = await fetch(
+          `${API_BASE_URL}/allegro/remote-campaigns/${campaign.id}/schedule`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              listingIds:
+                selectedListingIds,
+              submitNow: true,
+            }),
+          },
+        )
+
+        const scheduleResult =
+          await scheduleResponse.json()
+
+        if (!scheduleResponse.ok) {
+          throw new Error(
+            scheduleResult.message ??
+              'Nem sikerült előkészíteni az azonnali beküldést.',
+          )
+        }
+      }
+
       const response = await fetch(
         `${API_BASE_URL}/allegro/remote-campaigns/${campaign.id}/submit`,
         {
@@ -1932,10 +1970,15 @@ function AllegroCampaignsPage() {
         )
       }
 
+      const resultItems =
+        submitNow
+          ? result.results ?? result.data
+          : result.results
+
       const results = Array.isArray(
-        result.results,
+        resultItems,
       )
-        ? result.results
+        ? resultItems
         : []
 
       const failedResults =
@@ -2053,6 +2096,22 @@ function AllegroCampaignsPage() {
         preparationStatuses[listingId]
           ?.applicationStatus ===
         'SCHEDULED',
+    )
+
+  const allSelectedListingsPrepared =
+    selectedListingIds.length > 0 &&
+    selectedListingIds.every(
+      (listingId) => {
+        const preparation =
+          preparationStatuses[listingId]
+
+        return (
+          preparation?.applicationStatus ===
+            'PREPARED' &&
+          preparation.campaignStatus ===
+            'PREPARED'
+        )
+      },
     )
 
   const hasInvalidSelectedCampaignPrice =
@@ -3318,6 +3377,7 @@ function AllegroCampaignsPage() {
                         className="campaign-primary-button"
                         disabled={
                           schedulingPreparations ||
+                          submittingPreparations ||
                           selectedListingIds.length === 0 ||
                           !allSelectedPreparationsEditable ||
                           hasInvalidSelectedCampaignPrice
@@ -3331,6 +3391,28 @@ function AllegroCampaignsPage() {
                         {schedulingPreparations
                           ? 'Véglegesítés…'
                           : 'Ütemezés véglegesítése'}
+                      </button>
+
+                      <button
+                        type="button"
+                        className="campaign-primary-button"
+                        title="Az Allegro a kampány hivatalos kezdetekor aktiválja."
+                        disabled={
+                          !canSubmit ||
+                          schedulingPreparations ||
+                          submittingPreparations ||
+                          !allSelectedListingsPrepared
+                        }
+                        onClick={() =>
+                          void submitSelectedCampaignOffers(
+                            campaign,
+                            true,
+                          )
+                        }
+                      >
+                        {submittingPreparations
+                          ? 'Beküldés…'
+                          : 'Beküldés most'}
                       </button>
 
                       <button
