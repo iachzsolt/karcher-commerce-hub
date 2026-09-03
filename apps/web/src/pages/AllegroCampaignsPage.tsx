@@ -510,134 +510,6 @@ function formatListingStatus(
   if (status === 'ENDED') return 'Lejárt'
   return 'Ismeretlen'
 }
-const CAMPAIGN_TIME_ZONE =
-  'Europe/Budapest'
-
-function getBudapestDateTimeParts(
-  value: string,
-) {
-  const formatter =
-    new Intl.DateTimeFormat(
-      'en-GB',
-      {
-        timeZone: CAMPAIGN_TIME_ZONE,
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        hourCycle: 'h23',
-      },
-    )
-
-  const parts =
-    formatter.formatToParts(
-      new Date(value),
-    )
-
-  const getPart = (type: string) =>
-    parts.find(
-      (part) => part.type === type,
-    )?.value ?? ''
-
-  return {
-    date:
-      `${getPart('year')}-${getPart('month')}-${getPart('day')}`,
-
-    time:
-      `${getPart('hour')}:${getPart('minute')}`,
-  }
-}
-
-function getBudapestOffsetMilliseconds(
-  date: Date,
-) {
-  const formatter =
-    new Intl.DateTimeFormat(
-      'en-GB',
-      {
-        timeZone: CAMPAIGN_TIME_ZONE,
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        hourCycle: 'h23',
-      },
-    )
-
-  const parts =
-    formatter.formatToParts(date)
-
-  const getNumber = (type: string) =>
-    Number(
-      parts.find(
-        (part) => part.type === type,
-      )?.value ?? 0,
-    )
-
-  const asUtc = Date.UTC(
-    getNumber('year'),
-    getNumber('month') - 1,
-    getNumber('day'),
-    getNumber('hour'),
-    getNumber('minute'),
-    getNumber('second'),
-  )
-
-  return asUtc - date.getTime()
-}
-
-function budapestLocalToIso(
-  dateValue: string,
-  timeValue: string,
-) {
-  const [year, month, day] =
-    dateValue.split('-').map(Number)
-
-  const [hour, minute] =
-    timeValue.split(':').map(Number)
-
-  const tentativeUtc =
-    new Date(
-      Date.UTC(
-        year,
-        month - 1,
-        day,
-        hour,
-        minute,
-        0,
-        0,
-      ),
-    )
-
-  let offset =
-    getBudapestOffsetMilliseconds(
-      tentativeUtc,
-    )
-
-  let utcDate =
-    new Date(
-      tentativeUtc.getTime() -
-        offset,
-    )
-
-  const correctedOffset =
-    getBudapestOffsetMilliseconds(
-      utcDate,
-    )
-
-  if (correctedOffset !== offset) {
-    utcDate =
-      new Date(
-        tentativeUtc.getTime() -
-          correctedOffset,
-      )
-  }
-
-  return utcDate.toISOString()
-}
 function isCampaignCurrentlyNominatable(
   campaign: AllegroCampaign,
   now = new Date(),
@@ -898,38 +770,6 @@ function AllegroCampaignsPage() {
   ] = useState('')
 
   const [
-    validFromDrafts,
-    setValidFromDrafts,
-  ] = useState<Record<string, string>>({})
-
-  const [
-    validToDrafts,
-    setValidToDrafts,
-  ] = useState<Record<string, string>>({})
-
-  const [
-    validFromTimeDrafts,
-    setValidFromTimeDrafts,
-  ] = useState<Record<string, string>>({})
-
-  const [
-    validToTimeDrafts,
-    setValidToTimeDrafts,
-  ] = useState<Record<string, string>>({})
-
-  const [bulkValidFrom, setBulkValidFrom] =
-    useState('')
-
-  const [bulkValidFromTime, setBulkValidFromTime] =
-    useState('00:00')
-
-  const [bulkValidTo, setBulkValidTo] =
-    useState('')
-
-  const [bulkValidToTime, setBulkValidToTime] =
-    useState('23:59')
-
-  const [
     savingPreparations,
     setSavingPreparations,
   ] = useState(false)
@@ -945,11 +785,6 @@ function AllegroCampaignsPage() {
   ] = useState<
     Record<string, CampaignPreparationState>
   >({})
-
-  const [
-    schedulingPreparations,
-    setSchedulingPreparations,
-  ] = useState(false)
 
   const [
     submittingPreparations,
@@ -1205,12 +1040,7 @@ function AllegroCampaignsPage() {
     const preparedListings =
       result.data ?? []
 
-    const selectedIds: string[] = []
     const prices: Record<string, string> = {}
-    const starts: Record<string, string> = {}
-    const ends: Record<string, string> = {}
-    const startTimes: Record<string, string> = {}
-    const endTimes: Record<string, string> = {}
     const statuses: Record<
       string,
       CampaignPreparationState
@@ -1220,45 +1050,15 @@ function AllegroCampaignsPage() {
       (item: {
         listingId: string
         desiredPriceMinor: number | null
-        validFrom: string | null
-        validTo: string | null
         applicationStatus: string | null
         campaignStatus: string | null
         applicationError: string | null
         finishError: string | null
       }) => {
-        selectedIds.push(item.listingId)
-
         if (item.desiredPriceMinor !== null) {
           prices[item.listingId] = String(
             item.desiredPriceMinor / 100,
           )
-        }
-
-        if (item.validFrom) {
-          const parts =
-            getBudapestDateTimeParts(
-              item.validFrom,
-            )
-
-          starts[item.listingId] =
-            parts.date
-
-          startTimes[item.listingId] =
-            parts.time
-        }
-
-        if (item.validTo) {
-          const parts =
-            getBudapestDateTimeParts(
-              item.validTo,
-            )
-
-          ends[item.listingId] =
-            parts.date
-
-          endTimes[item.listingId] =
-            parts.time
         }
 
         statuses[item.listingId] = {
@@ -1279,10 +1079,6 @@ function AllegroCampaignsPage() {
 
     setSelectedListingIds([])
     setCampaignPriceDrafts(prices)
-    setValidFromDrafts(starts)
-    setValidToDrafts(ends)
-    setValidFromTimeDrafts(startTimes)
-    setValidToTimeDrafts(endTimes)
     setPreparationStatuses(statuses)
   }
 
@@ -1308,14 +1104,6 @@ function AllegroCampaignsPage() {
       setSelectedListingIds([])
       setCampaignPriceDrafts({})
       setBulkDiscountPercent('')
-      setValidFromDrafts({})
-      setValidToDrafts({})
-      setValidFromTimeDrafts({})
-      setValidToTimeDrafts({})
-      setBulkValidFrom('')
-      setBulkValidFromTime('00:00')
-      setBulkValidTo('')
-      setBulkValidToTime('23:59')
       setPreparationMessage(null)
       setPreparationStatuses({})
       setAlleDiscountOffersById({})
@@ -1332,14 +1120,6 @@ function AllegroCampaignsPage() {
     setSelectedListingIds([])
     setCampaignPriceDrafts({})
     setBulkDiscountPercent('')
-    setValidFromDrafts({})
-    setValidToDrafts({})
-    setValidFromTimeDrafts({})
-    setValidToTimeDrafts({})
-    setBulkValidFrom('')
-    setBulkValidFromTime('00:00')
-    setBulkValidTo('')
-    setBulkValidToTime('23:59')
     setPreparationMessage(null)
     setPreparationStatuses({})
     setAlleDiscountOffersById({})
@@ -1552,60 +1332,6 @@ function AllegroCampaignsPage() {
       },
     )
   }
-  function applyBulkPeriod() {
-    if (
-      !bulkValidFrom ||
-      !bulkValidFromTime ||
-      !bulkValidTo ||
-      !bulkValidToTime ||
-      selectedListingIds.length === 0
-    ) {
-      return
-    }
-
-    setValidFromDrafts((current) => {
-      const next = { ...current }
-
-      selectedListingIds.forEach((listingId) => {
-        next[listingId] = bulkValidFrom
-      })
-
-      return next
-    })
-
-    setValidFromTimeDrafts((current) => {
-      const next = { ...current }
-
-      selectedListingIds.forEach((listingId) => {
-        next[listingId] =
-          bulkValidFromTime
-      })
-
-      return next
-    })
-
-    setValidToDrafts((current) => {
-      const next = { ...current }
-
-      selectedListingIds.forEach((listingId) => {
-        next[listingId] = bulkValidTo
-      })
-
-      return next
-    })
-
-    setValidToTimeDrafts((current) => {
-      const next = { ...current }
-
-      selectedListingIds.forEach((listingId) => {
-        next[listingId] =
-          bulkValidToTime
-      })
-
-      return next
-    })
-  }
-
   async function savePreparations(
     campaign: AllegroCampaign,
   ): Promise<boolean> {
@@ -1614,6 +1340,40 @@ function AllegroCampaignsPage() {
     if (selectedListingIds.length === 0) {
       setPreparationMessage(
         'Jelölj ki legalább egy ajánlatot.',
+      )
+      return false
+    }
+
+    const publicationFrom =
+      campaign.publication.from
+
+    const publicationTo =
+      campaign.publication.to
+
+    if (!publicationFrom || !publicationTo) {
+      setPreparationMessage(
+        'Az Allegro kampány hivatalos kezdési vagy zárási időpontja hiányzik.',
+      )
+      return false
+    }
+
+    const publicationFromDate =
+      new Date(publicationFrom)
+
+    const publicationToDate =
+      new Date(publicationTo)
+
+    if (
+      Number.isNaN(
+        publicationFromDate.getTime(),
+      ) ||
+      Number.isNaN(
+        publicationToDate.getTime(),
+      ) ||
+      publicationToDate < publicationFromDate
+    ) {
+      setPreparationMessage(
+        'Az Allegro kampány hivatalos időszaka érvénytelen.',
       )
       return false
     }
@@ -1637,86 +1397,12 @@ function AllegroCampaignsPage() {
         campaignPriceDrafts[listingId],
       )
 
-      const validFrom =
-        validFromDrafts[listingId]
-
-      const validTo =
-        validToDrafts[listingId]
-
-      const validFromTime =
-        validFromTimeDrafts[listingId] ??
-        '00:00'
-
-      const validToTime =
-        validToTimeDrafts[listingId] ??
-        '23:59'
-
       if (
         !Number.isFinite(price) ||
         price <= 0
       ) {
         setPreparationMessage(
           `Hiányzó vagy hibás kampányár: ${listing.sku}`,
-        )
-        return false
-      }
-
-      if (
-        !validFrom ||
-        !validFromTime ||
-        !validTo ||
-        !validToTime
-      ) {
-        setPreparationMessage(
-          `Hiányzó időszak: ${listing.sku}`,
-        )
-        return false
-      }
-
-      const validFromIso =
-        budapestLocalToIso(
-          validFrom,
-          validFromTime,
-        )
-
-      const validToIso =
-        budapestLocalToIso(
-          validTo,
-          validToTime,
-        )
-
-      if (
-        new Date(validToIso) <
-        new Date(validFromIso)
-      ) {
-        setPreparationMessage(
-          `A zárási időpont nem lehet korábbi a kezdésnél: ${listing.sku}`,
-        )
-        return false
-      }
-
-      if (
-        campaign.publication.from &&
-        new Date(validFromIso) <
-          new Date(
-            campaign.publication.from,
-          )
-      ) {
-        setPreparationMessage(
-          `Az ajánlat kezdete a kampány időszaka elé esik: ${listing.sku}`,
-        )
-        return false
-      }
-
-      if (
-        campaign.publication.to &&
-        new Date(validToIso) >
-          new Date(
-            campaign.publication.to,
-          )
-      ) {
-        setPreparationMessage(
-          `Az ajánlat vége a kampány időszaka utánra esik: ${listing.sku}`,
         )
         return false
       }
@@ -1755,25 +1441,8 @@ function AllegroCampaignsPage() {
                     ],
                   ),
 
-                  validFrom:
-                    budapestLocalToIso(
-                      validFromDrafts[
-                        listingId
-                      ],
-                      validFromTimeDrafts[
-                        listingId
-                      ] ?? '00:00',
-                    ),
-
-                  validTo:
-                    budapestLocalToIso(
-                      validToDrafts[
-                        listingId
-                      ],
-                      validToTimeDrafts[
-                        listingId
-                      ] ?? '23:59',
-                    ),
+                  validFrom: publicationFrom,
+                  validTo: publicationTo,
                 }),
               ),
           }),
@@ -1813,75 +1482,6 @@ function AllegroCampaignsPage() {
       return false
     } finally {
       setSavingPreparations(false)
-    }
-  }
-  async function finalizeSchedule(
-    campaign: AllegroCampaign,
-  ) {
-    setPreparationMessage(null)
-
-    if (hasInvalidSelectedCampaignPrice) {
-      setPreparationMessage(
-        'A kampányárnak minden kijelölt ajánlatnál alacsonyabbnak kell lennie az aktuális árnál.',
-      )
-      return
-    }
-
-    const saved =
-      await savePreparations(campaign)
-
-    if (!saved) {
-      return
-    }
-
-    setSchedulingPreparations(true)
-
-    try {
-      const response = await fetch(
-        `${API_BASE_URL}/allegro/remote-campaigns/${campaign.id}/schedule`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            listingIds:
-              selectedListingIds,
-          }),
-        },
-      )
-
-      const result = await response.json()
-
-      if (!response.ok) {
-        throw new Error(
-          result.message ??
-            'Nem sikerült véglegesíteni az ütemezést.',
-        )
-      }
-
-      setPreparationMessage(
-        `${result.count} ajánlat ütemezése véglegesítve.`,
-      )
-
-      await loadPreparations(
-        campaign.id,
-      )
-
-      clearListingSelection()
-    } catch (scheduleError) {
-      console.error(
-        'Campaign scheduling failed:',
-        scheduleError,
-      )
-
-      setPreparationMessage(
-        scheduleError instanceof Error
-          ? scheduleError.message
-          : 'Nem sikerült véglegesíteni az ütemezést.',
-      )
-    } finally {
-      setSchedulingPreparations(false)
     }
   }
   async function submitSelectedCampaignOffers(
@@ -2138,15 +1738,6 @@ function AllegroCampaignsPage() {
       isPreparationEditable,
     )
 
-  const allSelectedListingsScheduled =
-    selectedListingIds.length > 0 &&
-    selectedListingIds.every(
-      (listingId) =>
-        preparationStatuses[listingId]
-          ?.applicationStatus ===
-        'SCHEDULED',
-    )
-
   const allSelectedListingsPrepared =
     selectedListingIds.length > 0 &&
     selectedListingIds.every(
@@ -2162,36 +1753,6 @@ function AllegroCampaignsPage() {
         )
       },
     )
-
-  const hasInvalidSelectedCampaignPrice =
-    selectedListingIds.some((listingId) => {
-      const listing = listings.find(
-        (item) => item.id === listingId,
-      )
-
-      const priceValue =
-        campaignPriceDrafts[listingId]
-
-      if (
-        !listing ||
-        listing.priceMinor === null ||
-        !priceValue
-      ) {
-        return false
-      }
-
-      const campaignPrice =
-        Number(priceValue)
-
-      if (!Number.isFinite(campaignPrice)) {
-        return false
-      }
-
-      return (
-        Math.round(campaignPrice * 100) >=
-        listing.priceMinor
-      )
-    })
 
   return (
     <section className="campaigns-page">
@@ -2658,118 +2219,6 @@ function AllegroCampaignsPage() {
                     </div>
                   </div>
 
-                  <div className="campaign-bulk-period">
-                    <div>
-                      <span className="campaign-detail-label">
-                        Időszak a kijelölt ajánlatokra
-                      </span>
-
-                      <div className="campaign-bulk-period-fields">
-                        <label>
-                          <span>Mettől</span>
-
-                          <div className="campaign-date-time-inputs">
-                            <input
-                              type="date"
-                                    onClick={(event) =>
-                                      event.currentTarget.showPicker()
-                                    }
-                              value={bulkValidFrom}
-                              min={
-                                campaign.publication.from
-                                  ? campaign.publication.from.slice(0, 10)
-                                  : undefined
-                              }
-                              max={
-                                campaign.publication.to
-                                  ? campaign.publication.to.slice(0, 10)
-                                  : undefined
-                              }
-                              onChange={(event) =>
-                                setBulkValidFrom(
-                                  event.target.value,
-                                )
-                              }
-                            />
-
-                            <input
-                              type="time"
-                                    onClick={(event) =>
-                                      event.currentTarget.showPicker()
-                                    }
-                              step="60"
-                              value={bulkValidFromTime}
-                              onChange={(event) =>
-                                setBulkValidFromTime(
-                                  event.target.value,
-                                )
-                              }
-                            />
-                          </div>
-                        </label>
-
-                        <label>
-                          <span>Meddig</span>
-
-                          <div className="campaign-date-time-inputs">
-                            <input
-                              type="date"
-                                    onClick={(event) =>
-                                      event.currentTarget.showPicker()
-                                    }
-                              value={bulkValidTo}
-                              min={
-                                bulkValidFrom ||
-                                (campaign.publication.from
-                                  ? campaign.publication.from.slice(0, 10)
-                                  : undefined)
-                              }
-                              max={
-                                campaign.publication.to
-                                  ? campaign.publication.to.slice(0, 10)
-                                  : undefined
-                              }
-                              onChange={(event) =>
-                                setBulkValidTo(
-                                  event.target.value,
-                                )
-                              }
-                            />
-
-                            <input
-                              type="time"
-                                    onClick={(event) =>
-                                      event.currentTarget.showPicker()
-                                    }
-                              step="60"
-                              value={bulkValidToTime}
-                              onChange={(event) =>
-                                setBulkValidToTime(
-                                  event.target.value,
-                                )
-                              }
-                            />
-                          </div>
-                        </label>
-
-                        <button
-                          type="button"
-                          className="secondary-button"
-                          onClick={applyBulkPeriod}
-                          disabled={
-                            selectedListingIds.length === 0 ||
-                            !bulkValidFrom ||
-                            !bulkValidFromTime ||
-                            !bulkValidTo ||
-                            !bulkValidToTime
-                          }
-                        >
-                          Alkalmazás a kijelöltekre
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-
                   <div className="campaign-offers-table-wrapper">
                     <table className="campaign-offers-table">
                       <thead>
@@ -2798,8 +2247,6 @@ function AllegroCampaignsPage() {
                               30 napos minimumhoz képest
                             </span>
                           </th>
-                          <th>Mettől</th>
-                          <th>Meddig</th>
                           <th>Kampány státusz</th>
                           <th>Publikáció</th>
                         </tr>
@@ -3122,131 +2569,6 @@ function AllegroCampaignsPage() {
                               </td>
 
                               <td>
-                                <div className="campaign-date-time-inputs campaign-row-date-time">
-                                  <input
-                                    className="campaign-date-input"
-                                    type="date"
-                                    onClick={(event) =>
-                                      event.currentTarget.showPicker()
-                                    }
-                                    value={
-                                      validFromDrafts[
-                                        listing.id
-                                      ] ?? ''
-                                    }
-                                    min={
-                                      campaign.publication.from
-                                        ? campaign.publication.from.slice(0, 10)
-                                        : undefined
-                                    }
-                                    max={
-                                      campaign.publication.to
-                                        ? campaign.publication.to.slice(0, 10)
-                                        : undefined
-                                    }
-                                    disabled={!checked}
-                                    onChange={(event) =>
-                                      setValidFromDrafts(
-                                        (current) => ({
-                                          ...current,
-                                          [listing.id]:
-                                            event.target.value,
-                                        }),
-                                      )
-                                    }
-                                  />
-
-                                  <input
-                                    className="campaign-time-input"
-                                    type="time"
-                                    onClick={(event) =>
-                                      event.currentTarget.showPicker()
-                                    }
-                                    step="60"
-                                    value={
-                                      validFromTimeDrafts[
-                                        listing.id
-                                      ] ?? '00:00'
-                                    }
-                                    disabled={!checked}
-                                    onChange={(event) =>
-                                      setValidFromTimeDrafts(
-                                        (current) => ({
-                                          ...current,
-                                          [listing.id]:
-                                            event.target.value,
-                                        }),
-                                      )
-                                    }
-                                  />
-                                </div>
-                              </td>
-
-                              <td>
-                                <div className="campaign-date-time-inputs campaign-row-date-time">
-                                  <input
-                                    className="campaign-date-input"
-                                    type="date"
-                                    onClick={(event) =>
-                                      event.currentTarget.showPicker()
-                                    }
-                                    value={
-                                      validToDrafts[
-                                        listing.id
-                                      ] ?? ''
-                                    }
-                                    min={
-                                      validFromDrafts[
-                                        listing.id
-                                      ] ||
-                                      (campaign.publication.from
-                                        ? campaign.publication.from.slice(0, 10)
-                                        : undefined)
-                                    }
-                                    max={
-                                      campaign.publication.to
-                                        ? campaign.publication.to.slice(0, 10)
-                                        : undefined
-                                    }
-                                    disabled={!checked}
-                                    onChange={(event) =>
-                                      setValidToDrafts(
-                                        (current) => ({
-                                          ...current,
-                                          [listing.id]:
-                                            event.target.value,
-                                        }),
-                                      )
-                                    }
-                                  />
-
-                                  <input
-                                    className="campaign-time-input"
-                                    type="time"
-                                    onClick={(event) =>
-                                      event.currentTarget.showPicker()
-                                    }
-                                    step="60"
-                                    value={
-                                      validToTimeDrafts[
-                                        listing.id
-                                      ] ?? '23:59'
-                                    }
-                                    disabled={!checked}
-                                    onChange={(event) =>
-                                      setValidToTimeDrafts(
-                                        (current) => ({
-                                          ...current,
-                                          [listing.id]:
-                                            event.target.value,
-                                        }),
-                                      )
-                                    }
-                                  />
-                                </div>
-                              </td>
-
-                              <td>
                                 <div className="campaign-preparation-state">
                                   <span
                                     className={getPreparationStatusClassName(
@@ -3409,7 +2731,6 @@ function AllegroCampaignsPage() {
                           disabled={
                             syncingCampaignStatuses ||
                             savingPreparations ||
-                            schedulingPreparations ||
                             submittingPreparations
                           }
                           onClick={() =>
@@ -3446,31 +2767,9 @@ function AllegroCampaignsPage() {
                       <button
                         type="button"
                         className="campaign-primary-button"
-                        disabled={
-                          schedulingPreparations ||
-                          submittingPreparations ||
-                          selectedListingIds.length === 0 ||
-                          !allSelectedPreparationsEditable ||
-                          hasInvalidSelectedCampaignPrice
-                        }
-                        onClick={() =>
-                          void finalizeSchedule(
-                            campaign,
-                          )
-                        }
-                      >
-                        {schedulingPreparations
-                          ? 'Véglegesítés…'
-                          : 'Ütemezés véglegesítése'}
-                      </button>
-
-                      <button
-                        type="button"
-                        className="campaign-primary-button"
                         title="Az Allegro a kampány hivatalos kezdetekor aktiválja."
                         disabled={
                           !canSubmit ||
-                          schedulingPreparations ||
                           submittingPreparations ||
                           !allSelectedListingsPrepared
                         }
@@ -3484,25 +2783,6 @@ function AllegroCampaignsPage() {
                         {submittingPreparations
                           ? 'Beküldés…'
                           : 'Beküldés most'}
-                      </button>
-
-                      <button
-                        type="button"
-                        className="campaign-primary-button"
-                        disabled={
-                          !canSubmit ||
-                          submittingPreparations ||
-                          !allSelectedListingsScheduled
-                        }
-                        onClick={() =>
-                          void submitSelectedCampaignOffers(
-                            campaign,
-                          )
-                        }
-                      >
-                        {submittingPreparations
-                          ? 'Beküldés…'
-                          : 'Kijelölt ajánlatok beküldése'}
                       </button>
                     </div>
                   </div>
