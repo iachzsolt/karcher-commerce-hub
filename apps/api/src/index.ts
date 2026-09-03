@@ -7143,6 +7143,16 @@ async function processPendingCampaignApplications() {
     campaignApplicationProcessorRunning = false
   }
 }
+app.post(
+  '/allegro/campaign-applications/sync',
+  async (context) => {
+    await processPendingCampaignApplications()
+
+    return context.json({
+      status: 'ok',
+    })
+  },
+)
 let campaignFinishProcessorRunning = false
 
 async function processPendingCampaignFinishOperations() {

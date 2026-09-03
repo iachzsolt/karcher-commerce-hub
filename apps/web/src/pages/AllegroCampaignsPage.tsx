@@ -956,6 +956,11 @@ function AllegroCampaignsPage() {
     setSubmittingPreparations,
   ] = useState(false)
 
+  const [
+    syncingCampaignStatuses,
+    setSyncingCampaignStatuses,
+  ] = useState(false)
+
   const [loading, setLoading] =
     useState(true)
 
@@ -2046,6 +2051,50 @@ function AllegroCampaignsPage() {
       )
     } finally {
       setSubmittingPreparations(false)
+    }
+  }
+
+  async function syncCampaignApplicationStatuses(
+    campaign: AllegroCampaign,
+  ) {
+    setPreparationMessage(null)
+    setSyncingCampaignStatuses(true)
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/allegro/campaign-applications/sync`,
+        {
+          method: 'POST',
+        },
+      )
+
+      const result = await response.json()
+
+      if (!response.ok) {
+        throw new Error(
+          result.message ??
+            'Nem sikerült frissíteni a kampánystátuszokat.',
+        )
+      }
+
+      await loadPreparations(campaign.id)
+
+      setPreparationMessage(
+        'A kampánystátuszok frissítése befejeződött.',
+      )
+    } catch (syncError) {
+      console.error(
+        'Campaign application status sync failed:',
+        syncError,
+      )
+
+      setPreparationMessage(
+        syncError instanceof Error
+          ? syncError.message
+          : 'Nem sikerült frissíteni a kampánystátuszokat.',
+      )
+    } finally {
+      setSyncingCampaignStatuses(false)
     }
   }
 
@@ -3353,6 +3402,28 @@ function AllegroCampaignsPage() {
                     </span>
 
                     <div className="campaign-submit-actions">
+                      {campaign.source === 'BADGE' && (
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={
+                            syncingCampaignStatuses ||
+                            savingPreparations ||
+                            schedulingPreparations ||
+                            submittingPreparations
+                          }
+                          onClick={() =>
+                            void syncCampaignApplicationStatuses(
+                              campaign,
+                            )
+                          }
+                        >
+                          {syncingCampaignStatuses
+                            ? 'Frissítés…'
+                            : 'Státusz frissítése'}
+                        </button>
+                      )}
+
                       <button
                         type="button"
                         className="secondary-button"
