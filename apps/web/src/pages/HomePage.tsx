@@ -2557,6 +2557,72 @@ Biztosan szinkronizálod őket az Allegróval?`,
         }
       }
 
+      let refreshWarning = ''
+
+      if (pending > 0) {
+        const offerIds = changedListings
+          .map((listing) => listing.offerId)
+          .filter(
+            (offerId): offerId is string =>
+              typeof offerId === 'string' &&
+              offerId.trim().length > 0,
+          )
+
+        const refreshBatches: string[][] = []
+
+        for (
+          let index = 0;
+          index < offerIds.length;
+          index += 10
+        ) {
+          refreshBatches.push(
+            offerIds.slice(index, index + 10),
+          )
+        }
+
+        let refreshFailed = false
+
+        for (let pass = 0; pass < 2; pass += 1) {
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, 5000),
+          )
+
+          try {
+            for (const batch of refreshBatches) {
+              const refreshResponse = await fetch(
+                `${API_BASE_URL}/auth/allegro/sync`,
+                {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                  },
+                  body: JSON.stringify({
+                    offerIds: batch,
+                  }),
+                },
+              )
+
+              if (!refreshResponse.ok) {
+                throw new Error(
+                  `HTTP ${refreshResponse.status}`,
+                )
+              }
+            }
+          } catch (error) {
+            refreshFailed = true
+            console.error(
+              'Pending Allegro sync verification failed:',
+              error,
+            )
+          }
+        }
+
+        if (refreshFailed) {
+          refreshWarning =
+            '\n\nMegjegyzés: az Allegro-állapot frissítését nem sikerült teljesen megerősíteni.'
+        }
+      }
+
       const errorDetails =
         errors.length > 0
           ? `
@@ -2575,7 +2641,11 @@ ${errors.slice(0, 5).join('\n')}${
 Sikeres: ${succeeded}
 Kihagyva: ${skipped}
 Hibás: ${failed}
-Folyamatban: ${pending}${errorDetails}`,
+Folyamatban: ${pending}${
+          pending > 0
+            ? ' (az Allegro elfogadta, az állapot frissítése folyamatban)'
+            : ''
+        }${errorDetails}${refreshWarning}`,
       )
 
       window.location.reload()
