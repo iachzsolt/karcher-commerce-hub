@@ -1,8 +1,20 @@
 import {
+  catalogSourceItems,
   createDatabase,
+  dataConnectionRuns,
+  dataConnections,
   productIdentifiers,
   products,
 } from '@karcher-commerce-hub/database'
+import { createHash } from 'node:crypto'
+import {
+  and,
+  eq,
+  isNull,
+  ne,
+  or,
+  sql,
+} from 'drizzle-orm'
 import { Hono } from 'hono'
 
 const arukeresoApi = new Hono()
@@ -830,6 +842,29 @@ function toCatalogPreviewItem(
   return previewItem
 }
 
+function createCatalogSourceFingerprint(
+  item: CatalogAnalyzedItem,
+) {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        rawSource: item.rawSource,
+        normalizedSku: item.normalizedSku,
+        priceMinor: item.priceMinor,
+        netPriceMinor: item.netPriceMinor,
+        deliveryCostMinor:
+          item.deliveryCostMinor,
+        deliveryTimeDays:
+          item.deliveryTimeDays,
+        matchStatus: item.matchStatus,
+        matchMethod: item.matchMethod,
+        matchedProductId:
+          item.matchedProductId,
+      }),
+    )
+    .digest('hex')
+}
+
 arukeresoApi.post(
   '/catalog/preview',
   async (context) => {
@@ -901,6 +936,485 @@ arukeresoApi.post(
             error instanceof Error
               ? error.message
               : 'CMS CSV preview failed.',
+        },
+        500,
+      )
+    }
+  },
+)
+
+arukeresoApi.post(
+  '/catalog/import',
+  async (context) => {
+    try {
+      const formData =
+        await context.req.formData()
+
+      if (formData.get('confirm') !== 'true') {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Az importáláshoz explicit confirm=true szükséges.',
+          },
+          400,
+        )
+      }
+
+      const uploadedFile =
+        formData.get('file')
+
+      if (
+        !uploadedFile ||
+        typeof uploadedFile === 'string'
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'CMS CSV fajl feltoltese szukseges a file mezoben.',
+          },
+          400,
+        )
+      }
+
+      const analysis =
+        await analyzeCatalogCsv(
+          await uploadedFile.text(),
+        )
+
+      const validItems =
+        analysis.allItems.filter(
+          (item) => item.errors.length === 0,
+        )
+
+      if (validItems.length === 0) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'A katalógus import nem tartalmaz érvényes importálható sort.',
+            summary: analysis.summary,
+          },
+          422,
+        )
+      }
+
+      const sourceItemKeys =
+        validItems.map(
+          (item) => item.identifier as string,
+        )
+
+      if (
+        new Set(sourceItemKeys).size !==
+        sourceItemKeys.length
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Az érvényes CSV sorok között duplikált Identifier található.',
+            summary: analysis.summary,
+          },
+          409,
+        )
+      }
+
+      const requestedConnection =
+        formData.get('connectionId')
+
+      const requestedConnectionId =
+        typeof requestedConnection === 'string'
+          ? requestedConnection.trim() || null
+          : null
+
+      const database = requireDatabase()
+
+      const activeConnections = await database
+        .select({
+          id: dataConnections.id,
+        })
+        .from(dataConnections)
+        .where(
+          and(
+            eq(
+              dataConnections.sourceType,
+              'CSV_UPLOAD',
+            ),
+            eq(
+              dataConnections.purpose,
+              'CATALOG',
+            ),
+            eq(dataConnections.isActive, true),
+            ...(requestedConnectionId
+              ? [
+                  eq(
+                    dataConnections.id,
+                    requestedConnectionId,
+                  ),
+                ]
+              : []),
+          ),
+        )
+        .limit(2)
+
+      if (activeConnections.length !== 1) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              activeConnections.length === 0
+                ? 'Nem található aktív CSV katalógusforrás.'
+                : 'Több aktív CSV katalógusforrás található; connectionId szükséges.',
+          },
+          409,
+        )
+      }
+
+      const connectionId =
+        activeConnections[0].id
+
+      const now = new Date()
+
+      const sourceItems = validItems.map(
+        (item) => ({
+          connectionId,
+          productId: item.matchedProductId,
+          sourceItemKey:
+            item.identifier as string,
+          identifier: item.identifier,
+          eanCode: item.eanCode,
+          manufacturer: item.manufacturer,
+          name: item.name,
+          description: item.description,
+          category: item.category,
+          productUrl: item.productUrl,
+          imageUrl: item.imageUrl,
+          imageUrl2: item.imageUrl2,
+          priceMinor: item.priceMinor,
+          netPriceMinor: item.netPriceMinor,
+          deliveryCostMinor:
+            item.deliveryCostMinor,
+          deliveryTimeRaw:
+            item.deliveryTimeRaw,
+          deliveryTimeDays:
+            item.deliveryTimeDays,
+          additionalImageUrlsJson: '[]',
+          sourceFingerprint:
+            createCatalogSourceFingerprint(
+              item,
+            ),
+          rawDataJson:
+            JSON.stringify(item.rawSource),
+          matchStatus: item.matchStatus,
+          matchError:
+            item.matchStatus === 'CONFLICT'
+              ? 'SKU_EAN_CONFLICT'
+              : null,
+          observedAt: now,
+          updatedAt: now,
+        }),
+      )
+
+      const existingItems = await database
+        .select({
+          sourceItemKey:
+            catalogSourceItems.sourceItemKey,
+          sourceFingerprint:
+            catalogSourceItems.sourceFingerprint,
+        })
+        .from(catalogSourceItems)
+        .where(
+          eq(
+            catalogSourceItems.connectionId,
+            connectionId,
+          ),
+        )
+
+      const currentKeySet =
+        new Set(sourceItemKeys)
+
+      const existingFingerprintByKey =
+        new Map(
+          existingItems.map((item) => [
+            item.sourceItemKey,
+            item.sourceFingerprint,
+          ]),
+        )
+
+      const staleRemoved =
+        existingItems.filter(
+          (item) =>
+            !currentKeySet.has(
+              item.sourceItemKey,
+            ),
+        ).length
+
+      const changedItemCount =
+        sourceItems.filter(
+          (item) =>
+            existingFingerprintByKey.get(
+              item.sourceItemKey,
+            ) !== item.sourceFingerprint,
+        ).length + staleRemoved
+
+      const [run] = await database
+        .insert(dataConnectionRuns)
+        .values({
+          connectionId,
+          triggerType: 'MANUAL',
+          status: 'RUNNING',
+          importStatus: 'RUNNING',
+          startedAt: now,
+        })
+        .returning({
+          id: dataConnectionRuns.id,
+        })
+
+      if (!run) {
+        throw new Error(
+          'A katalógus import futása nem hozható létre.',
+        )
+      }
+
+      try {
+        const chunkSize = 200
+        const upsertQueries = []
+
+        for (
+          let offset = 0;
+          offset < sourceItems.length;
+          offset += chunkSize
+        ) {
+          const chunk = sourceItems
+            .slice(
+              offset,
+              offset + chunkSize,
+            )
+            .map((item) => ({
+              ...item,
+              lastImportRunId: run.id,
+            }))
+
+          upsertQueries.push(
+            database
+              .insert(catalogSourceItems)
+              .values(chunk)
+              .onConflictDoUpdate({
+                target: [
+                  catalogSourceItems.connectionId,
+                  catalogSourceItems.sourceItemKey,
+                ],
+                set: {
+                  productId:
+                    sql`excluded.product_id`,
+                  identifier:
+                    sql`excluded.identifier`,
+                  eanCode:
+                    sql`excluded.ean_code`,
+                  manufacturer:
+                    sql`excluded.manufacturer`,
+                  name: sql`excluded.name`,
+                  description:
+                    sql`excluded.description`,
+                  category:
+                    sql`excluded.category`,
+                  productUrl:
+                    sql`excluded.product_url`,
+                  imageUrl:
+                    sql`excluded.image_url`,
+                  imageUrl2:
+                    sql`excluded.image_url_2`,
+                  priceMinor:
+                    sql`excluded.price_minor`,
+                  netPriceMinor:
+                    sql`excluded.net_price_minor`,
+                  deliveryCostMinor:
+                    sql`excluded.delivery_cost_minor`,
+                  deliveryTimeRaw:
+                    sql`excluded.delivery_time_raw`,
+                  deliveryTimeDays:
+                    sql`excluded.delivery_time_days`,
+                  additionalImageUrlsJson:
+                    sql`excluded.additional_image_urls_json`,
+                  sourceFingerprint:
+                    sql`excluded.source_fingerprint`,
+                  rawDataJson:
+                    sql`excluded.raw_data_json`,
+                  matchStatus:
+                    sql`excluded.match_status`,
+                  matchError:
+                    sql`excluded.match_error`,
+                  lastImportRunId:
+                    sql`excluded.last_import_run_id`,
+                  observedAt:
+                    sql`excluded.observed_at`,
+                  updatedAt:
+                    sql`excluded.updated_at`,
+                },
+              }),
+          )
+        }
+
+        const staleDelete = database
+          .delete(catalogSourceItems)
+          .where(
+            and(
+              eq(
+                catalogSourceItems.connectionId,
+                connectionId,
+              ),
+              or(
+                isNull(
+                  catalogSourceItems.lastImportRunId,
+                ),
+                ne(
+                  catalogSourceItems.lastImportRunId,
+                  run.id,
+                ),
+              ),
+            ),
+          )
+
+        const completeRun = database
+          .update(dataConnectionRuns)
+          .set({
+            status: 'COMPLETED',
+            importStatus:
+              analysis.summary.invalidRows > 0
+                ? 'SUCCESS_WITH_INVALID_ROWS'
+                : 'SUCCESS',
+            rowsImported: sourceItems.length,
+            changedItemCount,
+            finishedAt: new Date(),
+          })
+          .where(
+            eq(dataConnectionRuns.id, run.id),
+          )
+
+        const markConnectionReady = database
+          .update(dataConnections)
+          .set({
+            status: 'READY',
+            lastSuccessfulAt: new Date(),
+            lastError: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            eq(dataConnections.id, connectionId),
+          )
+
+        const batchQueries = [
+          ...upsertQueries,
+          staleDelete,
+          completeRun,
+          markConnectionReady,
+        ]
+
+        await database.batch(
+          batchQueries as [
+            (typeof batchQueries)[number],
+            ...(typeof batchQueries)[number][],
+          ],
+        )
+
+        return context.json({
+          status: 'ok',
+          importRunId: run.id,
+          connectionId,
+          summary: {
+            ...analysis.summary,
+            upserted: sourceItems.length,
+            staleRemoved,
+          },
+        })
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'CMS katalógus import sikertelen.'
+
+        try {
+          await database.batch([
+            database
+              .update(dataConnectionRuns)
+              .set({
+                status: 'FAILED',
+                importStatus: 'FAILED',
+                error: message,
+                finishedAt: new Date(),
+              })
+              .where(
+                eq(dataConnectionRuns.id, run.id),
+              ),
+            database
+              .update(dataConnections)
+              .set({
+                status: 'ERROR',
+                lastError: message,
+                updatedAt: new Date(),
+              })
+              .where(
+                eq(
+                  dataConnections.id,
+                  connectionId,
+                ),
+              ),
+          ])
+        } catch (statusError) {
+          console.error(
+            'Catalog import failure status update failed:',
+            statusError,
+          )
+        }
+
+        console.error(
+          'Catalog import failed:',
+          error,
+        )
+
+        return context.json(
+          {
+            status: 'error',
+            importRunId: run.id,
+            message,
+          },
+          500,
+        )
+      }
+    } catch (error) {
+      if (
+        error instanceof
+          CatalogCsvValidationError
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message: error.message,
+            ...(error.headers
+              ? {
+                  headers: error.headers,
+                  missingHeaders:
+                    error.missingHeaders ?? [],
+                }
+              : {}),
+          },
+          400,
+        )
+      }
+
+      console.error(
+        'Catalog import setup failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'CMS katalógus import sikertelen.',
         },
         500,
       )
