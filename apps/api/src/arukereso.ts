@@ -7,7 +7,10 @@ import {
   productIdentifiers,
   products,
 } from '@karcher-commerce-hub/database'
-import { createHash } from 'node:crypto'
+import {
+  createHash,
+  randomUUID,
+} from 'node:crypto'
 import {
   and,
   eq,
@@ -1452,64 +1455,56 @@ type CatalogPromotionStatus =
   | 'MISSING_REQUIRED_DATA'
   | 'INVENTORY_MISSING'
 
-arukeresoApi.get(
-  '/catalog/promotion-preview',
-  async (context) => {
-    try {
-      const database =
-        requireDatabase()
+type CatalogPromotionItem = {
+  catalogSourceItemId: string
+  identifier: string | null
+  normalizedSku: string | null
+  eanCode: string | null
+  name: string | null
+  manufacturer: string | null
+  category: string | null
+  storedProductId: string | null
+  inventoryFound: boolean
+  inventoryStock: number | null
+  promotionStatus: CatalogPromotionStatus
+  existingProductId: string | null
+  existingProductSku: string | null
+  detail: string | null
+}
 
-      const limitParam = Number(
-        context.req.query('limit') ??
-          PROMOTION_PREVIEW_LIMIT_DEFAULT,
-      )
+type CatalogPromotionSummary = {
+  unmatchedCatalogItems: number
+  inventoryCovered: number
+  safeNewProducts: number
+  existingSku: number
+  eanConflicts: number
+  skuEanConflicts: number
+  duplicateCatalogSku: number
+  duplicateCatalogEan: number
+  missingRequiredData: number
+  inventoryMissing: number
+}
 
-      const offsetParam = Number(
-        context.req.query('offset') ?? 0,
-      )
+type CatalogPromotionAnalysis = {
+  catalogRows: Array<
+    typeof catalogSourceItems.$inferSelect
+  >
+  items: CatalogPromotionItem[]
+  summary: CatalogPromotionSummary
+}
 
-      const limit =
-        Number.isFinite(limitParam)
-          ? Math.min(
-              Math.max(
-                Math.trunc(limitParam),
-                0,
-              ),
-              PROMOTION_PREVIEW_LIMIT_MAX,
-            )
-          : PROMOTION_PREVIEW_LIMIT_DEFAULT
+async function analyzeCatalogPromotion(): Promise<CatalogPromotionAnalysis> {
+  const database =
+    requireDatabase()
 
-      const offset =
-        Number.isFinite(offsetParam)
-          ? Math.max(
-              Math.trunc(offsetParam),
-              0,
-            )
-          : 0
-
-      const [
+  const [
         catalogRows,
         hubProducts,
         hubIdentifiers,
         inventoryRows,
       ] = await Promise.all([
         database
-          .select({
-            id: catalogSourceItems.id,
-            identifier:
-              catalogSourceItems.identifier,
-            eanCode:
-              catalogSourceItems.eanCode,
-            manufacturer:
-              catalogSourceItems.manufacturer,
-            name: catalogSourceItems.name,
-            category:
-              catalogSourceItems.category,
-            productId:
-              catalogSourceItems.productId,
-            matchStatus:
-              catalogSourceItems.matchStatus,
-          })
+          .select()
           .from(catalogSourceItems)
           .where(
             eq(
@@ -1840,15 +1835,57 @@ arukeresoApi.get(
         ),
       }
 
+  return {
+    catalogRows,
+    items,
+    summary,
+  }
+}
+
+arukeresoApi.get(
+  '/catalog/promotion-preview',
+  async (context) => {
+    try {
+      const limitParam = Number(
+        context.req.query('limit') ??
+          PROMOTION_PREVIEW_LIMIT_DEFAULT,
+      )
+
+      const offsetParam = Number(
+        context.req.query('offset') ?? 0,
+      )
+
+      const limit =
+        Number.isFinite(limitParam)
+          ? Math.min(
+              Math.max(
+                Math.trunc(limitParam),
+                0,
+              ),
+              PROMOTION_PREVIEW_LIMIT_MAX,
+            )
+          : PROMOTION_PREVIEW_LIMIT_DEFAULT
+
+      const offset =
+        Number.isFinite(offsetParam)
+          ? Math.max(
+              Math.trunc(offsetParam),
+              0,
+            )
+          : 0
+
+      const analysis =
+        await analyzeCatalogPromotion()
+
       return context.json({
         status: 'ok',
-        summary,
+        summary: analysis.summary,
         pagination: {
           limit,
           offset,
-          total: items.length,
+          total: analysis.items.length,
         },
-        data: items.slice(
+        data: analysis.items.slice(
           offset,
           offset + limit,
         ),
@@ -1868,6 +1905,259 @@ arukeresoApi.get(
               : 'CMS katalógus promotion preview sikertelen.',
         },
         500,
+      )
+    }
+  },
+)
+
+arukeresoApi.post(
+  '/catalog/promote',
+  async (context) => {
+    try {
+      const body =
+        (await context.req
+          .json()
+          .catch(() => null)) as
+          | {
+              confirm?: unknown
+              expectedSafeCount?: unknown
+            }
+          | null
+
+      if (body?.confirm !== true) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'A termék-promócióhoz explicit confirm=true szükséges.',
+          },
+          400,
+        )
+      }
+
+      const analysis =
+        await analyzeCatalogPromotion()
+
+      const blockingItems =
+        analysis.items.filter(
+          (item) =>
+            item.promotionStatus !==
+            'SAFE_NEW_PRODUCT',
+        )
+
+      if (blockingItems.length > 0) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'A katalógus-promóció nem biztonságos: nem minden tétel SAFE_NEW_PRODUCT.',
+            summary: analysis.summary,
+          },
+          409,
+        )
+      }
+
+      if (
+        body.expectedSafeCount !==
+          undefined &&
+        body.expectedSafeCount !==
+          null &&
+        body.expectedSafeCount !==
+          analysis.summary.safeNewProducts
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'A várt biztonságos tételszám nem egyezik a friss elemzéssel.',
+            summary: analysis.summary,
+          },
+          409,
+        )
+      }
+
+      const database =
+        requireDatabase()
+
+      const now = new Date()
+
+      const catalogById =
+        new Map(
+          analysis.catalogRows.map(
+            (row) => [row.id, row],
+          ),
+        )
+
+      const productValues: Array<{
+        id: string
+        sku: string
+        name: string
+        category: string | null
+      }> = []
+
+      const eanValues: Array<{
+        productId: string
+        type: 'EAN'
+        value: string
+      }> = []
+
+      const catalogValues: Array<
+        typeof catalogSourceItems.$inferInsert
+      > = []
+
+      for (const item of analysis.items) {
+        const sourceRow =
+          catalogById.get(
+            item.catalogSourceItemId,
+          )
+
+        if (
+          !sourceRow ||
+          !item.normalizedSku ||
+          !item.name?.trim()
+        ) {
+          throw new Error(
+            'A promóciós terv inkonzisztens a friss elemzéssel.',
+          )
+        }
+
+        const productId = randomUUID()
+
+        productValues.push({
+          id: productId,
+          sku: item.normalizedSku,
+          name: item.name.trim(),
+          category:
+            sourceRow.category ?? null,
+        })
+
+        const eanKey =
+          item.eanCode?.trim() || null
+
+        if (eanKey) {
+          eanValues.push({
+            productId,
+            type: 'EAN',
+            value: eanKey,
+          })
+        }
+
+        catalogValues.push({
+          ...sourceRow,
+          productId,
+          matchStatus: 'MATCHED',
+          matchError: null,
+          updatedAt: now,
+        })
+      }
+
+      const chunkSize = 200
+      const batchQueries = []
+
+      for (
+        let offset = 0;
+        offset < productValues.length;
+        offset += chunkSize
+      ) {
+        batchQueries.push(
+          database
+            .insert(products)
+            .values(
+              productValues.slice(
+                offset,
+                offset + chunkSize,
+              ),
+            ),
+        )
+      }
+
+      for (
+        let offset = 0;
+        offset < eanValues.length;
+        offset += chunkSize
+      ) {
+        batchQueries.push(
+          database
+            .insert(productIdentifiers)
+            .values(
+              eanValues.slice(
+                offset,
+                offset + chunkSize,
+              ),
+            ),
+        )
+      }
+
+      for (
+        let offset = 0;
+        offset < catalogValues.length;
+        offset += chunkSize
+      ) {
+        batchQueries.push(
+          database
+            .insert(catalogSourceItems)
+            .values(
+              catalogValues.slice(
+                offset,
+                offset + chunkSize,
+              ),
+            )
+            .onConflictDoUpdate({
+              target:
+                catalogSourceItems.id,
+              set: {
+                productId:
+                  sql`excluded.product_id`,
+                matchStatus:
+                  sql`excluded.match_status`,
+                matchError:
+                  sql`excluded.match_error`,
+                updatedAt:
+                  sql`excluded.updated_at`,
+              },
+            }),
+        )
+      }
+
+      await database.batch(
+        batchQueries as [
+          (typeof batchQueries)[number],
+          ...(typeof batchQueries)[number][],
+        ],
+      )
+
+      return context.json({
+        status: 'ok',
+        promoted: analysis.items.length,
+        productsCreated:
+          productValues.length,
+        eanIdentifiersCreated:
+          eanValues.length,
+        catalogItemsLinked:
+          catalogValues.length,
+      })
+    } catch (error) {
+      console.error(
+        'Catalog promotion failed:',
+        error,
+      )
+
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'CMS katalógus promóció sikertelen.'
+
+      const isConflict =
+        /unique|duplicate|23505/i.test(
+          message,
+        )
+
+      return context.json(
+        {
+          status: 'error',
+          message,
+        },
+        isConflict ? 409 : 500,
       )
     }
   },
