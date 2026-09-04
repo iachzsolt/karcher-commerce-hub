@@ -598,12 +598,10 @@ async function analyzeCatalogCsv(
           )
         : null
 
-    if (
-      identifier &&
-      !normalizedSku
-    ) {
-      invalidIdentifierFormat += 1
-    }
+    const hasInvalidIdentifierFormat =
+      Boolean(
+        identifier && !normalizedSku,
+      )
 
     const skuMatchedProduct =
       normalizedSku
@@ -642,7 +640,6 @@ async function analyzeCatalogCsv(
         eanMatchedProduct.id
     ) {
       matchStatus = 'CONFLICT'
-      matchConflicts += 1
     } else if (skuMatchedProduct) {
       matchStatus = 'MATCHED'
       matchMethod = 'SKU'
@@ -650,7 +647,6 @@ async function analyzeCatalogCsv(
         skuMatchedProduct.id
       matchedSku =
         skuMatchedProduct.sku
-      matchedBySku += 1
     } else if (eanMatchedProduct) {
       matchStatus = 'MATCHED'
       matchMethod = 'EAN'
@@ -658,10 +654,8 @@ async function analyzeCatalogCsv(
         eanMatchedProduct.id
       matchedSku =
         eanMatchedProduct.sku
-      matchedByEan += 1
     } else {
       matchStatus = 'UNMATCHED'
-      unmatched += 1
     }
 
     const name =
@@ -747,6 +741,28 @@ async function analyzeCatalogCsv(
 
     if (errors.length === 0) {
       validRows += 1
+
+      if (
+        hasInvalidIdentifierFormat
+      ) {
+        invalidIdentifierFormat += 1
+      }
+
+      if (matchStatus === 'CONFLICT') {
+        matchConflicts += 1
+      } else if (
+        matchStatus === 'MATCHED' &&
+        matchMethod === 'SKU'
+      ) {
+        matchedBySku += 1
+      } else if (
+        matchStatus === 'MATCHED' &&
+        matchMethod === 'EAN'
+      ) {
+        matchedByEan += 1
+      } else {
+        unmatched += 1
+      }
     } else {
       invalidRows += 1
     }
