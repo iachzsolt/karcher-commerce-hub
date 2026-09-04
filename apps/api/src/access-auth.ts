@@ -32,6 +32,7 @@ type AuthConfiguration = {
 const PUBLIC_PATHS = new Set([
   '/health',
   '/auth/allegro/callback',
+  '/arukereso/pricing/sync',
 ])
 
 let cachedJwksUrl: string | null = null
