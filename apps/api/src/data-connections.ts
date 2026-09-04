@@ -483,17 +483,27 @@ async function analyzeInventorySheet(
       rowsNormalizedToZero += 1
     }
 
-    if (itemsBySku.has(sku)) {
-      duplicateSkuCount += 1
-    }
+    const existingItem =
+      itemsBySku.get(sku)
 
-    itemsBySku.set(
-      sku,
-      {
+    if (existingItem) {
+      duplicateSkuCount += 1
+
+      if (
+        normalizedStock.stock >=
+        existingItem.stock
+      ) {
+        itemsBySku.set(sku, {
+          sku,
+          ...normalizedStock,
+        })
+      }
+    } else {
+      itemsBySku.set(sku, {
         sku,
         ...normalizedStock,
-      },
-    )
+      })
+    }
   }
 
   const items =
@@ -2011,51 +2021,6 @@ dataConnectionsApi.post(
           422,
         )
       }
-      if (
-        analysis
-          .duplicateSkuCount > 0
-      ) {
-        await database
-          .update(
-            inventoryImportRuns,
-          )
-          .set({
-            status: 'FAILED',
-            rowsRead:
-              analysis.rowsRead,
-            rowsImported: 0,
-            rowsNormalizedToZero:
-              analysis
-                .rowsNormalizedToZero,
-            duplicateSkuCount:
-              analysis
-                .duplicateSkuCount,
-            sourceFingerprint:
-              analysis.fingerprint,
-            error:
-              'Duplikált cikkszám található a forrásban.',
-            finishedAt:
-              new Date(),
-          })
-          .where(
-            eq(
-              inventoryImportRuns.id,
-              run.id,
-            ),
-          )
-
-        return context.json(
-          {
-            error:
-              'Duplikált cikkszám található a forrásban.',
-            duplicateSkuCount:
-              analysis
-                .duplicateSkuCount,
-          },
-          409,
-        )
-      }
-
       const [previousRun] =
         await database
           .select({
@@ -2117,7 +2082,9 @@ dataConnectionsApi.post(
             rowsNormalizedToZero:
               analysis
                 .rowsNormalizedToZero,
-            duplicateSkuCount: 0,
+            duplicateSkuCount:
+              analysis
+                .duplicateSkuCount,
             changedItemCount: 0,
             sourceFingerprint:
               analysis.fingerprint,
@@ -2135,7 +2102,11 @@ dataConnectionsApi.post(
             dataConnections,
           )
           .set({
-            status: 'READY',
+            status:
+              analysis
+                .duplicateSkuCount > 0
+                ? 'READY_WITH_WARNINGS'
+                : 'READY',
             lastSuccessfulAt:
               now,
             lastError: null,
@@ -2157,6 +2128,9 @@ dataConnectionsApi.post(
           rowsNormalizedToZero:
             analysis
               .rowsNormalizedToZero,
+          duplicateSkuCount:
+            analysis
+              .duplicateSkuCount,
           changedItemCount: 0,
         })
       }
@@ -2327,7 +2301,9 @@ dataConnectionsApi.post(
           rowsNormalizedToZero:
             analysis
               .rowsNormalizedToZero,
-          duplicateSkuCount: 0,
+          duplicateSkuCount:
+            analysis
+              .duplicateSkuCount,
           changedItemCount,
           sourceFingerprint:
             analysis.fingerprint,
@@ -2345,7 +2321,11 @@ dataConnectionsApi.post(
           dataConnections,
         )
         .set({
-          status: 'READY',
+          status:
+            analysis
+              .duplicateSkuCount > 0
+              ? 'READY_WITH_WARNINGS'
+              : 'READY',
           lastSuccessfulAt:
             now,
           lastError: null,
@@ -2367,6 +2347,9 @@ dataConnectionsApi.post(
         rowsNormalizedToZero:
           analysis
             .rowsNormalizedToZero,
+        duplicateSkuCount:
+          analysis
+            .duplicateSkuCount,
         changedItemCount,
         removedItemCount,
       })
