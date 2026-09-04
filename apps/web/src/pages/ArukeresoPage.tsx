@@ -5,6 +5,7 @@ import {
   Route,
   Routes,
 } from 'react-router-dom'
+import ArukeresoCatalogPage from './ArukeresoCatalogPage'
 
 import '../CommerceHub.css'
 
@@ -58,6 +59,10 @@ function ArukeresoPage() {
               Áttekintés
             </NavLink>
 
+            <NavLink to="/arukereso/catalog">
+              Katalógus
+            </NavLink>
+
             <NavLink to="/arukereso/products">
               Termékek
             </NavLink>
@@ -89,6 +94,13 @@ function ArukeresoPage() {
               <ArukeresoPlaceholder
                 title="Áttekintés"
               />
+            }
+          />
+
+          <Route
+            path="catalog"
+            element={
+              <ArukeresoCatalogPage />
             }
           />
 

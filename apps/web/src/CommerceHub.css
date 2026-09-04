@@ -7512,3 +7512,81 @@ input:checked + span::after {
     grid-template-columns: 1fr;
   }
 }
+
+/* Arukereso catalog file picker */
+
+.catalog-file-picker {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.catalog-file-button {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.catalog-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+.catalog-file-name {
+  font-weight: 600;
+  color: #444;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.catalog-kpi-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0 24px 10px;
+}
+
+.catalog-kpi {
+  flex: 1 1 120px;
+  min-width: 110px;
+  padding: 10px 14px;
+  border: 1px solid #d8d8d8;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.catalog-kpi-value {
+  display: block;
+  font-size: 1.35rem;
+  font-weight: 800;
+}
+
+.catalog-kpi-label {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #666;
+}
+
+.catalog-kpi-secondary {
+  margin: 0 24px 18px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #666;
+}
+
+.catalog-preview-scroll {
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.catalog-preview-toggle {
+  display: flex;
+  justify-content: center;
+  margin: 0 24px 18px;
+}
