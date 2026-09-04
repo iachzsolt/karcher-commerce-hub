@@ -3,6 +3,7 @@ import {
   createDatabase,
   dataConnectionRuns,
   dataConnections,
+  inventorySourceItems,
   productIdentifiers,
   products,
 } from '@karcher-commerce-hub/database'
@@ -1431,6 +1432,440 @@ arukeresoApi.post(
             error instanceof Error
               ? error.message
               : 'CMS katalógus import sikertelen.',
+        },
+        500,
+      )
+    }
+  },
+)
+
+const PROMOTION_PREVIEW_LIMIT_DEFAULT = 100
+const PROMOTION_PREVIEW_LIMIT_MAX = 500
+
+type CatalogPromotionStatus =
+  | 'SAFE_NEW_PRODUCT'
+  | 'EXISTING_SKU'
+  | 'EAN_CONFLICT'
+  | 'SKU_EAN_CONFLICT'
+  | 'DUPLICATE_CATALOG_SKU'
+  | 'DUPLICATE_CATALOG_EAN'
+  | 'MISSING_REQUIRED_DATA'
+  | 'INVENTORY_MISSING'
+
+arukeresoApi.get(
+  '/catalog/promotion-preview',
+  async (context) => {
+    try {
+      const database =
+        requireDatabase()
+
+      const limitParam = Number(
+        context.req.query('limit') ??
+          PROMOTION_PREVIEW_LIMIT_DEFAULT,
+      )
+
+      const offsetParam = Number(
+        context.req.query('offset') ?? 0,
+      )
+
+      const limit =
+        Number.isFinite(limitParam)
+          ? Math.min(
+              Math.max(
+                Math.trunc(limitParam),
+                0,
+              ),
+              PROMOTION_PREVIEW_LIMIT_MAX,
+            )
+          : PROMOTION_PREVIEW_LIMIT_DEFAULT
+
+      const offset =
+        Number.isFinite(offsetParam)
+          ? Math.max(
+              Math.trunc(offsetParam),
+              0,
+            )
+          : 0
+
+      const [
+        catalogRows,
+        hubProducts,
+        hubIdentifiers,
+        inventoryRows,
+      ] = await Promise.all([
+        database
+          .select({
+            id: catalogSourceItems.id,
+            identifier:
+              catalogSourceItems.identifier,
+            eanCode:
+              catalogSourceItems.eanCode,
+            manufacturer:
+              catalogSourceItems.manufacturer,
+            name: catalogSourceItems.name,
+            category:
+              catalogSourceItems.category,
+            productId:
+              catalogSourceItems.productId,
+            matchStatus:
+              catalogSourceItems.matchStatus,
+          })
+          .from(catalogSourceItems)
+          .where(
+            eq(
+              catalogSourceItems.matchStatus,
+              'UNMATCHED',
+            ),
+          ),
+
+        database
+          .select({
+            id: products.id,
+            sku: products.sku,
+          })
+          .from(products),
+
+        database
+          .select({
+            productId:
+              productIdentifiers.productId,
+            type:
+              productIdentifiers.type,
+            value:
+              productIdentifiers.value,
+          })
+          .from(productIdentifiers),
+
+        database
+          .select({
+            sku: inventorySourceItems.sku,
+            stock:
+              inventorySourceItems.stock,
+          })
+          .from(inventorySourceItems),
+      ])
+
+      const productBySku =
+        new Map(
+          hubProducts.map(
+            (product) => [
+              product.sku,
+              product,
+            ],
+          ),
+        )
+
+      const productById =
+        new Map(
+          hubProducts.map(
+            (product) => [
+              product.id,
+              product,
+            ],
+          ),
+        )
+
+      const productByEan =
+        new Map<
+          string,
+          {
+            id: string
+            sku: string
+          }
+        >()
+
+      for (
+        const identifierRow
+        of hubIdentifiers
+      ) {
+        if (
+          identifierRow.type !==
+          'EAN'
+        ) {
+          continue
+        }
+
+        const product =
+          productById.get(
+            identifierRow.productId,
+          )
+
+        if (!product) {
+          continue
+        }
+
+        productByEan.set(
+          identifierRow.value.trim(),
+          product,
+        )
+      }
+
+      const inventoryStockBySku =
+        new Map<string, number>()
+
+      for (const row of inventoryRows) {
+        const existing =
+          inventoryStockBySku.get(
+            row.sku,
+          )
+
+        if (
+          existing === undefined ||
+          row.stock > existing
+        ) {
+          inventoryStockBySku.set(
+            row.sku,
+            row.stock,
+          )
+        }
+      }
+
+      const normalizedSkuByCatalogId =
+        new Map<string, string | null>()
+
+      const skuGroupCounts =
+        new Map<string, number>()
+
+      const eanGroupCounts =
+        new Map<string, number>()
+
+      for (const row of catalogRows) {
+        const normalizedSku =
+          row.identifier
+            ? cmsIdentifierToSku(
+                row.identifier,
+              )
+            : null
+
+        normalizedSkuByCatalogId.set(
+          row.id,
+          normalizedSku,
+        )
+
+        if (normalizedSku) {
+          skuGroupCounts.set(
+            normalizedSku,
+            (skuGroupCounts.get(
+              normalizedSku,
+            ) ?? 0) + 1,
+          )
+        }
+
+        const eanKey =
+          row.eanCode?.trim() || null
+
+        if (eanKey) {
+          eanGroupCounts.set(
+            eanKey,
+            (eanGroupCounts.get(
+              eanKey,
+            ) ?? 0) + 1,
+          )
+        }
+      }
+
+      const items = catalogRows.map(
+        (row) => {
+          const normalizedSku =
+            normalizedSkuByCatalogId.get(
+              row.id,
+            ) ?? null
+
+          const eanKey =
+            row.eanCode?.trim() || null
+
+          const inventoryStock =
+            normalizedSku
+              ? inventoryStockBySku.get(
+                  normalizedSku,
+                ) ?? null
+              : null
+
+          const skuOwner =
+            normalizedSku
+              ? productBySku.get(
+                  normalizedSku,
+                ) ?? null
+              : null
+
+          const eanOwner =
+            eanKey
+              ? productByEan.get(
+                  eanKey,
+                ) ?? null
+              : null
+
+          let promotionStatus: CatalogPromotionStatus
+          let detail: string | null =
+            null
+
+          if (
+            !normalizedSku ||
+            !row.name?.trim()
+          ) {
+            promotionStatus =
+              'MISSING_REQUIRED_DATA'
+
+            detail = !normalizedSku
+              ? 'Identifier cannot be normalized to a Hub SKU.'
+              : 'Product name is missing.'
+          } else if (
+            !inventoryStockBySku.has(
+              normalizedSku,
+            )
+          ) {
+            promotionStatus =
+              'INVENTORY_MISSING'
+
+            detail =
+              'Normalized SKU was not found in inventory_source_items.'
+          } else if (
+            (skuGroupCounts.get(
+              normalizedSku,
+            ) ?? 0) > 1
+          ) {
+            promotionStatus =
+              'DUPLICATE_CATALOG_SKU'
+
+            detail = `Multiple catalog items normalize to SKU ${normalizedSku}.`
+          } else if (
+            eanKey &&
+            (eanGroupCounts.get(
+              eanKey,
+            ) ?? 0) > 1
+          ) {
+            promotionStatus =
+              'DUPLICATE_CATALOG_EAN'
+
+            detail = `Multiple catalog items share EAN ${eanKey}.`
+          } else if (
+            skuOwner &&
+            eanOwner &&
+            skuOwner.id !==
+              eanOwner.id
+          ) {
+            promotionStatus =
+              'SKU_EAN_CONFLICT'
+
+            detail = `SKU belongs to ${skuOwner.sku} but EAN belongs to ${eanOwner.sku}.`
+          } else if (
+            !skuOwner &&
+            eanOwner
+          ) {
+            promotionStatus =
+              'EAN_CONFLICT'
+
+            detail = `EAN already belongs to ${eanOwner.sku}.`
+          } else if (skuOwner) {
+            promotionStatus =
+              'EXISTING_SKU'
+
+            detail =
+              'SKU already exists in products but this catalog row is still UNMATCHED; its stored match state is stale and needs a rematch.'
+          } else {
+            promotionStatus =
+              'SAFE_NEW_PRODUCT'
+          }
+
+          return {
+            catalogSourceItemId: row.id,
+            identifier: row.identifier,
+            normalizedSku,
+            eanCode: row.eanCode,
+            name: row.name,
+            manufacturer:
+              row.manufacturer,
+            category: row.category,
+            storedProductId:
+              row.productId,
+            inventoryFound:
+              normalizedSku
+                ? inventoryStockBySku.has(
+                    normalizedSku,
+                  )
+                : false,
+            inventoryStock,
+            promotionStatus,
+            existingProductId:
+              skuOwner?.id ??
+              eanOwner?.id ??
+              null,
+            existingProductSku:
+              skuOwner?.sku ??
+              eanOwner?.sku ??
+              null,
+            detail,
+          }
+        },
+      )
+
+      const countStatus = (
+        status: CatalogPromotionStatus,
+      ) =>
+        items.filter(
+          (item) =>
+            item.promotionStatus ===
+            status,
+        ).length
+
+      const summary = {
+        unmatchedCatalogItems:
+          items.length,
+        inventoryCovered: items.filter(
+          (item) => item.inventoryFound,
+        ).length,
+        safeNewProducts: countStatus(
+          'SAFE_NEW_PRODUCT',
+        ),
+        existingSku: countStatus(
+          'EXISTING_SKU',
+        ),
+        eanConflicts: countStatus(
+          'EAN_CONFLICT',
+        ),
+        skuEanConflicts: countStatus(
+          'SKU_EAN_CONFLICT',
+        ),
+        duplicateCatalogSku: countStatus(
+          'DUPLICATE_CATALOG_SKU',
+        ),
+        duplicateCatalogEan: countStatus(
+          'DUPLICATE_CATALOG_EAN',
+        ),
+        missingRequiredData: countStatus(
+          'MISSING_REQUIRED_DATA',
+        ),
+        inventoryMissing: countStatus(
+          'INVENTORY_MISSING',
+        ),
+      }
+
+      return context.json({
+        status: 'ok',
+        summary,
+        pagination: {
+          limit,
+          offset,
+          total: items.length,
+        },
+        data: items.slice(
+          offset,
+          offset + limit,
+        ),
+      })
+    } catch (error) {
+      console.error(
+        'Catalog promotion preview failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'CMS katalógus promotion preview sikertelen.',
         },
         500,
       )
