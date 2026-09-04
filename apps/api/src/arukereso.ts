@@ -58,6 +58,8 @@ const EXPECTED_CATALOG_HEADERS = [
 
 const PREVIEW_LIMIT = 50
 
+const INVALID_ROWS_LIMIT = 100
+
 type CatalogHeader =
   (typeof EXPECTED_CATALOG_HEADERS)[number]
 
@@ -920,12 +922,31 @@ arukeresoApi.post(
           .slice(0, PREVIEW_LIMIT)
           .map(toCatalogPreviewItem)
 
+      const invalidRows =
+        analysis.allItems
+          .filter(
+            (item) =>
+              item.errors.length > 0,
+          )
+          .slice(0, INVALID_ROWS_LIMIT)
+          .map((item) => ({
+            rowNumber: item.rowNumber,
+            identifier: item.identifier,
+            eanCode: item.eanCode,
+            name: item.name,
+            priceRaw: item.priceRaw,
+            deliveryTimeRaw:
+              item.deliveryTimeRaw,
+            errors: item.errors,
+          }))
+
       return context.json({
         status: 'ok',
         fileName: uploadedFile.name,
         headers: analysis.headers,
         summary: analysis.summary,
         data,
+        invalidRows,
       })
 
     } catch (error) {
