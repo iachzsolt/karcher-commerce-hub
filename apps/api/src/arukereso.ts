@@ -3,6 +3,8 @@ import {
   createDatabase,
   dataConnectionRuns,
   dataConnections,
+  feedChannels,
+  feedProductOverrides,
   inventorySourceItems,
   pricingSourceItems,
   productIdentifiers,
@@ -16,6 +18,7 @@ import {
 import {
   and,
   eq,
+  inArray,
   isNull,
   ne,
   notInArray,
@@ -4200,6 +4203,682 @@ arukeresoApi.post(
   },
 )
 
+const FEED_CHANNEL_CODE = 'ARUKERESO_HU'
+const FEED_PREVIEW_LIMIT_DEFAULT = 100
+const FEED_PREVIEW_LIMIT_MAX = 500
+
+type FeedEligibilitySettings = {
+  maxPriceIndexBps: number
+  allowNoCompetitor: boolean
+  allowMissingPricingData: boolean
+  maxPricingAgeHours: number
+  ruleVersion: number
+}
+
+const FEED_ELIGIBILITY_DEFAULT_SETTINGS: FeedEligibilitySettings =
+  {
+    maxPriceIndexBps: 11000,
+    allowNoCompetitor: false,
+    allowMissingPricingData: false,
+    maxPricingAgeHours: 48,
+    ruleVersion: 1,
+  }
+
+function resolveFeedEligibilitySettings(
+  settingsJson: string | null,
+): {
+  settings: FeedEligibilitySettings
+  appliedDefaults: string[]
+} {
+  let parsed: unknown = null
+
+  try {
+    parsed =
+      settingsJson !== null
+        ? JSON.parse(settingsJson)
+        : null
+  } catch {
+    parsed = null
+  }
+
+  const source =
+    parsed !== null &&
+    typeof parsed === 'object' &&
+    !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {}
+
+  const appliedDefaults: string[] = []
+
+  const pickNumber = (
+    key: keyof FeedEligibilitySettings,
+    fallback: number,
+  ) => {
+    const value = source[key]
+
+    if (
+      typeof value === 'number' &&
+      Number.isFinite(value) &&
+      value > 0
+    ) {
+      return value
+    }
+
+    appliedDefaults.push(key)
+    return fallback
+  }
+
+  const pickBoolean = (
+    key: keyof FeedEligibilitySettings,
+    fallback: boolean,
+  ) => {
+    const value = source[key]
+
+    if (typeof value === 'boolean') {
+      return value
+    }
+
+    appliedDefaults.push(key)
+    return fallback
+  }
+
+  return {
+    settings: {
+      maxPriceIndexBps: pickNumber(
+        'maxPriceIndexBps',
+        FEED_ELIGIBILITY_DEFAULT_SETTINGS.maxPriceIndexBps,
+      ),
+      allowNoCompetitor: pickBoolean(
+        'allowNoCompetitor',
+        FEED_ELIGIBILITY_DEFAULT_SETTINGS.allowNoCompetitor,
+      ),
+      allowMissingPricingData:
+        pickBoolean(
+          'allowMissingPricingData',
+          FEED_ELIGIBILITY_DEFAULT_SETTINGS.allowMissingPricingData,
+        ),
+      maxPricingAgeHours: pickNumber(
+        'maxPricingAgeHours',
+        FEED_ELIGIBILITY_DEFAULT_SETTINGS.maxPricingAgeHours,
+      ),
+      ruleVersion: pickNumber(
+        'ruleVersion',
+        FEED_ELIGIBILITY_DEFAULT_SETTINGS.ruleVersion,
+      ),
+    },
+    appliedDefaults,
+  }
+}
+
+type FeedEligibilityReasonCode =
+  | 'FEED_ELIGIBLE_PRICE_INDEX'
+  | 'FEED_BLOCKED_PRICE_INDEX'
+  | 'FEED_ELIGIBLE_NO_COMPETITOR'
+  | 'FEED_BLOCKED_NO_COMPETITOR'
+  | 'FEED_ELIGIBLE_MANUAL_OVERRIDE'
+  | 'FEED_BLOCKED_MANUAL_OVERRIDE'
+  | 'FEED_ELIGIBLE_MISSING_PRICING'
+  | 'FEED_BLOCKED_MISSING_PRICING'
+  | 'FEED_ELIGIBLE_STALE_PRICING'
+  | 'FEED_BLOCKED_STALE_PRICING'
+  | 'FEED_BLOCKED_PARTIAL_MARKET_DATA'
+
+type FeedEligibilityOverride =
+  | 'INHERIT'
+  | 'FORCE_INCLUDE'
+  | 'FORCE_EXCLUDE'
+
+type FeedPricingRowInput = {
+  priceIndexBps: number | null
+  dataStatus: string | null
+  observedAt: Date | null
+} | null
+
+type FeedEligibilityReasonDetails = {
+  inclusionMode: FeedEligibilityOverride
+  ruleVersion: number
+  maxPriceIndexBps: number
+  priceIndexBps: number | null
+  dataStatus: string | null
+  observedAt: string | null
+  pricingAgeHours: number | null
+}
+
+function evaluateFeedEligibility(input: {
+  pricingRow: FeedPricingRowInput
+  override: FeedEligibilityOverride | null
+  settings: FeedEligibilitySettings
+  now: Date
+}): {
+  included: boolean
+  decision: 'INCLUDED' | 'EXCLUDED'
+  reasonCode: FeedEligibilityReasonCode
+  reasonDetails: FeedEligibilityReasonDetails
+} {
+  const { settings } = input
+  const inclusionMode =
+    input.override ?? 'INHERIT'
+  const pricingRow = input.pricingRow
+
+  const observedAtIso =
+    pricingRow?.observedAt instanceof
+    Date
+      ? pricingRow.observedAt.toISOString()
+      : null
+
+  const pricingAgeHours =
+    pricingRow?.observedAt instanceof
+    Date
+      ? Math.round(
+          ((input.now.getTime() -
+            pricingRow.observedAt.getTime()) /
+            3600000) *
+            10,
+        ) / 10
+      : null
+
+  const reasonDetails: FeedEligibilityReasonDetails =
+    {
+      inclusionMode,
+      ruleVersion: settings.ruleVersion,
+      maxPriceIndexBps:
+        settings.maxPriceIndexBps,
+      priceIndexBps:
+        pricingRow?.priceIndexBps ?? null,
+      dataStatus:
+        pricingRow?.dataStatus ?? null,
+      observedAt: observedAtIso,
+      pricingAgeHours,
+    }
+
+  if (
+    inclusionMode === 'FORCE_INCLUDE'
+  ) {
+    return {
+      included: true,
+      decision: 'INCLUDED',
+      reasonCode:
+        'FEED_ELIGIBLE_MANUAL_OVERRIDE',
+      reasonDetails,
+    }
+  }
+
+  if (
+    inclusionMode === 'FORCE_EXCLUDE'
+  ) {
+    return {
+      included: false,
+      decision: 'EXCLUDED',
+      reasonCode:
+        'FEED_BLOCKED_MANUAL_OVERRIDE',
+      reasonDetails,
+    }
+  }
+
+  if (pricingRow === null) {
+    return settings.allowMissingPricingData
+      ? {
+          included: true,
+          decision: 'INCLUDED',
+          reasonCode:
+            'FEED_ELIGIBLE_MISSING_PRICING',
+          reasonDetails,
+        }
+      : {
+          included: false,
+          decision: 'EXCLUDED',
+          reasonCode:
+            'FEED_BLOCKED_MISSING_PRICING',
+          reasonDetails,
+        }
+  }
+
+  if (
+    pricingAgeHours === null ||
+    pricingAgeHours >
+      settings.maxPricingAgeHours
+  ) {
+    return settings.allowMissingPricingData
+      ? {
+          included: true,
+          decision: 'INCLUDED',
+          reasonCode:
+            'FEED_ELIGIBLE_STALE_PRICING',
+          reasonDetails,
+        }
+      : {
+          included: false,
+          decision: 'EXCLUDED',
+          reasonCode:
+            'FEED_BLOCKED_STALE_PRICING',
+          reasonDetails,
+        }
+  }
+
+  if (
+    pricingRow.dataStatus ===
+    'NO_COMPETITOR'
+  ) {
+    return settings.allowNoCompetitor
+      ? {
+          included: true,
+          decision: 'INCLUDED',
+          reasonCode:
+            'FEED_ELIGIBLE_NO_COMPETITOR',
+          reasonDetails,
+        }
+      : {
+          included: false,
+          decision: 'EXCLUDED',
+          reasonCode:
+            'FEED_BLOCKED_NO_COMPETITOR',
+          reasonDetails,
+        }
+  }
+
+  if (
+    pricingRow.dataStatus ===
+      'HAS_COMPETITOR' &&
+    typeof pricingRow.priceIndexBps ===
+      'number' &&
+    Number.isFinite(
+      pricingRow.priceIndexBps,
+    )
+  ) {
+    return pricingRow.priceIndexBps <=
+      settings.maxPriceIndexBps
+      ? {
+          included: true,
+          decision: 'INCLUDED',
+          reasonCode:
+            'FEED_ELIGIBLE_PRICE_INDEX',
+          reasonDetails,
+        }
+      : {
+          included: false,
+          decision: 'EXCLUDED',
+          reasonCode:
+            'FEED_BLOCKED_PRICE_INDEX',
+          reasonDetails,
+        }
+  }
+
+  return {
+    included: false,
+    decision: 'EXCLUDED',
+    reasonCode:
+      'FEED_BLOCKED_PARTIAL_MARKET_DATA',
+    reasonDetails,
+  }
+}
+
+arukeresoApi.get(
+  '/feed/preview',
+  async (context) => {
+    try {
+      const limitParam = Number(
+        context.req.query('limit') ??
+          FEED_PREVIEW_LIMIT_DEFAULT,
+      )
+
+      const offsetParam = Number(
+        context.req.query('offset') ?? 0,
+      )
+
+      const limit =
+        Number.isFinite(limitParam)
+          ? Math.min(
+              Math.max(
+                Math.trunc(limitParam),
+                0,
+              ),
+              FEED_PREVIEW_LIMIT_MAX,
+            )
+          : FEED_PREVIEW_LIMIT_DEFAULT
+
+      const offset =
+        Number.isFinite(offsetParam)
+          ? Math.max(
+              Math.trunc(offsetParam),
+              0,
+            )
+          : 0
+
+      const database =
+        requireDatabase()
+
+      const [channel] = await database
+        .select()
+        .from(feedChannels)
+        .where(
+          eq(
+            feedChannels.code,
+            FEED_CHANNEL_CODE,
+          ),
+        )
+        .limit(1)
+
+      if (!channel) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Az Árukereső feed csatorna nincs konfigurálva (ARUKERESO_HU).',
+          },
+          409,
+        )
+      }
+
+      const { settings, appliedDefaults } =
+        resolveFeedEligibilitySettings(
+          channel.settingsJson,
+        )
+
+      const [hubProducts, pricingConnections, overrides] =
+        await Promise.all([
+          database
+            .select({
+              id: products.id,
+              sku: products.sku,
+              name: products.name,
+            })
+            .from(products)
+            .where(
+              eq(products.active, true),
+            ),
+
+          database
+            .select({
+              id: dataConnections.id,
+            })
+            .from(dataConnections)
+            .where(
+              and(
+                eq(
+                  dataConnections.purpose,
+                  'PRICING',
+                ),
+                eq(
+                  dataConnections.isActive,
+                  true,
+                ),
+              ),
+            ),
+
+          database
+            .select({
+              productId:
+                feedProductOverrides.productId,
+              inclusionMode:
+                feedProductOverrides.inclusionMode,
+            })
+            .from(feedProductOverrides)
+            .where(
+              eq(
+                feedProductOverrides.channelId,
+                channel.id,
+              ),
+            ),
+        ])
+
+      const pricingConnectionIds =
+        pricingConnections.map(
+          (connection) =>
+            connection.id,
+        )
+
+      const pricingRows =
+        pricingConnectionIds.length > 0
+          ? await database
+              .select({
+                productId:
+                  pricingSourceItems.productId,
+                priceIndexBps:
+                  pricingSourceItems.priceIndexBps,
+                dataStatus:
+                  pricingSourceItems.dataStatus,
+                observedAt:
+                  pricingSourceItems.observedAt,
+              })
+              .from(pricingSourceItems)
+              .where(
+                and(
+                  inArray(
+                    pricingSourceItems.connectionId,
+                    pricingConnectionIds,
+                  ),
+                  eq(
+                    pricingSourceItems.marketCode,
+                    'HU',
+                  ),
+                  eq(
+                    pricingSourceItems.currency,
+                    'HUF',
+                  ),
+                ),
+              )
+          : []
+
+      const pricingByProduct = new Map<
+        string,
+        {
+          priceIndexBps: number | null
+          dataStatus: string | null
+          observedAt: Date | null
+        }
+      >()
+
+      for (const row of pricingRows) {
+        if (row.productId === null) {
+          continue
+        }
+
+        const current =
+          pricingByProduct.get(
+            row.productId,
+          )
+
+        if (
+          !current ||
+          (row.observedAt instanceof
+            Date &&
+            (!(
+              current.observedAt instanceof
+              Date
+            ) ||
+              row.observedAt.getTime() >
+                current.observedAt.getTime()))
+        ) {
+          pricingByProduct.set(
+            row.productId,
+            {
+              priceIndexBps:
+                row.priceIndexBps,
+              dataStatus: row.dataStatus,
+              observedAt:
+                row.observedAt,
+            },
+          )
+        }
+      }
+
+      const overrideByProduct = new Map(
+        overrides.map((override) => [
+          override.productId,
+          override.inclusionMode,
+        ]),
+      )
+
+      const now = new Date()
+
+      const summary = {
+        products: 0,
+        included: 0,
+        excluded: 0,
+        ruleBased: 0,
+        forceIncluded: 0,
+        forceExcluded: 0,
+        hasCompetitor: 0,
+        noCompetitor: 0,
+        missingPricing: 0,
+        stalePricing: 0,
+        partialMarketData: 0,
+      }
+
+      const reasonCounts: Record<
+        string,
+        number
+      > = {}
+
+      const items = hubProducts.map(
+        (product) => {
+          const pricingRow =
+            pricingByProduct.get(
+              product.id,
+            ) ?? null
+
+          const inclusionMode =
+            overrideByProduct.get(
+              product.id,
+            ) ?? 'INHERIT'
+
+          const result =
+            evaluateFeedEligibility({
+              pricingRow,
+              override: inclusionMode,
+              settings,
+              now,
+            })
+
+          summary.products += 1
+
+          if (result.included) {
+            summary.included += 1
+          } else {
+            summary.excluded += 1
+          }
+
+          if (
+            inclusionMode ===
+            'FORCE_INCLUDE'
+          ) {
+            summary.forceIncluded += 1
+          } else if (
+            inclusionMode ===
+            'FORCE_EXCLUDE'
+          ) {
+            summary.forceExcluded += 1
+          } else {
+            summary.ruleBased += 1
+          }
+
+          if (pricingRow === null) {
+            summary.missingPricing += 1
+          } else if (
+            result.reasonDetails
+              .pricingAgeHours === null ||
+            result.reasonDetails
+              .pricingAgeHours >
+              settings.maxPricingAgeHours
+          ) {
+            summary.stalePricing += 1
+          } else if (
+            pricingRow.dataStatus ===
+            'HAS_COMPETITOR'
+          ) {
+            summary.hasCompetitor += 1
+          } else if (
+            pricingRow.dataStatus ===
+            'NO_COMPETITOR'
+          ) {
+            summary.noCompetitor += 1
+          } else {
+            summary.partialMarketData += 1
+          }
+
+          reasonCounts[
+            result.reasonCode
+          ] =
+            (reasonCounts[
+              result.reasonCode
+            ] ?? 0) + 1
+
+          return {
+            productId: product.id,
+            sku: product.sku,
+            name: product.name,
+            included: result.included,
+            inclusionMode,
+            priceIndexBps:
+              result.reasonDetails
+                .priceIndexBps,
+            dataStatus:
+              result.reasonDetails
+                .dataStatus,
+            observedAt:
+              result.reasonDetails
+                .observedAt,
+            reasonCode:
+              result.reasonCode,
+            reasonDetails:
+              result.reasonDetails,
+          }
+        },
+      )
+
+      items.sort((left, right) =>
+        left.sku.localeCompare(
+          right.sku,
+        ),
+      )
+
+      return context.json({
+        status: 'ok',
+        channel: {
+          id: channel.id,
+          code: channel.code,
+          isActive: channel.isActive,
+          status: channel.status,
+        },
+        pricingConnectionIds,
+        settings,
+        appliedDefaults,
+        summary,
+        reasonCounts,
+        pagination: {
+          limit,
+          offset,
+          total: items.length,
+        },
+        items: items.slice(
+          offset,
+          offset + limit,
+        ),
+      })
+    } catch (error) {
+      console.error(
+        'Feed preview failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Feed preview failed.',
+        },
+        500,
+      )
+    }
+  },
+)
+
 export {
   arukeresoApi,
+  evaluateFeedEligibility,
+  resolveFeedEligibilitySettings,
+  FEED_ELIGIBILITY_DEFAULT_SETTINGS,
+  FEED_CHANNEL_CODE,
 }
