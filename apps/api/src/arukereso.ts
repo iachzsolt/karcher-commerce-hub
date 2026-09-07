@@ -4209,7 +4209,13 @@ const FEED_PREVIEW_LIMIT_DEFAULT = 100
 const FEED_PREVIEW_LIMIT_MAX = 500
 
 type FeedEligibilitySettings = {
-  maxPriceIndexBps: number
+  useMinIndex: boolean
+  maxMinIndexBps: number
+  useMedianIndex: boolean
+  maxMedianIndexBps: number
+  useAverageIndex: boolean
+  maxAverageIndexBps: number
+  useStockRule: boolean
   allowNoCompetitor: boolean
   allowMissingPricingData: boolean
   maxPricingAgeHours: number
@@ -4218,7 +4224,13 @@ type FeedEligibilitySettings = {
 
 const FEED_ELIGIBILITY_DEFAULT_SETTINGS: FeedEligibilitySettings =
   {
-    maxPriceIndexBps: 11000,
+    useMinIndex: true,
+    maxMinIndexBps: 11000,
+    useMedianIndex: false,
+    maxMedianIndexBps: 11000,
+    useAverageIndex: false,
+    maxAverageIndexBps: 11000,
+    useStockRule: false,
     allowNoCompetitor: false,
     allowMissingPricingData: false,
     maxPricingAgeHours: 48,
@@ -4251,7 +4263,7 @@ function resolveFeedEligibilitySettings(
 
   const appliedDefaults: string[] = []
 
-  const pickNumber = (
+  const pickPositiveInteger = (
     key: keyof FeedEligibilitySettings,
     fallback: number,
   ) => {
@@ -4260,6 +4272,7 @@ function resolveFeedEligibilitySettings(
     if (
       typeof value === 'number' &&
       Number.isFinite(value) &&
+      Number.isInteger(value) &&
       value > 0
     ) {
       return value
@@ -4268,6 +4281,19 @@ function resolveFeedEligibilitySettings(
     appliedDefaults.push(key)
     return fallback
   }
+
+  const legacyMaxPriceIndexBps =
+    source['maxPriceIndexBps']
+
+  const maxMinIndexFallback =
+    typeof legacyMaxPriceIndexBps ===
+      'number' &&
+    Number.isInteger(
+      legacyMaxPriceIndexBps,
+    ) &&
+    legacyMaxPriceIndexBps > 0
+      ? legacyMaxPriceIndexBps
+      : FEED_ELIGIBILITY_DEFAULT_SETTINGS.maxMinIndexBps
 
   const pickBoolean = (
     key: keyof FeedEligibilitySettings,
@@ -4285,9 +4311,33 @@ function resolveFeedEligibilitySettings(
 
   return {
     settings: {
-      maxPriceIndexBps: pickNumber(
-        'maxPriceIndexBps',
-        FEED_ELIGIBILITY_DEFAULT_SETTINGS.maxPriceIndexBps,
+      useMinIndex: pickBoolean(
+        'useMinIndex',
+        FEED_ELIGIBILITY_DEFAULT_SETTINGS.useMinIndex,
+      ),
+      maxMinIndexBps: pickPositiveInteger(
+        'maxMinIndexBps',
+        maxMinIndexFallback,
+      ),
+      useMedianIndex: pickBoolean(
+        'useMedianIndex',
+        FEED_ELIGIBILITY_DEFAULT_SETTINGS.useMedianIndex,
+      ),
+      maxMedianIndexBps: pickPositiveInteger(
+        'maxMedianIndexBps',
+        FEED_ELIGIBILITY_DEFAULT_SETTINGS.maxMedianIndexBps,
+      ),
+      useAverageIndex: pickBoolean(
+        'useAverageIndex',
+        FEED_ELIGIBILITY_DEFAULT_SETTINGS.useAverageIndex,
+      ),
+      maxAverageIndexBps: pickPositiveInteger(
+        'maxAverageIndexBps',
+        FEED_ELIGIBILITY_DEFAULT_SETTINGS.maxAverageIndexBps,
+      ),
+      useStockRule: pickBoolean(
+        'useStockRule',
+        FEED_ELIGIBILITY_DEFAULT_SETTINGS.useStockRule,
       ),
       allowNoCompetitor: pickBoolean(
         'allowNoCompetitor',
@@ -4298,11 +4348,11 @@ function resolveFeedEligibilitySettings(
           'allowMissingPricingData',
           FEED_ELIGIBILITY_DEFAULT_SETTINGS.allowMissingPricingData,
         ),
-      maxPricingAgeHours: pickNumber(
+      maxPricingAgeHours: pickPositiveInteger(
         'maxPricingAgeHours',
         FEED_ELIGIBILITY_DEFAULT_SETTINGS.maxPricingAgeHours,
       ),
-      ruleVersion: pickNumber(
+      ruleVersion: pickPositiveInteger(
         'ruleVersion',
         FEED_ELIGIBILITY_DEFAULT_SETTINGS.ruleVersion,
       ),
@@ -4312,8 +4362,15 @@ function resolveFeedEligibilitySettings(
 }
 
 type FeedEligibilityReasonCode =
-  | 'FEED_ELIGIBLE_PRICE_INDEX'
-  | 'FEED_BLOCKED_PRICE_INDEX'
+  | 'FEED_ELIGIBLE_PRICING_RULES'
+  | 'FEED_BLOCKED_MIN_INDEX'
+  | 'FEED_BLOCKED_MEDIAN_INDEX'
+  | 'FEED_BLOCKED_AVERAGE_INDEX'
+  | 'FEED_BLOCKED_MISSING_MIN_INDEX'
+  | 'FEED_BLOCKED_MISSING_MEDIAN_INDEX'
+  | 'FEED_BLOCKED_MISSING_AVERAGE_INDEX'
+  | 'FEED_BLOCKED_OUT_OF_STOCK'
+  | 'FEED_BLOCKED_MISSING_STOCK'
   | 'FEED_ELIGIBLE_NO_COMPETITOR'
   | 'FEED_BLOCKED_NO_COMPETITOR'
   | 'FEED_ELIGIBLE_MANUAL_OVERRIDE'
@@ -4331,6 +4388,8 @@ type FeedEligibilityOverride =
 
 type FeedPricingRowInput = {
   priceIndexBps: number | null
+  medianIndexBps: number | null
+  averageIndexBps: number | null
   dataStatus: string | null
   observedAt: Date | null
 } | null
@@ -4338,8 +4397,18 @@ type FeedPricingRowInput = {
 type FeedEligibilityReasonDetails = {
   inclusionMode: FeedEligibilityOverride
   ruleVersion: number
-  maxPriceIndexBps: number
+  useMinIndex: boolean
+  maxMinIndexBps: number
   priceIndexBps: number | null
+  useMedianIndex: boolean
+  maxMedianIndexBps: number
+  medianIndexBps: number | null
+  useAverageIndex: boolean
+  maxAverageIndexBps: number
+  averageIndexBps: number | null
+  useStockRule: boolean
+  stockQuantity: number | null
+  stockAvailable: boolean | null
   dataStatus: string | null
   observedAt: string | null
   pricingAgeHours: number | null
@@ -4347,6 +4416,7 @@ type FeedEligibilityReasonDetails = {
 
 function evaluateFeedEligibility(input: {
   pricingRow: FeedPricingRowInput
+  stockQuantity: number | null
   override: FeedEligibilityOverride | null
   settings: FeedEligibilitySettings
   now: Date
@@ -4382,10 +4452,29 @@ function evaluateFeedEligibility(input: {
     {
       inclusionMode,
       ruleVersion: settings.ruleVersion,
-      maxPriceIndexBps:
-        settings.maxPriceIndexBps,
+      useMinIndex: settings.useMinIndex,
+      maxMinIndexBps:
+        settings.maxMinIndexBps,
       priceIndexBps:
         pricingRow?.priceIndexBps ?? null,
+      useMedianIndex:
+        settings.useMedianIndex,
+      maxMedianIndexBps:
+        settings.maxMedianIndexBps,
+      medianIndexBps:
+        pricingRow?.medianIndexBps ?? null,
+      useAverageIndex:
+        settings.useAverageIndex,
+      maxAverageIndexBps:
+        settings.maxAverageIndexBps,
+      averageIndexBps:
+        pricingRow?.averageIndexBps ?? null,
+      useStockRule: settings.useStockRule,
+      stockQuantity: input.stockQuantity,
+      stockAvailable:
+        input.stockQuantity === null
+          ? null
+          : input.stockQuantity > 0,
       dataStatus:
         pricingRow?.dataStatus ?? null,
       observedAt: observedAtIso,
@@ -4416,99 +4505,174 @@ function evaluateFeedEligibility(input: {
     }
   }
 
+  let successReasonCode: FeedEligibilityReasonCode =
+    'FEED_ELIGIBLE_PRICING_RULES'
+
   if (pricingRow === null) {
-    return settings.allowMissingPricingData
-      ? {
-          included: true,
-          decision: 'INCLUDED',
-          reasonCode:
-            'FEED_ELIGIBLE_MISSING_PRICING',
-          reasonDetails,
-        }
-      : {
-          included: false,
-          decision: 'EXCLUDED',
-          reasonCode:
-            'FEED_BLOCKED_MISSING_PRICING',
-          reasonDetails,
-        }
+    if (!settings.allowMissingPricingData) {
+      return {
+        included: false,
+        decision: 'EXCLUDED',
+        reasonCode:
+          'FEED_BLOCKED_MISSING_PRICING',
+        reasonDetails,
+      }
+    }
+
+    successReasonCode =
+      'FEED_ELIGIBLE_MISSING_PRICING'
   }
 
   if (
-    pricingAgeHours === null ||
-    pricingAgeHours >
-      settings.maxPricingAgeHours
+    pricingRow !== null &&
+    (pricingAgeHours === null ||
+      pricingAgeHours >
+        settings.maxPricingAgeHours)
   ) {
-    return settings.allowMissingPricingData
-      ? {
-          included: true,
-          decision: 'INCLUDED',
-          reasonCode:
-            'FEED_ELIGIBLE_STALE_PRICING',
-          reasonDetails,
-        }
-      : {
-          included: false,
-          decision: 'EXCLUDED',
-          reasonCode:
-            'FEED_BLOCKED_STALE_PRICING',
-          reasonDetails,
-        }
+    if (!settings.allowMissingPricingData) {
+      return {
+        included: false,
+        decision: 'EXCLUDED',
+        reasonCode:
+          'FEED_BLOCKED_STALE_PRICING',
+        reasonDetails,
+      }
+    }
+
+    successReasonCode =
+      'FEED_ELIGIBLE_STALE_PRICING'
   }
 
   if (
+    pricingRow !== null &&
+    successReasonCode ===
+      'FEED_ELIGIBLE_PRICING_RULES' &&
     pricingRow.dataStatus ===
-    'NO_COMPETITOR'
+      'NO_COMPETITOR'
   ) {
-    return settings.allowNoCompetitor
-      ? {
-          included: true,
-          decision: 'INCLUDED',
-          reasonCode:
-            'FEED_ELIGIBLE_NO_COMPETITOR',
-          reasonDetails,
-        }
-      : {
-          included: false,
-          decision: 'EXCLUDED',
-          reasonCode:
-            'FEED_BLOCKED_NO_COMPETITOR',
-          reasonDetails,
-        }
+    if (!settings.allowNoCompetitor) {
+      return {
+        included: false,
+        decision: 'EXCLUDED',
+        reasonCode:
+          'FEED_BLOCKED_NO_COMPETITOR',
+        reasonDetails,
+      }
+    }
+
+    successReasonCode =
+      'FEED_ELIGIBLE_NO_COMPETITOR'
   }
 
   if (
+    pricingRow !== null &&
+    successReasonCode ===
+      'FEED_ELIGIBLE_PRICING_RULES' &&
     pricingRow.dataStatus ===
-      'HAS_COMPETITOR' &&
-    typeof pricingRow.priceIndexBps ===
-      'number' &&
-    Number.isFinite(
-      pricingRow.priceIndexBps,
-    )
+      'HAS_COMPETITOR'
   ) {
-    return pricingRow.priceIndexBps <=
-      settings.maxPriceIndexBps
-      ? {
-          included: true,
-          decision: 'INCLUDED',
-          reasonCode:
-            'FEED_ELIGIBLE_PRICE_INDEX',
-          reasonDetails,
-        }
-      : {
+    const enabledRules = [
+      {
+        enabled: settings.useMinIndex,
+        value: pricingRow.priceIndexBps,
+        maximum: settings.maxMinIndexBps,
+        missingReason:
+          'FEED_BLOCKED_MISSING_MIN_INDEX' as const,
+        blockedReason:
+          'FEED_BLOCKED_MIN_INDEX' as const,
+      },
+      {
+        enabled: settings.useMedianIndex,
+        value: pricingRow.medianIndexBps,
+        maximum:
+          settings.maxMedianIndexBps,
+        missingReason:
+          'FEED_BLOCKED_MISSING_MEDIAN_INDEX' as const,
+        blockedReason:
+          'FEED_BLOCKED_MEDIAN_INDEX' as const,
+      },
+      {
+        enabled: settings.useAverageIndex,
+        value: pricingRow.averageIndexBps,
+        maximum:
+          settings.maxAverageIndexBps,
+        missingReason:
+          'FEED_BLOCKED_MISSING_AVERAGE_INDEX' as const,
+        blockedReason:
+          'FEED_BLOCKED_AVERAGE_INDEX' as const,
+      },
+    ]
+
+    for (const rule of enabledRules) {
+      if (!rule.enabled) {
+        continue
+      }
+
+      if (
+        typeof rule.value !== 'number' ||
+        !Number.isFinite(rule.value)
+      ) {
+        return {
           included: false,
           decision: 'EXCLUDED',
-          reasonCode:
-            'FEED_BLOCKED_PRICE_INDEX',
+          reasonCode: rule.missingReason,
           reasonDetails,
         }
+      }
+
+      if (rule.value > rule.maximum) {
+        return {
+          included: false,
+          decision: 'EXCLUDED',
+          reasonCode: rule.blockedReason,
+          reasonDetails,
+        }
+      }
+    }
+  } else if (
+    pricingRow !== null &&
+    successReasonCode ===
+      'FEED_ELIGIBLE_PRICING_RULES' &&
+    pricingRow.dataStatus !==
+      'NO_COMPETITOR' &&
+    pricingRow.dataStatus !==
+      'HAS_COMPETITOR'
+  ) {
+    return {
+      included: false,
+      decision: 'EXCLUDED',
+      reasonCode:
+        'FEED_BLOCKED_PARTIAL_MARKET_DATA',
+      reasonDetails,
+    }
+  }
+
+  if (settings.useStockRule) {
+    if (input.stockQuantity === null) {
+      return {
+        included: false,
+        decision: 'EXCLUDED',
+        reasonCode:
+          'FEED_BLOCKED_MISSING_STOCK',
+        reasonDetails,
+      }
+    }
+
+    if (input.stockQuantity <= 0) {
+      return {
+        included: false,
+        decision: 'EXCLUDED',
+        reasonCode:
+          'FEED_BLOCKED_OUT_OF_STOCK',
+        reasonDetails,
+      }
+    }
   }
 
   return {
-    included: false,
-    decision: 'EXCLUDED',
-    reasonCode:
-      'FEED_BLOCKED_PARTIAL_MARKET_DATA',
+    included: true,
+    decision: 'INCLUDED',
+    reasonCode: successReasonCode,
     reasonDetails,
   }
 }
@@ -4590,7 +4754,12 @@ arukeresoApi.get(
           channel.settingsJson,
         )
 
-      const [hubProducts, pricingConnections, overrides] =
+      const [
+        hubProducts,
+        pricingConnections,
+        inventoryConnections,
+        overrides,
+      ] =
         await Promise.all([
           database
             .select({
@@ -4623,6 +4792,25 @@ arukeresoApi.get(
 
           database
             .select({
+              id: dataConnections.id,
+            })
+            .from(dataConnections)
+            .where(
+              and(
+                eq(
+                  dataConnections.purpose,
+                  'INVENTORY',
+                ),
+                eq(
+                  dataConnections.isActive,
+                  true,
+                ),
+              ),
+            )
+            .limit(1),
+
+          database
+            .select({
               productId:
                 feedProductOverrides.productId,
               inclusionMode:
@@ -4643,42 +4831,68 @@ arukeresoApi.get(
             connection.id,
         )
 
-      const pricingRows =
-        pricingConnectionIds.length > 0
-          ? await database
-              .select({
-                productId:
-                  pricingSourceItems.productId,
-                priceIndexBps:
-                  pricingSourceItems.priceIndexBps,
-                dataStatus:
-                  pricingSourceItems.dataStatus,
-                observedAt:
-                  pricingSourceItems.observedAt,
-              })
-              .from(pricingSourceItems)
-              .where(
-                and(
-                  inArray(
-                    pricingSourceItems.connectionId,
-                    pricingConnectionIds,
+      const activeInventoryConnection =
+        inventoryConnections[0] ?? null
+
+      const [pricingRows, inventoryRows] =
+        await Promise.all([
+          pricingConnectionIds.length > 0
+            ? database
+                .select({
+                  productId:
+                    pricingSourceItems.productId,
+                  priceIndexBps:
+                    pricingSourceItems.priceIndexBps,
+                  medianIndexBps:
+                    pricingSourceItems.medianIndexBps,
+                  averageIndexBps:
+                    pricingSourceItems.averageIndexBps,
+                  dataStatus:
+                    pricingSourceItems.dataStatus,
+                  observedAt:
+                    pricingSourceItems.observedAt,
+                })
+                .from(pricingSourceItems)
+                .where(
+                  and(
+                    inArray(
+                      pricingSourceItems.connectionId,
+                      pricingConnectionIds,
+                    ),
+                    eq(
+                      pricingSourceItems.marketCode,
+                      'HU',
+                    ),
+                    eq(
+                      pricingSourceItems.currency,
+                      'HUF',
+                    ),
                   ),
+                )
+            : [],
+          activeInventoryConnection
+            ? database
+                .select({
+                  sku: inventorySourceItems.sku,
+                  stock:
+                    inventorySourceItems.stock,
+                })
+                .from(inventorySourceItems)
+                .where(
                   eq(
-                    pricingSourceItems.marketCode,
-                    'HU',
+                    inventorySourceItems.connectionId,
+                    activeInventoryConnection.id,
                   ),
-                  eq(
-                    pricingSourceItems.currency,
-                    'HUF',
-                  ),
-                ),
-              )
-          : []
+                )
+            : [],
+        ])
 
       const pricingByProduct = new Map<
         string,
         {
           priceIndexBps: number | null
+          medianIndexBps: number | null
+          averageIndexBps: number | null
           dataStatus: string | null
           observedAt: Date | null
         }
@@ -4710,6 +4924,10 @@ arukeresoApi.get(
             {
               priceIndexBps:
                 row.priceIndexBps,
+              medianIndexBps:
+                row.medianIndexBps,
+              averageIndexBps:
+                row.averageIndexBps,
               dataStatus: row.dataStatus,
               observedAt:
                 row.observedAt,
@@ -4722,6 +4940,13 @@ arukeresoApi.get(
         overrides.map((override) => [
           override.productId,
           override.inclusionMode,
+        ]),
+      )
+
+      const inventoryStockBySku = new Map(
+        inventoryRows.map((item) => [
+          item.sku,
+          item.stock,
         ]),
       )
 
@@ -4739,6 +4964,11 @@ arukeresoApi.get(
         missingPricing: 0,
         stalePricing: 0,
         partialMarketData: 0,
+        blockedByMinIndex: 0,
+        blockedByMedianIndex: 0,
+        blockedByAverageIndex: 0,
+        blockedByStock: 0,
+        missingEnabledMetric: 0,
       }
 
       const reasonCounts: Record<
@@ -4761,6 +4991,10 @@ arukeresoApi.get(
           const result =
             evaluateFeedEligibility({
               pricingRow,
+              stockQuantity:
+                inventoryStockBySku.get(
+                  product.sku,
+                ) ?? null,
               override: inclusionMode,
               settings,
               now,
@@ -4819,6 +5053,41 @@ arukeresoApi.get(
               result.reasonCode
             ] ?? 0) + 1
 
+          if (
+            result.reasonCode ===
+            'FEED_BLOCKED_MIN_INDEX'
+          ) {
+            summary.blockedByMinIndex += 1
+          } else if (
+            result.reasonCode ===
+            'FEED_BLOCKED_MEDIAN_INDEX'
+          ) {
+            summary.blockedByMedianIndex += 1
+          } else if (
+            result.reasonCode ===
+            'FEED_BLOCKED_AVERAGE_INDEX'
+          ) {
+            summary.blockedByAverageIndex += 1
+          } else if (
+            result.reasonCode ===
+              'FEED_BLOCKED_OUT_OF_STOCK' ||
+            result.reasonCode ===
+              'FEED_BLOCKED_MISSING_STOCK'
+          ) {
+            summary.blockedByStock += 1
+          }
+
+          if (
+            result.reasonCode ===
+              'FEED_BLOCKED_MISSING_MIN_INDEX' ||
+            result.reasonCode ===
+              'FEED_BLOCKED_MISSING_MEDIAN_INDEX' ||
+            result.reasonCode ===
+              'FEED_BLOCKED_MISSING_AVERAGE_INDEX'
+          ) {
+            summary.missingEnabledMetric += 1
+          }
+
           return {
             productId: product.id,
             sku: product.sku,
@@ -4834,6 +5103,18 @@ arukeresoApi.get(
                 ? null
                 : result.reasonDetails
                     .priceIndexBps / 100,
+            medianIndexBps:
+              result.reasonDetails
+                .medianIndexBps,
+            averageIndexBps:
+              result.reasonDetails
+                .averageIndexBps,
+            stockQuantity:
+              result.reasonDetails
+                .stockQuantity,
+            stockAvailable:
+              result.reasonDetails
+                .stockAvailable,
             dataStatus:
               result.reasonDetails
                 .dataStatus,
@@ -5075,32 +5356,62 @@ arukeresoApi.patch(
       }
 
       const {
-        maxPriceIndexBps,
+        useMinIndex,
+        maxMinIndexBps,
+        useMedianIndex,
+        maxMedianIndexBps,
+        useAverageIndex,
+        maxAverageIndexBps,
+        useStockRule,
         allowNoCompetitor,
         allowMissingPricingData,
         maxPricingAgeHours,
+        ruleVersion,
       } = body as Record<string, unknown>
 
-      if (
-        maxPriceIndexBps !== undefined &&
-        (typeof maxPriceIndexBps !==
-          'number' ||
-          !Number.isInteger(
-            maxPriceIndexBps,
-          ) ||
-          maxPriceIndexBps <= 0)
-      ) {
+      if (ruleVersion !== undefined) {
         return context.json(
           {
             status: 'error',
             message:
-              'maxPriceIndexBps pozitív egész kell legyen (Bps).',
+              'A ruleVersion nem állítható közvetlenül.',
           },
           400,
         )
       }
 
       for (const [key, value] of [
+        ['maxMinIndexBps', maxMinIndexBps],
+        [
+          'maxMedianIndexBps',
+          maxMedianIndexBps,
+        ],
+        [
+          'maxAverageIndexBps',
+          maxAverageIndexBps,
+        ],
+      ] as const) {
+        if (
+          value !== undefined &&
+          (typeof value !== 'number' ||
+            !Number.isInteger(value) ||
+            value <= 0)
+        ) {
+          return context.json(
+            {
+              status: 'error',
+              message: `${key} pozitív egész kell legyen (Bps).`,
+            },
+            400,
+          )
+        }
+      }
+
+      for (const [key, value] of [
+        ['useMinIndex', useMinIndex],
+        ['useMedianIndex', useMedianIndex],
+        ['useAverageIndex', useAverageIndex],
+        ['useStockRule', useStockRule],
         ['allowNoCompetitor', allowNoCompetitor],
         [
           'allowMissingPricingData',
@@ -5125,7 +5436,7 @@ arukeresoApi.patch(
         maxPricingAgeHours !== undefined &&
         (typeof maxPricingAgeHours !==
           'number' ||
-          !Number.isFinite(
+          !Number.isInteger(
             maxPricingAgeHours,
           ) ||
           maxPricingAgeHours <= 0 ||
@@ -5167,8 +5478,18 @@ arukeresoApi.patch(
 
       const next: Record<string, unknown> = {
         ...stored,
-        maxPriceIndexBps:
-          current.maxPriceIndexBps,
+        useMinIndex: current.useMinIndex,
+        maxMinIndexBps:
+          current.maxMinIndexBps,
+        useMedianIndex:
+          current.useMedianIndex,
+        maxMedianIndexBps:
+          current.maxMedianIndexBps,
+        useAverageIndex:
+          current.useAverageIndex,
+        maxAverageIndexBps:
+          current.maxAverageIndexBps,
+        useStockRule: current.useStockRule,
         allowNoCompetitor:
           current.allowNoCompetitor,
         allowMissingPricingData:
@@ -5177,44 +5498,33 @@ arukeresoApi.patch(
           current.maxPricingAgeHours,
       }
 
-      if (
-        maxPriceIndexBps !== undefined
-      ) {
-        next['maxPriceIndexBps'] =
-          maxPriceIndexBps
+      const updates = {
+        useMinIndex,
+        maxMinIndexBps,
+        useMedianIndex,
+        maxMedianIndexBps,
+        useAverageIndex,
+        maxAverageIndexBps,
+        useStockRule,
+        allowNoCompetitor,
+        allowMissingPricingData,
+        maxPricingAgeHours,
       }
 
-      if (
-        allowNoCompetitor !== undefined
-      ) {
-        next['allowNoCompetitor'] =
-          allowNoCompetitor
-      }
-
-      if (
-        allowMissingPricingData !==
-        undefined
-      ) {
-        next['allowMissingPricingData'] =
-          allowMissingPricingData
-      }
-
-      if (
-        maxPricingAgeHours !== undefined
-      ) {
-        next['maxPricingAgeHours'] =
-          maxPricingAgeHours
+      for (const [key, value] of Object.entries(
+        updates,
+      )) {
+        if (value !== undefined) {
+          next[key] = value
+        }
       }
 
       const materialChanged =
-        (next['maxPriceIndexBps'] as number) !==
-          current.maxPriceIndexBps ||
-        (next['allowNoCompetitor'] as boolean) !==
-          current.allowNoCompetitor ||
-        (next['allowMissingPricingData'] as boolean) !==
-          current.allowMissingPricingData ||
-        (next['maxPricingAgeHours'] as number) !==
-          current.maxPricingAgeHours
+        (Object.keys(updates) as Array<
+          keyof FeedEligibilitySettings
+        >).some(
+          (key) => next[key] !== current[key],
+        )
 
       if (!materialChanged) {
         const resolved =

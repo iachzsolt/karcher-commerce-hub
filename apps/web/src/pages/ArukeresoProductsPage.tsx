@@ -16,12 +16,20 @@ type FeedProductRow = {
     | 'FORCE_EXCLUDE'
   priceIndexBps: number | null
   priceIndexPercent: number | null
+  medianIndexBps: number | null
+  averageIndexBps: number | null
+  stockQuantity: number | null
+  stockAvailable: boolean | null
   dataStatus: string | null
   observedAt: string | null
   reasonCode: string
   reasonDetails: {
-    maxPriceIndexBps: number
+    maxMinIndexBps: number
     priceIndexBps: number | null
+    maxMedianIndexBps: number
+    medianIndexBps: number | null
+    maxAverageIndexBps: number
+    averageIndexBps: number | null
   }
 }
 
@@ -38,8 +46,15 @@ type FeedProductsResponse = {
 }
 
 const REASON_CODES = [
-  'FEED_ELIGIBLE_PRICE_INDEX',
-  'FEED_BLOCKED_PRICE_INDEX',
+  'FEED_ELIGIBLE_PRICING_RULES',
+  'FEED_BLOCKED_MIN_INDEX',
+  'FEED_BLOCKED_MEDIAN_INDEX',
+  'FEED_BLOCKED_AVERAGE_INDEX',
+  'FEED_BLOCKED_MISSING_MIN_INDEX',
+  'FEED_BLOCKED_MISSING_MEDIAN_INDEX',
+  'FEED_BLOCKED_MISSING_AVERAGE_INDEX',
+  'FEED_BLOCKED_OUT_OF_STOCK',
+  'FEED_BLOCKED_MISSING_STOCK',
   'FEED_ELIGIBLE_NO_COMPETITOR',
   'FEED_BLOCKED_NO_COMPETITOR',
   'FEED_ELIGIBLE_MANUAL_OVERRIDE',
@@ -69,20 +84,25 @@ function formatPercent(
 function formatFeedReason(
   row: FeedProductRow,
 ): string {
-  const price =
-    row.priceIndexBps === null
-      ? null
-      : row.priceIndexBps / 100
-
-  const max =
-    row.reasonDetails.maxPriceIndexBps /
-    100
-
   switch (row.reasonCode) {
-    case 'FEED_ELIGIBLE_PRICE_INDEX':
-      return `Feedben – árindex ${formatPercent(price)} ≤ ${formatPercent(max)}`
-    case 'FEED_BLOCKED_PRICE_INDEX':
-      return `Kihagyva – árindex ${formatPercent(price)} > ${formatPercent(max)}`
+    case 'FEED_ELIGIBLE_PRICING_RULES':
+      return 'Feedben – minden aktív pricing szabály teljesül'
+    case 'FEED_BLOCKED_MIN_INDEX':
+      return `Kihagyva – minimum index ${formatPercent(row.reasonDetails.priceIndexBps === null ? null : row.reasonDetails.priceIndexBps / 100)} > ${formatPercent(row.reasonDetails.maxMinIndexBps / 100)}`
+    case 'FEED_BLOCKED_MEDIAN_INDEX':
+      return `Kihagyva – medián index ${formatPercent(row.reasonDetails.medianIndexBps === null ? null : row.reasonDetails.medianIndexBps / 100)} > ${formatPercent(row.reasonDetails.maxMedianIndexBps / 100)}`
+    case 'FEED_BLOCKED_AVERAGE_INDEX':
+      return `Kihagyva – átlagindex ${formatPercent(row.reasonDetails.averageIndexBps === null ? null : row.reasonDetails.averageIndexBps / 100)} > ${formatPercent(row.reasonDetails.maxAverageIndexBps / 100)}`
+    case 'FEED_BLOCKED_MISSING_MIN_INDEX':
+      return 'Kihagyva – az aktív minimumindex-szabályhoz nincs adat'
+    case 'FEED_BLOCKED_MISSING_MEDIAN_INDEX':
+      return 'Kihagyva – az aktív mediánszabályhoz nincs adat'
+    case 'FEED_BLOCKED_MISSING_AVERAGE_INDEX':
+      return 'Kihagyva – az aktív átlagindex-szabályhoz nincs adat'
+    case 'FEED_BLOCKED_OUT_OF_STOCK':
+      return 'Kihagyva – nincs készleten'
+    case 'FEED_BLOCKED_MISSING_STOCK':
+      return 'Kihagyva – nincs készletadat'
     case 'FEED_ELIGIBLE_NO_COMPETITOR':
       return 'Feedben – nincs competitor, engedélyezve'
     case 'FEED_BLOCKED_NO_COMPETITOR':
@@ -104,6 +124,16 @@ function formatFeedReason(
     default:
       return row.reasonCode
   }
+}
+
+function formatStock(row: FeedProductRow) {
+  if (row.stockAvailable === null) {
+    return 'Nincs adat'
+  }
+
+  return row.stockAvailable
+    ? `Készleten (${row.stockQuantity})`
+    : 'Nincs készleten'
 }
 
 const PAGE_SIZE = 50
@@ -232,7 +262,11 @@ function ArukeresoProductsPage() {
   )
 
   useEffect(() => {
-    void loadProducts(page)
+    const timeoutId = window.setTimeout(() => {
+      void loadProducts(page)
+    }, 0)
+
+    return () => window.clearTimeout(timeoutId)
   }, [loadProducts, page])
 
   function applyFilters() {
@@ -487,7 +521,8 @@ function ArukeresoProductsPage() {
                 <tr>
                   <th>SKU</th>
                   <th>Terméknév</th>
-                  <th>Árindex</th>
+                  <th>Árindexek</th>
+                  <th>Készlet</th>
                   <th>Pricing státusz</th>
                   <th>Feed státusz</th>
                   <th>Szabály</th>
@@ -505,10 +540,28 @@ function ArukeresoProductsPage() {
                     </td>
 
                     <td>
-                      {formatPercent(
-                        row.priceIndexPercent,
-                      )}
+                      <div>
+                        Min: {formatPercent(row.priceIndexPercent)}
+                      </div>
+                      <div>
+                        Medián:{' '}
+                        {formatPercent(
+                          row.medianIndexBps === null
+                            ? null
+                            : row.medianIndexBps / 100,
+                        )}
+                      </div>
+                      <div>
+                        Átlag:{' '}
+                        {formatPercent(
+                          row.averageIndexBps === null
+                            ? null
+                            : row.averageIndexBps / 100,
+                        )}
+                      </div>
                     </td>
+
+                    <td>{formatStock(row)}</td>
 
                     <td>
                       {row.dataStatus ??
