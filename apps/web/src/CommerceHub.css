@@ -7590,3 +7590,287 @@ input:checked + span::after {
   justify-content: center;
   margin: 0 24px 18px;
 }
+
+/* Árukereső feed settings and pricing monitor */
+.arukereso-settings-page {
+  max-width: 1040px;
+}
+
+.arukereso-settings-rules {
+  display: grid;
+}
+
+.arukereso-settings-rule {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  align-items: center;
+  gap: 28px;
+  padding: 20px 22px;
+  border-bottom: 1px solid #ededed;
+  transition: background 140ms ease;
+}
+
+.arukereso-settings-rule:last-child {
+  border-bottom: 0;
+}
+
+.arukereso-settings-rule.is-muted {
+  background: #fafafa;
+}
+
+.arukereso-settings-rule-copy,
+.arukereso-settings-toggle-row,
+.arukereso-settings-age-row {
+  min-width: 0;
+}
+
+.arukereso-settings-rule-copy p,
+.arukereso-settings-toggle-row p,
+.arukereso-settings-age-row p {
+  margin: 7px 0 0 42px;
+  color: #777;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.arukereso-settings-rule.is-muted
+  .arukereso-settings-rule-copy,
+.arukereso-settings-rule.is-muted
+  .arukereso-settings-number {
+  opacity: 0.58;
+}
+
+.arukereso-settings-number {
+  display: grid;
+  gap: 7px;
+  color: #555;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.arukereso-settings-number > span:last-child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.arukereso-settings-number input {
+  width: 112px;
+  min-height: 38px;
+  padding: 0 11px;
+  border: 1px solid #cfcfcf;
+  border-radius: 7px;
+  background: #fff;
+  font: inherit;
+  font-size: 13px;
+}
+
+.arukereso-settings-number input:focus {
+  border-color: #111;
+  outline: 2px solid rgba(255, 238, 0, 0.65);
+  outline-offset: 1px;
+}
+
+.arukereso-settings-number input:disabled {
+  background: #f1f1f1;
+  cursor: not-allowed;
+}
+
+.arukereso-settings-number b {
+  color: #444;
+  font-size: 11px;
+}
+
+.arukereso-settings-data-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.arukereso-settings-toggle-row,
+.arukereso-settings-age-row {
+  min-height: 112px;
+  padding: 19px 22px;
+  border-bottom: 1px solid #ededed;
+}
+
+.arukereso-settings-data-grid > :nth-child(odd) {
+  border-right: 1px solid #ededed;
+}
+
+.arukereso-settings-data-grid > :nth-last-child(-n + 2) {
+  border-bottom: 0;
+}
+
+.arukereso-settings-age-row p {
+  margin-left: 0;
+}
+
+.arukereso-settings-footer {
+  position: sticky;
+  bottom: 12px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 15px 18px;
+  border: 1px solid #d7d7d7;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+}
+
+.arukereso-settings-footer p,
+.arukereso-settings-footer small {
+  display: block;
+  margin: 0;
+}
+
+.arukereso-settings-footer p {
+  margin-bottom: 3px;
+  color: #5f5a16;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.arukereso-settings-footer small {
+  color: #777;
+  font-size: 10px;
+}
+
+.arukereso-pricing-summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.arukereso-pricing-summary > div {
+  display: grid;
+  gap: 5px;
+  min-height: 78px;
+  padding: 14px 16px;
+  border: 1px solid #dedede;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.arukereso-pricing-summary span {
+  color: #777;
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.arukereso-pricing-summary strong {
+  font-size: 22px;
+}
+
+.arukereso-pricing-filters {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid #ededed;
+  background: #fafafa;
+}
+
+.arukereso-pricing-filters label {
+  display: grid;
+  gap: 5px;
+}
+
+.arukereso-pricing-filters label:first-child {
+  flex: 1 1 320px;
+  max-width: 440px;
+}
+
+.arukereso-pricing-filters label > span {
+  color: #666;
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.arukereso-pricing-filters input,
+.arukereso-pricing-filters select {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid #d2d2d2;
+  border-radius: 7px;
+  background: #fff;
+  font: inherit;
+  font-size: 11px;
+}
+
+.arukereso-pricing-table td:first-child small,
+.arukereso-pricing-table td:last-child small {
+  display: block;
+  margin-top: 4px;
+  max-width: 310px;
+  color: #777;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.arukereso-pricing-table td:nth-child(2) span {
+  display: block;
+  margin-bottom: 3px;
+  white-space: nowrap;
+}
+
+.arukereso-pricing-table .status-pill {
+  width: fit-content;
+  padding: 4px 8px;
+  background: #eaf8ef;
+  color: #155e37;
+}
+
+.arukereso-pricing-table .status-pill.is-inactive {
+  background: #f1f1f1;
+  color: #555;
+}
+
+.arukereso-manual-note {
+  color: #806d00 !important;
+  font-weight: 800;
+}
+
+@media (max-width: 900px) {
+  .arukereso-pricing-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .arukereso-settings-rule,
+  .arukereso-settings-data-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .arukereso-settings-data-grid > :nth-child(odd) {
+    border-right: 0;
+  }
+
+  .arukereso-settings-data-grid > :nth-last-child(2) {
+    border-bottom: 1px solid #ededed;
+  }
+
+  .arukereso-settings-footer,
+  .arukereso-pricing-filters {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .arukereso-settings-footer button,
+  .arukereso-pricing-filters button,
+  .arukereso-pricing-filters label,
+  .arukereso-pricing-filters label:first-child {
+    width: 100%;
+    max-width: none;
+  }
+
+  .arukereso-pricing-summary {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,440 +1,379 @@
-import { useEffect, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useState,
+} from 'react'
+import { Link } from 'react-router-dom'
 import { API_BASE_URL } from '../config/api'
 
-type FeedSettings = {
-  useMinIndex: boolean
-  maxMinIndexBps: number
-  useMedianIndex: boolean
-  maxMedianIndexBps: number
-  useAverageIndex: boolean
-  maxAverageIndexBps: number
-  useStockRule: boolean
-  allowNoCompetitor: boolean
-  allowMissingPricingData: boolean
-  maxPricingAgeHours: number
-  ruleVersion: number
+type PricingRow = {
+  productId: string
+  sku: string
+  name: string | null
+  included: boolean
+  inclusionMode:
+    | 'INHERIT'
+    | 'FORCE_INCLUDE'
+    | 'FORCE_EXCLUDE'
+  priceIndexBps: number | null
+  medianIndexBps: number | null
+  averageIndexBps: number | null
+  stockQuantity: number | null
+  stockAvailable: boolean | null
+  dataStatus: string | null
+  reasonCode: string
+  reasonDetails: {
+    maxMinIndexBps: number
+    maxMedianIndexBps: number
+    maxAverageIndexBps: number
+  }
 }
 
-type SettingsDraft = {
-  useMinIndex: boolean
-  maxMinIndexPercent: string
-  useMedianIndex: boolean
-  maxMedianIndexPercent: string
-  useAverageIndex: boolean
-  maxAverageIndexPercent: string
-  useStockRule: boolean
-  allowNoCompetitor: boolean
-  allowMissingPricingData: boolean
-  maxPricingAgeHours: string
+type PreviewResponse = {
+  summary?: Record<string, number>
+  pagination?: {
+    total: number
+  }
+  items?: PricingRow[]
+  message?: string
 }
 
-const INITIAL_DRAFT: SettingsDraft = {
-  useMinIndex: true,
-  maxMinIndexPercent: '110',
-  useMedianIndex: false,
-  maxMedianIndexPercent: '110',
-  useAverageIndex: false,
-  maxAverageIndexPercent: '110',
-  useStockRule: false,
-  allowNoCompetitor: false,
-  allowMissingPricingData: false,
-  maxPricingAgeHours: '48',
+const PAGE_SIZE = 100
+
+function formatPercent(value: number | null) {
+  if (value === null) {
+    return '–'
+  }
+
+  const percent = Math.round(value) / 100
+
+  return `${String(percent).replace('.', ',')}%`
 }
 
-function toDraft(settings: FeedSettings): SettingsDraft {
-  return {
-    useMinIndex: settings.useMinIndex,
-    maxMinIndexPercent: String(
-      settings.maxMinIndexBps / 100,
-    ),
-    useMedianIndex: settings.useMedianIndex,
-    maxMedianIndexPercent: String(
-      settings.maxMedianIndexBps / 100,
-    ),
-    useAverageIndex: settings.useAverageIndex,
-    maxAverageIndexPercent: String(
-      settings.maxAverageIndexBps / 100,
-    ),
-    useStockRule: settings.useStockRule,
-    allowNoCompetitor:
-      settings.allowNoCompetitor,
-    allowMissingPricingData:
-      settings.allowMissingPricingData,
-    maxPricingAgeHours: String(
-      settings.maxPricingAgeHours,
-    ),
+function formatStock(row: PricingRow) {
+  if (row.stockAvailable === null) {
+    return 'Nincs adat'
+  }
+
+  return row.stockAvailable
+    ? `Készleten (${row.stockQuantity})`
+    : 'Nincs készleten'
+}
+
+function formatReason(row: PricingRow) {
+  switch (row.reasonCode) {
+    case 'FEED_ELIGIBLE_PRICING_RULES':
+      return 'Minden aktív pricing szabály teljesül'
+    case 'FEED_BLOCKED_MIN_INDEX':
+      return `Minimum index ${formatPercent(row.priceIndexBps)} > ${formatPercent(row.reasonDetails.maxMinIndexBps)}`
+    case 'FEED_BLOCKED_MEDIAN_INDEX':
+      return `Medián index ${formatPercent(row.medianIndexBps)} > ${formatPercent(row.reasonDetails.maxMedianIndexBps)}`
+    case 'FEED_BLOCKED_AVERAGE_INDEX':
+      return `Átlagindex ${formatPercent(row.averageIndexBps)} > ${formatPercent(row.reasonDetails.maxAverageIndexBps)}`
+    case 'FEED_BLOCKED_MISSING_MIN_INDEX':
+      return 'Az aktív minimumindex-szabályhoz nincs adat'
+    case 'FEED_BLOCKED_MISSING_MEDIAN_INDEX':
+      return 'Az aktív mediánszabályhoz nincs adat'
+    case 'FEED_BLOCKED_MISSING_AVERAGE_INDEX':
+      return 'Az aktív átlagindex-szabályhoz nincs adat'
+    case 'FEED_BLOCKED_OUT_OF_STOCK':
+      return 'Nincs készleten'
+    case 'FEED_BLOCKED_MISSING_STOCK':
+      return 'Nincs készletadat'
+    case 'FEED_ELIGIBLE_NO_COMPETITOR':
+      return 'Nincs versenytárs, de ez engedélyezett'
+    case 'FEED_BLOCKED_NO_COMPETITOR':
+      return 'Nincs versenytárs'
+    case 'FEED_ELIGIBLE_MISSING_PRICING':
+      return 'Nincs pricing adat, de ez engedélyezett'
+    case 'FEED_BLOCKED_MISSING_PRICING':
+      return 'Nincs pricing adat'
+    case 'FEED_ELIGIBLE_STALE_PRICING':
+      return 'Elavult pricing adat, de ez engedélyezett'
+    case 'FEED_BLOCKED_STALE_PRICING':
+      return 'Elavult pricing adat'
+    case 'FEED_BLOCKED_PARTIAL_MARKET_DATA':
+      return 'Részleges piaci adat'
+    case 'FEED_ELIGIBLE_MANUAL_OVERRIDE':
+      return 'Manuális beállítással mindig feedben'
+    case 'FEED_BLOCKED_MANUAL_OVERRIDE':
+      return 'Manuális beállítással mindig kihagyva'
+    default:
+      return row.reasonCode
   }
 }
 
 function ArukeresoPricingPage() {
+  const [search, setSearch] = useState('')
+  const [appliedSearch, setAppliedSearch] =
+    useState('')
+  const [status, setStatus] = useState<
+    'all' | 'included' | 'excluded'
+  >('all')
+  const [page, setPage] = useState(0)
+  const [items, setItems] = useState<PricingRow[]>([])
+  const [summary, setSummary] = useState<
+    Record<string, number>
+  >({})
+  const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
-  const [draft, setDraft] =
-    useState<SettingsDraft>(INITIAL_DRAFT)
-  const [ruleVersion, setRuleVersion] =
-    useState<number | null>(null)
-  const [appliedDefaults, setAppliedDefaults] =
-    useState<string[]>([])
-  const [message, setMessage] = useState<
-    string | null
-  >(null)
-  const [validationError, setValidationError] =
-    useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
-  function updateDraft<K extends keyof SettingsDraft>(
-    key: K,
-    value: SettingsDraft[K],
-  ) {
-    setDraft((current) => ({
-      ...current,
-      [key]: value,
-    }))
-  }
-
-  async function loadSettings() {
+  const loadPreview = useCallback(async () => {
     setLoading(true)
-    setMessage(null)
+    setError(null)
 
     try {
-      const response = await fetch(
-        `${API_BASE_URL}/arukereso/feed/settings`,
-      )
-      const result = (await response.json()) as {
-        settings?: FeedSettings
-        appliedDefaults?: string[]
-        message?: string
+      const params = new URLSearchParams({
+        limit: String(PAGE_SIZE),
+        offset: String(page * PAGE_SIZE),
+      })
+
+      if (appliedSearch) {
+        params.set('search', appliedSearch)
       }
 
-      if (!response.ok || !result.settings) {
-        throw new Error(
-          result.message ??
-            'A beállítások betöltése sikertelen.',
+      if (status !== 'all') {
+        params.set(
+          'included',
+          status === 'included' ? 'true' : 'false',
         )
       }
 
-      setDraft(toDraft(result.settings))
-      setRuleVersion(result.settings.ruleVersion)
-      setAppliedDefaults(result.appliedDefaults ?? [])
-    } catch (error) {
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : 'A beállítások betöltése sikertelen.',
+      const response = await fetch(
+        `${API_BASE_URL}/arukereso/feed/preview?${params.toString()}`,
       )
+      const result =
+        (await response.json()) as PreviewResponse
+
+      if (!response.ok) {
+        throw new Error(
+          result.message ??
+            'Az árpozíciós adatok betöltése sikertelen.',
+        )
+      }
+
+      setItems(result.items ?? [])
+      setSummary(result.summary ?? {})
+      setTotal(result.pagination?.total ?? 0)
+    } catch (loadError) {
+      setError(
+        loadError instanceof Error
+          ? loadError.message
+          : 'Az árpozíciós adatok betöltése sikertelen.',
+      )
+      setItems([])
+      setTotal(0)
     } finally {
       setLoading(false)
     }
-  }
+  }, [appliedSearch, page, status])
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
-      void loadSettings()
+      void loadPreview()
     }, 0)
 
     return () => window.clearTimeout(timeoutId)
-  }, [])
+  }, [loadPreview])
 
-  async function saveSettings() {
-    setValidationError(null)
-    setMessage(null)
-
-    const thresholds = [
-      ['minimum', draft.maxMinIndexPercent],
-      ['medián', draft.maxMedianIndexPercent],
-      ['átlag', draft.maxAverageIndexPercent],
-    ] as const
-
-    for (const [label, rawValue] of thresholds) {
-      const value = Number(rawValue)
-
-      if (
-        !rawValue.trim() ||
-        !Number.isInteger(value) ||
-        value <= 0
-      ) {
-        setValidationError(
-          `A maximum ${label} index pozitív egész százalék kell legyen.`,
-        )
-        return
-      }
-    }
-
-    const hours = Number(draft.maxPricingAgeHours)
-
-    if (
-      !draft.maxPricingAgeHours.trim() ||
-      !Number.isInteger(hours) ||
-      hours <= 0 ||
-      hours > 8760
-    ) {
-      setValidationError(
-        'A maximális életkor 1 és 8760 közötti egész óraszám kell legyen.',
-      )
-      return
-    }
-
-    setSaving(true)
-
-    try {
-      const response = await fetch(
-        `${API_BASE_URL}/arukereso/feed/settings`,
-        {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            useMinIndex: draft.useMinIndex,
-            maxMinIndexBps:
-              Number(draft.maxMinIndexPercent) * 100,
-            useMedianIndex: draft.useMedianIndex,
-            maxMedianIndexBps:
-              Number(draft.maxMedianIndexPercent) * 100,
-            useAverageIndex: draft.useAverageIndex,
-            maxAverageIndexBps:
-              Number(draft.maxAverageIndexPercent) * 100,
-            useStockRule: draft.useStockRule,
-            allowNoCompetitor:
-              draft.allowNoCompetitor,
-            allowMissingPricingData:
-              draft.allowMissingPricingData,
-            maxPricingAgeHours: hours,
-          }),
-        },
-      )
-      const result = (await response.json()) as {
-        settings?: FeedSettings
-        appliedDefaults?: string[]
-        updated?: boolean
-        message?: string
-      }
-
-      if (!response.ok || !result.settings) {
-        throw new Error(
-          result.message ??
-            'A beállítások mentése sikertelen.',
-        )
-      }
-
-      setDraft(toDraft(result.settings))
-      setRuleVersion(result.settings.ruleVersion)
-      setAppliedDefaults(result.appliedDefaults ?? [])
-      setMessage(
-        result.updated === false
-          ? 'Nincs változás, a beállítások megegyeznek.'
-          : `Beállítások elmentve (szabályverzió: ${result.settings.ruleVersion}).`,
-      )
-    } catch (error) {
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : 'A beállítások mentése sikertelen.',
-      )
-    } finally {
-      setSaving(false)
-    }
+  function applyFilters() {
+    setAppliedSearch(search.trim())
+    setPage(0)
   }
 
-  const pricingRules = [
-    {
-      enabledKey: 'useMinIndex' as const,
-      thresholdKey: 'maxMinIndexPercent' as const,
-      label: 'Minimum index figyelembevétele',
-      thresholdLabel: 'Legmagasabb megengedett minimum index',
-    },
-    {
-      enabledKey: 'useMedianIndex' as const,
-      thresholdKey: 'maxMedianIndexPercent' as const,
-      label: 'Medián index figyelembevétele',
-      thresholdLabel: 'Legmagasabb megengedett medián index',
-    },
-    {
-      enabledKey: 'useAverageIndex' as const,
-      thresholdKey: 'maxAverageIndexPercent' as const,
-      label: 'Átlagindex figyelembevétele',
-      thresholdLabel: 'Legmagasabb megengedett átlagindex',
-    },
-  ]
+  const pageCount = Math.max(
+    1,
+    Math.ceil(total / PAGE_SIZE),
+  )
 
   return (
-    <section className="campaigns-page">
+    <section className="campaigns-page arukereso-pricing-page">
       <div className="campaigns-page-header">
         <div>
           <p className="section-label">ÁRUKERESŐ FEED</p>
-          <h2>Árukereső feed – Pricing szabályok</h2>
+          <h2>Árpozíció</h2>
           <p className="campaigns-page-description">
-            Az összes bekapcsolt indexszabálynak teljesülnie
-            kell. A készletszabály külön kapcsolható.
+            A termékek aktuális piaci helyzete és
+            feed-jogosultsága.
           </p>
+        </div>
+        <Link
+          className="secondary-button"
+          to="/arukereso/products"
+        >
+          Felülírások kezelése
+        </Link>
+      </div>
+
+      <div className="arukereso-pricing-summary">
+        <div>
+          <span>Feedben</span>
+          <strong>{summary.included ?? 0}</strong>
+        </div>
+        <div>
+          <span>Kihagyva</span>
+          <strong>{summary.excluded ?? 0}</strong>
+        </div>
+        <div>
+          <span>Index miatt blokkolva</span>
+          <strong>
+            {(summary.blockedByMinIndex ?? 0) +
+              (summary.blockedByMedianIndex ?? 0) +
+              (summary.blockedByAverageIndex ?? 0)}
+          </strong>
+        </div>
+        <div>
+          <span>Készlet miatt blokkolva</span>
+          <strong>{summary.blockedByStock ?? 0}</strong>
+        </div>
+        <div>
+          <span>Hiányzó aktív index</span>
+          <strong>{summary.missingEnabledMetric ?? 0}</strong>
         </div>
       </div>
 
-      {loading ? (
-        <div className="campaign-message">
-          Beállítások betöltése…
+      <div className="campaign-offers-panel">
+        <div className="arukereso-pricing-filters">
+          <label>
+            <span>Keresés</span>
+            <input
+              type="search"
+              value={search}
+              placeholder="SKU vagy terméknév"
+              onChange={(event) =>
+                setSearch(event.target.value)
+              }
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  applyFilters()
+                }
+              }}
+            />
+          </label>
+          <label>
+            <span>Feed státusz</span>
+            <select
+              value={status}
+              onChange={(event) => {
+                setStatus(
+                  event.target.value as
+                    | 'all'
+                    | 'included'
+                    | 'excluded',
+                )
+                setPage(0)
+              }}
+            >
+              <option value="all">Mind</option>
+              <option value="included">Feedben</option>
+              <option value="excluded">Kihagyva</option>
+            </select>
+          </label>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={loading}
+            onClick={applyFilters}
+          >
+            Szűrés
+          </button>
         </div>
-      ) : (
-        <div className="campaign-offers-panel">
-          <div className="campaign-offers-heading">
-            <div>
-              <p className="section-label">GLOBÁLIS SZABÁLYOK</p>
-              <h4>
-                Pricing szabályok
-                {ruleVersion !== null && ` (v${ruleVersion})`}
-              </h4>
-            </div>
+
+        {error ? (
+          <div className="campaign-message campaign-message-error">
+            {error}
           </div>
-
+        ) : loading && items.length === 0 ? (
+          <div className="campaign-message">
+            Árpozíciós adatok betöltése…
+          </div>
+        ) : items.length === 0 ? (
+          <div className="empty-state">
+            <h3>Nincs találat</h3>
+            <p>A megadott szűrőknek nincs megfelelő termék.</p>
+          </div>
+        ) : (
           <div className="campaign-offers-table-wrapper">
-            <table className="campaign-offers-table">
+            <table className="campaign-offers-table arukereso-pricing-table">
+              <thead>
+                <tr>
+                  <th>Termék</th>
+                  <th>Árindexek</th>
+                  <th>Pricing státusz</th>
+                  <th>Készlet</th>
+                  <th>Feed-döntés</th>
+                </tr>
+              </thead>
               <tbody>
-                {pricingRules.map((rule) => {
-                  const enabled = draft[rule.enabledKey]
-
-                  return (
-                    <tr key={rule.enabledKey}>
-                      <td>
-                        <label>
-                          <input
-                            type="checkbox"
-                            checked={enabled}
-                            disabled={saving}
-                            onChange={(event) =>
-                              updateDraft(
-                                rule.enabledKey,
-                                event.target.checked,
-                              )
-                            }
-                          />{' '}
-                          {rule.label}
-                        </label>
-                      </td>
-                      <td style={{ opacity: enabled ? 1 : 0.5 }}>
-                        {rule.thresholdLabel}:{' '}
-                        <input
-                          type="number"
-                          min={1}
-                          step={1}
-                          value={draft[rule.thresholdKey]}
-                          disabled={saving || !enabled}
-                          onChange={(event) =>
-                            updateDraft(
-                              rule.thresholdKey,
-                              event.target.value,
-                            )
-                          }
-                        />{' '}
-                        %
-                      </td>
-                    </tr>
-                  )
-                })}
-
-                <tr>
-                  <td>Készlet figyelembevétele</td>
-                  <td>
-                    <input
-                      type="checkbox"
-                      checked={draft.useStockRule}
-                      disabled={saving}
-                      onChange={(event) =>
-                        updateDraft(
-                          'useStockRule',
-                          event.target.checked,
-                        )
-                      }
-                    />
-                  </td>
-                </tr>
-                <tr>
-                  <td>Versenytárs nélküli termékek engedélyezése</td>
-                  <td>
-                    <input
-                      type="checkbox"
-                      checked={draft.allowNoCompetitor}
-                      disabled={saving}
-                      onChange={(event) =>
-                        updateDraft(
-                          'allowNoCompetitor',
-                          event.target.checked,
-                        )
-                      }
-                    />
-                  </td>
-                </tr>
-                <tr>
-                  <td>Pricing adat nélküli termékek engedélyezése</td>
-                  <td>
-                    <input
-                      type="checkbox"
-                      checked={draft.allowMissingPricingData}
-                      disabled={saving}
-                      onChange={(event) =>
-                        updateDraft(
-                          'allowMissingPricingData',
-                          event.target.checked,
-                        )
-                      }
-                    />
-                  </td>
-                </tr>
-                <tr>
-                  <td>Pricing adat maximális életkora</td>
-                  <td>
-                    <input
-                      type="number"
-                      min={1}
-                      max={8760}
-                      step={1}
-                      value={draft.maxPricingAgeHours}
-                      disabled={saving}
-                      onChange={(event) =>
-                        updateDraft(
-                          'maxPricingAgeHours',
-                          event.target.value,
-                        )
-                      }
-                    />{' '}
-                    óra
-                  </td>
-                </tr>
+                {items.map((row) => (
+                  <tr key={row.productId}>
+                    <td>
+                      <strong>{row.sku}</strong>
+                      <small>{row.name ?? '–'}</small>
+                    </td>
+                    <td>
+                      <span>Min {formatPercent(row.priceIndexBps)}</span>
+                      <span>
+                        Medián {formatPercent(row.medianIndexBps)}
+                      </span>
+                      <span>
+                        Átlag {formatPercent(row.averageIndexBps)}
+                      </span>
+                    </td>
+                    <td>{row.dataStatus ?? '–'}</td>
+                    <td>{formatStock(row)}</td>
+                    <td>
+                      <span
+                        className={`status-pill${
+                          row.included ? '' : ' is-inactive'
+                        }`}
+                      >
+                        {row.included ? 'Feedben' : 'Kihagyva'}
+                      </span>
+                      <small>{formatReason(row)}</small>
+                      {row.inclusionMode !== 'INHERIT' && (
+                        <small className="arukereso-manual-note">
+                          Manuális felülírás
+                        </small>
+                      )}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
+        )}
 
-          {appliedDefaults.length > 0 && (
-            <div className="campaign-preparation-message">
-              Alapértelmezett vagy kompatibilitási értékek:{' '}
-              {appliedDefaults.join(', ')}.
-            </div>
-          )}
-          {validationError && (
-            <div className="campaign-submit-warning">
-              {validationError}
-            </div>
-          )}
-          <div className="campaign-submit-bar">
-            <span>
-              A termékszintű felülírások változatlanok maradnak.
-            </span>
-            <div className="campaign-submit-actions">
-              <button
-                type="button"
-                className="campaign-primary-button"
-                disabled={saving}
-                onClick={() => void saveSettings()}
-              >
-                {saving ? 'Mentés…' : 'Beállítások mentése'}
-              </button>
-            </div>
+        <div className="campaign-submit-bar">
+          <span>
+            {total === 0
+              ? '0 találat'
+              : `${page * PAGE_SIZE + 1}–${Math.min(
+                  (page + 1) * PAGE_SIZE,
+                  total,
+                )} / ${total}`}
+          </span>
+          <div className="campaign-submit-actions">
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={loading || page === 0}
+              onClick={() => setPage(page - 1)}
+            >
+              Előző
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={loading || page + 1 >= pageCount}
+              onClick={() => setPage(page + 1)}
+            >
+              Következő
+            </button>
           </div>
-          {message && (
-            <div className="campaign-preparation-message">
-              {message}
-            </div>
-          )}
         </div>
-      )}
+      </div>
     </section>
   )
 }

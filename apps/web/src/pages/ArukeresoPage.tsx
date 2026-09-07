@@ -8,6 +8,7 @@ import {
 import ArukeresoCatalogPage from './ArukeresoCatalogPage'
 import ArukeresoPricingPage from './ArukeresoPricingPage'
 import ArukeresoProductsPage from './ArukeresoProductsPage'
+import ArukeresoSettingsPage from './ArukeresoSettingsPage'
 
 import '../CommerceHub.css'
 
@@ -122,11 +123,7 @@ function ArukeresoPage() {
 
           <Route
             path="settings"
-            element={
-              <ArukeresoPlaceholder
-                title="Beállítások"
-              />
-            }
+            element={<ArukeresoSettingsPage />}
           />
         </Routes>
       </main>
