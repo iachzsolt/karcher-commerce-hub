@@ -10,6 +10,7 @@ import {
   productIdentifiers,
   products,
 } from '@karcher-commerce-hub/database'
+import { getCommerceHubUser } from './access-auth.js'
 import {
   createHash,
   randomUUID,
@@ -4544,6 +4545,21 @@ arukeresoApi.get(
             )
           : 0
 
+      const searchFilter =
+        context.req
+          .query('search')
+          ?.trim()
+          .toLowerCase() || null
+
+      const inclusionModeFilter =
+        context.req.query('inclusionMode')
+
+      const includedFilter =
+        context.req.query('included')
+
+      const reasonCodeFilter =
+        context.req.query('reasonCode')
+
       const database =
         requireDatabase()
 
@@ -4812,6 +4828,12 @@ arukeresoApi.get(
             priceIndexBps:
               result.reasonDetails
                 .priceIndexBps,
+            priceIndexPercent:
+              result.reasonDetails
+                .priceIndexBps === null
+                ? null
+                : result.reasonDetails
+                    .priceIndexBps / 100,
             dataStatus:
               result.reasonDetails
                 .dataStatus,
@@ -4826,7 +4848,55 @@ arukeresoApi.get(
         },
       )
 
-      items.sort((left, right) =>
+      const filteredItems = items.filter(
+        (item) => {
+          if (
+            searchFilter &&
+            !item.sku
+              .toLowerCase()
+              .includes(searchFilter) &&
+            !(item.name ?? '')
+              .toLowerCase()
+              .includes(searchFilter)
+          ) {
+            return false
+          }
+
+          if (
+            inclusionModeFilter &&
+            item.inclusionMode !==
+              inclusionModeFilter
+          ) {
+            return false
+          }
+
+          if (
+            includedFilter === 'true' &&
+            !item.included
+          ) {
+            return false
+          }
+
+          if (
+            includedFilter === 'false' &&
+            item.included
+          ) {
+            return false
+          }
+
+          if (
+            reasonCodeFilter &&
+            item.reasonCode !==
+              reasonCodeFilter
+          ) {
+            return false
+          }
+
+          return true
+        },
+      )
+
+      filteredItems.sort((left, right) =>
         left.sku.localeCompare(
           right.sku,
         ),
@@ -4848,9 +4918,9 @@ arukeresoApi.get(
         pagination: {
           limit,
           offset,
-          total: items.length,
+          total: filteredItems.length,
         },
-        items: items.slice(
+        items: filteredItems.slice(
           offset,
           offset + limit,
         ),
@@ -4868,6 +4938,622 @@ arukeresoApi.get(
             error instanceof Error
               ? error.message
               : 'Feed preview failed.',
+        },
+        500,
+      )
+    }
+  },
+)
+
+const FEED_INCLUSION_MODES = [
+  'INHERIT',
+  'FORCE_INCLUDE',
+  'FORCE_EXCLUDE',
+] as const
+
+type FeedInclusionMode =
+  (typeof FEED_INCLUSION_MODES)[number]
+
+function isUuid(value: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    value,
+  )
+}
+
+async function resolveFeedChannel() {
+  const database = requireDatabase()
+
+  const [channel] = await database
+    .select()
+    .from(feedChannels)
+    .where(
+      eq(
+        feedChannels.code,
+        FEED_CHANNEL_CODE,
+      ),
+    )
+    .limit(1)
+
+  return { database, channel: channel ?? null }
+}
+
+function readStoredFeedSettings(
+  settingsJson: string | null,
+): Record<string, unknown> {
+  if (settingsJson === null) {
+    return {}
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(
+      settingsJson,
+    )
+
+    return parsed !== null &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+arukeresoApi.get(
+  '/feed/settings',
+  async (context) => {
+    try {
+      const { channel } =
+        await resolveFeedChannel()
+
+      if (!channel) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Az Árukereső feed csatorna nincs konfigurálva (ARUKERESO_HU).',
+          },
+          409,
+        )
+      }
+
+      const { settings, appliedDefaults } =
+        resolveFeedEligibilitySettings(
+          channel.settingsJson,
+        )
+
+      return context.json({
+        status: 'ok',
+        channel: FEED_CHANNEL_CODE,
+        settings,
+        appliedDefaults,
+      })
+    } catch (error) {
+      console.error(
+        'Feed settings loading failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Feed settings failed.',
+        },
+        500,
+      )
+    }
+  },
+)
+
+arukeresoApi.patch(
+  '/feed/settings',
+  async (context) => {
+    try {
+      let body: unknown
+
+      try {
+        body = await context.req.json()
+      } catch {
+        body = null
+      }
+
+      if (
+        body === null ||
+        typeof body !== 'object' ||
+        Array.isArray(body)
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message: 'Érvénytelen kérés test.',
+          },
+          400,
+        )
+      }
+
+      const {
+        maxPriceIndexBps,
+        allowNoCompetitor,
+        allowMissingPricingData,
+        maxPricingAgeHours,
+      } = body as Record<string, unknown>
+
+      if (
+        maxPriceIndexBps !== undefined &&
+        (typeof maxPriceIndexBps !==
+          'number' ||
+          !Number.isInteger(
+            maxPriceIndexBps,
+          ) ||
+          maxPriceIndexBps <= 0)
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'maxPriceIndexBps pozitív egész kell legyen (Bps).',
+          },
+          400,
+        )
+      }
+
+      for (const [key, value] of [
+        ['allowNoCompetitor', allowNoCompetitor],
+        [
+          'allowMissingPricingData',
+          allowMissingPricingData,
+        ],
+      ] as const) {
+        if (
+          value !== undefined &&
+          typeof value !== 'boolean'
+        ) {
+          return context.json(
+            {
+              status: 'error',
+              message: `${key} csak true/false lehet.`,
+            },
+            400,
+          )
+        }
+      }
+
+      if (
+        maxPricingAgeHours !== undefined &&
+        (typeof maxPricingAgeHours !==
+          'number' ||
+          !Number.isFinite(
+            maxPricingAgeHours,
+          ) ||
+          maxPricingAgeHours <= 0 ||
+          maxPricingAgeHours > 8760)
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'maxPricingAgeHours 0 és 8760 közötti szám kell legyen.',
+          },
+          400,
+        )
+      }
+
+      const { database, channel } =
+        await resolveFeedChannel()
+
+      if (!channel) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Az Árukereső feed csatorna nincs konfigurálva (ARUKERESO_HU).',
+          },
+          409,
+        )
+      }
+
+      const stored =
+        readStoredFeedSettings(
+          channel.settingsJson,
+        )
+
+      const current =
+        resolveFeedEligibilitySettings(
+          channel.settingsJson,
+        ).settings
+
+      const next: Record<string, unknown> = {
+        ...stored,
+        maxPriceIndexBps:
+          current.maxPriceIndexBps,
+        allowNoCompetitor:
+          current.allowNoCompetitor,
+        allowMissingPricingData:
+          current.allowMissingPricingData,
+        maxPricingAgeHours:
+          current.maxPricingAgeHours,
+      }
+
+      if (
+        maxPriceIndexBps !== undefined
+      ) {
+        next['maxPriceIndexBps'] =
+          maxPriceIndexBps
+      }
+
+      if (
+        allowNoCompetitor !== undefined
+      ) {
+        next['allowNoCompetitor'] =
+          allowNoCompetitor
+      }
+
+      if (
+        allowMissingPricingData !==
+        undefined
+      ) {
+        next['allowMissingPricingData'] =
+          allowMissingPricingData
+      }
+
+      if (
+        maxPricingAgeHours !== undefined
+      ) {
+        next['maxPricingAgeHours'] =
+          maxPricingAgeHours
+      }
+
+      const materialChanged =
+        (next['maxPriceIndexBps'] as number) !==
+          current.maxPriceIndexBps ||
+        (next['allowNoCompetitor'] as boolean) !==
+          current.allowNoCompetitor ||
+        (next['allowMissingPricingData'] as boolean) !==
+          current.allowMissingPricingData ||
+        (next['maxPricingAgeHours'] as number) !==
+          current.maxPricingAgeHours
+
+      if (!materialChanged) {
+        const resolved =
+          resolveFeedEligibilitySettings(
+            channel.settingsJson,
+          )
+
+        return context.json({
+          status: 'ok',
+          channel: FEED_CHANNEL_CODE,
+          settings: resolved.settings,
+          appliedDefaults:
+            resolved.appliedDefaults,
+          updated: false,
+        })
+      }
+
+      const storedRuleVersion =
+        stored['ruleVersion']
+
+      next['ruleVersion'] =
+        typeof storedRuleVersion ===
+          'number' &&
+        Number.isInteger(
+          storedRuleVersion,
+        ) &&
+        storedRuleVersion > 0
+          ? storedRuleVersion + 1
+          : current.ruleVersion + 1
+
+      await database
+        .update(feedChannels)
+        .set({
+          settingsJson: JSON.stringify(
+            next,
+          ),
+          updatedAt: new Date(),
+        })
+        .where(
+          eq(feedChannels.id, channel.id),
+        )
+
+      const resolved =
+        resolveFeedEligibilitySettings(
+          JSON.stringify(next),
+        )
+
+      return context.json({
+        status: 'ok',
+        channel: FEED_CHANNEL_CODE,
+        settings: resolved.settings,
+        appliedDefaults:
+          resolved.appliedDefaults,
+        updated: true,
+      })
+    } catch (error) {
+      console.error(
+        'Feed settings update failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Feed settings failed.',
+        },
+        500,
+      )
+    }
+  },
+)
+
+arukeresoApi.patch(
+  '/feed/products/:productId/override',
+  async (context) => {
+    try {
+      const productId = context.req.param(
+        'productId',
+      )
+
+      if (!isUuid(productId)) {
+        return context.json(
+          {
+            status: 'error',
+            message: 'Érvénytelen productId.',
+          },
+          400,
+        )
+      }
+
+      let body: unknown
+
+      try {
+        body = await context.req.json()
+      } catch {
+        body = null
+      }
+
+      const { inclusionMode, reason } =
+        (body ?? {}) as {
+          inclusionMode?: unknown
+          reason?: unknown
+        }
+
+      if (
+        inclusionMode !== 'INHERIT' &&
+        inclusionMode !== 'FORCE_INCLUDE' &&
+        inclusionMode !== 'FORCE_EXCLUDE'
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'inclusionMode csak INHERIT, FORCE_INCLUDE vagy FORCE_EXCLUDE lehet.',
+          },
+          400,
+        )
+      }
+
+      if (
+        reason !== undefined &&
+        reason !== null &&
+        typeof reason !== 'string'
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'reason csak szöveg lehet.',
+          },
+          400,
+        )
+      }
+
+      const { database, channel } =
+        await resolveFeedChannel()
+
+      if (!channel) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Az Árukereső feed csatorna nincs konfigurálva (ARUKERESO_HU).',
+          },
+          409,
+        )
+      }
+
+      const [product] = await database
+        .select({ id: products.id })
+        .from(products)
+        .where(eq(products.id, productId))
+        .limit(1)
+
+      if (!product) {
+        return context.json(
+          {
+            status: 'error',
+            message: 'Termék nem található.',
+          },
+          404,
+        )
+      }
+
+      const updatedBy =
+        getCommerceHubUser(context)?.email ??
+        'COMMERCE_HUB_UI'
+
+      if (
+        (inclusionMode as string) ===
+        'INHERIT'
+      ) {
+        const removed = await database
+          .delete(feedProductOverrides)
+          .where(
+            and(
+              eq(
+                feedProductOverrides.channelId,
+                channel.id,
+              ),
+              eq(
+                feedProductOverrides.productId,
+                productId,
+              ),
+            ),
+          )
+          .returning({
+            id: feedProductOverrides.id,
+          })
+
+        return context.json({
+          status: 'ok',
+          reset: true,
+          existed: removed.length > 0,
+        })
+      }
+
+      const normalizedReason =
+        typeof reason === 'string' &&
+        reason.trim()
+          ? reason.trim()
+          : null
+
+      const [row] = await database
+        .insert(feedProductOverrides)
+        .values({
+          channelId: channel.id,
+          productId,
+          inclusionMode:
+            inclusionMode as FeedInclusionMode,
+          reason: normalizedReason,
+          updatedBy,
+        })
+        .onConflictDoUpdate({
+          target: [
+            feedProductOverrides.channelId,
+            feedProductOverrides.productId,
+          ],
+          set: {
+            inclusionMode:
+              inclusionMode as FeedInclusionMode,
+            reason: normalizedReason,
+            updatedBy,
+            updatedAt: new Date(),
+          },
+        })
+        .returning()
+
+      return context.json({
+        status: 'ok',
+        data: row ?? null,
+      })
+    } catch (error) {
+      console.error(
+        'Feed override update failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Feed override failed.',
+        },
+        500,
+      )
+    }
+  },
+)
+
+arukeresoApi.delete(
+  '/feed/products/:productId/override',
+  async (context) => {
+    try {
+      const productId = context.req.param(
+        'productId',
+      )
+
+      if (!isUuid(productId)) {
+        return context.json(
+          {
+            status: 'error',
+            message: 'Érvénytelen productId.',
+          },
+          400,
+        )
+      }
+
+      const { database, channel } =
+        await resolveFeedChannel()
+
+      if (!channel) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Az Árukereső feed csatorna nincs konfigurálva (ARUKERESO_HU).',
+          },
+          409,
+        )
+      }
+
+      const [product] = await database
+        .select({ id: products.id })
+        .from(products)
+        .where(eq(products.id, productId))
+        .limit(1)
+
+      if (!product) {
+        return context.json(
+          {
+            status: 'error',
+            message: 'Termék nem található.',
+          },
+          404,
+        )
+      }
+
+      const removed = await database
+        .delete(feedProductOverrides)
+        .where(
+          and(
+            eq(
+              feedProductOverrides.channelId,
+              channel.id,
+            ),
+            eq(
+              feedProductOverrides.productId,
+              productId,
+            ),
+          ),
+        )
+        .returning({
+          id: feedProductOverrides.id,
+        })
+
+      return context.json({
+        status: 'ok',
+        reset: true,
+        existed: removed.length > 0,
+      })
+    } catch (error) {
+      console.error(
+        'Feed override reset failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Feed override failed.',
         },
         500,
       )

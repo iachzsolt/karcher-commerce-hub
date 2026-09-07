@@ -6,6 +6,8 @@ import {
   Routes,
 } from 'react-router-dom'
 import ArukeresoCatalogPage from './ArukeresoCatalogPage'
+import ArukeresoPricingPage from './ArukeresoPricingPage'
+import ArukeresoProductsPage from './ArukeresoProductsPage'
 
 import '../CommerceHub.css'
 
@@ -107,18 +109,14 @@ function ArukeresoPage() {
           <Route
             path="products"
             element={
-              <ArukeresoPlaceholder
-                title="Termékek"
-              />
+              <ArukeresoProductsPage />
             }
           />
 
           <Route
             path="pricing"
             element={
-              <ArukeresoPlaceholder
-                title="Árpozíció"
-              />
+              <ArukeresoPricingPage />
             }
           />
 
