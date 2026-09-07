@@ -3472,6 +3472,9 @@ arukeresoApi.post(
         staleRemoved:
           snapshot.staleRemoved,
       },
+
+      unmatchedSample:
+        normalized.unmatchedSample,
     })
   },
 )
