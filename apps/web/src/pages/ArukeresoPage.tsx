@@ -6,7 +6,6 @@ import {
   Routes,
 } from 'react-router-dom'
 import ArukeresoCatalogPage from './ArukeresoCatalogPage'
-import ArukeresoPricingPage from './ArukeresoPricingPage'
 import ArukeresoProductsPage from './ArukeresoProductsPage'
 import ArukeresoSettingsPage from './ArukeresoSettingsPage'
 
@@ -70,10 +69,6 @@ function ArukeresoPage() {
               Termékek
             </NavLink>
 
-            <NavLink to="/arukereso/pricing">
-              Árpozíció
-            </NavLink>
-
             <NavLink to="/arukereso/settings">
               Beállítások
             </NavLink>
@@ -111,13 +106,6 @@ function ArukeresoPage() {
             path="products"
             element={
               <ArukeresoProductsPage />
-            }
-          />
-
-          <Route
-            path="pricing"
-            element={
-              <ArukeresoPricingPage />
             }
           />
 

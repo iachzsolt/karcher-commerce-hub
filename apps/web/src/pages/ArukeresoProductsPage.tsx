@@ -5,281 +5,285 @@ import {
 } from 'react'
 import { API_BASE_URL } from '../config/api'
 
+type InclusionMode =
+  | 'INHERIT'
+  | 'FORCE_INCLUDE'
+  | 'FORCE_EXCLUDE'
+
+type PriceKitStatus =
+  | 'HAS_DATA'
+  | 'NO_DATA'
+  | 'STALE_DATA'
+  | 'NO_COMPETITOR'
+  | 'PARTIAL_DATA'
+
+type StockStatus =
+  | 'IN_STOCK'
+  | 'OUT_OF_STOCK'
+  | 'MISSING_STOCK'
+
 type FeedProductRow = {
   productId: string
   sku: string
   name: string | null
-  included: boolean
-  inclusionMode:
-    | 'INHERIT'
-    | 'FORCE_INCLUDE'
-    | 'FORCE_EXCLUDE'
+  hasPriceKitData: boolean
+  priceKitStatus: PriceKitStatus
   priceIndexBps: number | null
-  priceIndexPercent: number | null
   medianIndexBps: number | null
   averageIndexBps: number | null
   stockQuantity: number | null
   stockAvailable: boolean | null
-  dataStatus: string | null
-  observedAt: string | null
+  stockStatus: StockStatus
+  included: boolean
+  inclusionMode: InclusionMode
   reasonCode: string
   reasonDetails: {
     maxMinIndexBps: number
-    priceIndexBps: number | null
     maxMedianIndexBps: number
-    medianIndexBps: number | null
     maxAverageIndexBps: number
-    averageIndexBps: number | null
   }
 }
 
 type FeedProductsResponse = {
-  status: string
   summary?: Record<string, number>
   pagination?: {
-    limit: number
-    offset: number
     total: number
   }
   items?: FeedProductRow[]
   message?: string
 }
 
-const REASON_CODES = [
-  'FEED_ELIGIBLE_PRICING_RULES',
-  'FEED_BLOCKED_MIN_INDEX',
-  'FEED_BLOCKED_MEDIAN_INDEX',
-  'FEED_BLOCKED_AVERAGE_INDEX',
-  'FEED_BLOCKED_MISSING_MIN_INDEX',
-  'FEED_BLOCKED_MISSING_MEDIAN_INDEX',
-  'FEED_BLOCKED_MISSING_AVERAGE_INDEX',
-  'FEED_BLOCKED_OUT_OF_STOCK',
-  'FEED_BLOCKED_MISSING_STOCK',
-  'FEED_ELIGIBLE_NO_COMPETITOR',
-  'FEED_BLOCKED_NO_COMPETITOR',
-  'FEED_ELIGIBLE_MANUAL_OVERRIDE',
-  'FEED_BLOCKED_MANUAL_OVERRIDE',
-  'FEED_ELIGIBLE_MISSING_PRICING',
-  'FEED_BLOCKED_MISSING_PRICING',
-  'FEED_ELIGIBLE_STALE_PRICING',
-  'FEED_BLOCKED_STALE_PRICING',
-  'FEED_BLOCKED_PARTIAL_MARKET_DATA',
-]
-
-function formatPercent(
-  value: number | null,
-) {
-  if (value === null) {
-    return '–'
-  }
-
-  const rounded =
-    Math.round(value * 10) / 10
-
-  return Number.isInteger(rounded)
-    ? `${rounded}%`
-    : `${String(rounded).replace('.', ',')}%`
+type ProductFilters = {
+  search: string
+  priceKitStatus:
+    | 'ALL'
+    | 'HAS_DATA'
+    | 'NO_DATA'
+    | 'STALE_DATA'
+    | 'NO_COMPETITOR'
+  feedStatus: 'ALL' | 'INCLUDED' | 'EXCLUDED'
+  inclusionMode: 'ALL' | InclusionMode
+  stockStatus: 'ALL' | StockStatus
 }
 
-function formatFeedReason(
-  row: FeedProductRow,
-): string {
-  switch (row.reasonCode) {
-    case 'FEED_ELIGIBLE_PRICING_RULES':
-      return 'Feedben – minden aktív pricing szabály teljesül'
-    case 'FEED_BLOCKED_MIN_INDEX':
-      return `Kihagyva – minimum index ${formatPercent(row.reasonDetails.priceIndexBps === null ? null : row.reasonDetails.priceIndexBps / 100)} > ${formatPercent(row.reasonDetails.maxMinIndexBps / 100)}`
-    case 'FEED_BLOCKED_MEDIAN_INDEX':
-      return `Kihagyva – medián index ${formatPercent(row.reasonDetails.medianIndexBps === null ? null : row.reasonDetails.medianIndexBps / 100)} > ${formatPercent(row.reasonDetails.maxMedianIndexBps / 100)}`
-    case 'FEED_BLOCKED_AVERAGE_INDEX':
-      return `Kihagyva – átlagindex ${formatPercent(row.reasonDetails.averageIndexBps === null ? null : row.reasonDetails.averageIndexBps / 100)} > ${formatPercent(row.reasonDetails.maxAverageIndexBps / 100)}`
-    case 'FEED_BLOCKED_MISSING_MIN_INDEX':
-      return 'Kihagyva – az aktív minimumindex-szabályhoz nincs adat'
-    case 'FEED_BLOCKED_MISSING_MEDIAN_INDEX':
-      return 'Kihagyva – az aktív mediánszabályhoz nincs adat'
-    case 'FEED_BLOCKED_MISSING_AVERAGE_INDEX':
-      return 'Kihagyva – az aktív átlagindex-szabályhoz nincs adat'
-    case 'FEED_BLOCKED_OUT_OF_STOCK':
-      return 'Kihagyva – nincs készleten'
-    case 'FEED_BLOCKED_MISSING_STOCK':
-      return 'Kihagyva – nincs készletadat'
-    case 'FEED_ELIGIBLE_NO_COMPETITOR':
-      return 'Feedben – nincs competitor, engedélyezve'
-    case 'FEED_BLOCKED_NO_COMPETITOR':
-      return 'Kihagyva – nincs competitor'
-    case 'FEED_ELIGIBLE_MANUAL_OVERRIDE':
-      return 'Feedben – manuális override'
-    case 'FEED_BLOCKED_MANUAL_OVERRIDE':
-      return 'Kihagyva – manuális override'
-    case 'FEED_ELIGIBLE_MISSING_PRICING':
-      return 'Feedben – nincs pricing adat, engedélyezve'
-    case 'FEED_BLOCKED_MISSING_PRICING':
-      return 'Kihagyva – nincs pricing adat'
-    case 'FEED_ELIGIBLE_STALE_PRICING':
-      return 'Feedben – pricing adat elavult, engedélyezve'
-    case 'FEED_BLOCKED_STALE_PRICING':
-      return 'Kihagyva – pricing adat elavult'
-    case 'FEED_BLOCKED_PARTIAL_MARKET_DATA':
-      return 'Kihagyva – részleges piaci adat'
-    default:
-      return row.reasonCode
-  }
-}
-
-function formatStock(row: FeedProductRow) {
-  if (row.stockAvailable === null) {
-    return 'Nincs adat'
-  }
-
-  return row.stockAvailable
-    ? `Készleten (${row.stockQuantity})`
-    : 'Nincs készleten'
+const EMPTY_FILTERS: ProductFilters = {
+  search: '',
+  priceKitStatus: 'ALL',
+  feedStatus: 'ALL',
+  inclusionMode: 'ALL',
+  stockStatus: 'ALL',
 }
 
 const PAGE_SIZE = 50
 
+function formatPercent(value: number | null) {
+  if (value === null) {
+    return '–'
+  }
+
+  const percent = Math.round(value) / 100
+  return `${String(percent).replace('.', ',')}%`
+}
+
+function formatStock(row: FeedProductRow) {
+  if (row.stockStatus === 'MISSING_STOCK') {
+    return 'Nincs adat'
+  }
+
+  return row.stockStatus === 'IN_STOCK'
+    ? `${row.stockQuantity} db`
+    : 'Nincs készleten'
+}
+
+function getPriceKitLabel(status: PriceKitStatus) {
+  switch (status) {
+    case 'HAS_DATA':
+      return 'Van adat'
+    case 'NO_DATA':
+      return 'Nincs adat'
+    case 'STALE_DATA':
+      return 'Elavult'
+    case 'NO_COMPETITOR':
+      return 'Nincs competitor'
+    case 'PARTIAL_DATA':
+      return 'Hiányos adat'
+  }
+}
+
+function formatFeedReason(row: FeedProductRow) {
+  switch (row.reasonCode) {
+    case 'FEED_ELIGIBLE_PRICING_RULES':
+      return 'Minden aktív feed-szabály teljesül'
+    case 'FEED_BLOCKED_MIN_INDEX':
+      return `Minimum index ${formatPercent(row.priceIndexBps)} > ${formatPercent(row.reasonDetails.maxMinIndexBps)}`
+    case 'FEED_BLOCKED_MEDIAN_INDEX':
+      return `Medián index ${formatPercent(row.medianIndexBps)} > ${formatPercent(row.reasonDetails.maxMedianIndexBps)}`
+    case 'FEED_BLOCKED_AVERAGE_INDEX':
+      return `Átlagindex ${formatPercent(row.averageIndexBps)} > ${formatPercent(row.reasonDetails.maxAverageIndexBps)}`
+    case 'FEED_BLOCKED_MISSING_MIN_INDEX':
+      return 'Az aktív minimumindex-szabályhoz nincs adat'
+    case 'FEED_BLOCKED_MISSING_MEDIAN_INDEX':
+      return 'Az aktív mediánszabályhoz nincs adat'
+    case 'FEED_BLOCKED_MISSING_AVERAGE_INDEX':
+      return 'Az aktív átlagindex-szabályhoz nincs adat'
+    case 'FEED_BLOCKED_OUT_OF_STOCK':
+      return 'Nincs készleten'
+    case 'FEED_BLOCKED_MISSING_STOCK':
+      return 'Nincs készletadat'
+    case 'FEED_ELIGIBLE_NO_COMPETITOR':
+      return 'Competitor nélkül engedélyezve'
+    case 'FEED_BLOCKED_NO_COMPETITOR':
+      return 'Nincs competitor'
+    case 'FEED_ELIGIBLE_MISSING_PRICING':
+      return 'PriceKit adat nélkül engedélyezve'
+    case 'FEED_BLOCKED_MISSING_PRICING':
+      return 'Nincs PriceKit adat'
+    case 'FEED_ELIGIBLE_STALE_PRICING':
+      return 'Elavult PriceKit adattal engedélyezve'
+    case 'FEED_BLOCKED_STALE_PRICING':
+      return 'A PriceKit adat elavult'
+    case 'FEED_BLOCKED_PARTIAL_MARKET_DATA':
+      return 'A piaci adat hiányos'
+    case 'FEED_ELIGIBLE_MANUAL_OVERRIDE':
+      return 'Manuális felülírás'
+    case 'FEED_BLOCKED_MANUAL_OVERRIDE':
+      return 'Manuálisan kihagyva'
+    default:
+      return 'A feed-döntés részlete nem elérhető'
+  }
+}
+
 function ArukeresoProductsPage() {
-  const [search, setSearch] = useState('')
-  const [appliedSearch, setAppliedSearch] =
-    useState('')
-
-  const [includedFilter, setIncludedFilter] =
-    useState<'all' | 'included' | 'excluded'>(
-      'all',
-    )
-
-  const [modeFilter, setModeFilter] = useState<
-    | 'all'
-    | 'INHERIT'
-    | 'FORCE_INCLUDE'
-    | 'FORCE_EXCLUDE'
-  >('all')
-
-  const [reasonFilter, setReasonFilter] =
-    useState('all')
-
+  const [filters, setFilters] =
+    useState<ProductFilters>(EMPTY_FILTERS)
+  const [appliedFilters, setAppliedFilters] =
+    useState<ProductFilters>(EMPTY_FILTERS)
   const [page, setPage] = useState(0)
-
   const [items, setItems] = useState<
     FeedProductRow[]
   >([])
-
+  const [summary, setSummary] = useState<
+    Record<string, number>
+  >({})
   const [total, setTotal] = useState(0)
-
-  const [loading, setLoading] =
-    useState(true)
-
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<
     string | null
   >(null)
-
   const [message, setMessage] = useState<
     string | null
   >(null)
-
   const [savingProductId, setSavingProductId] =
     useState<string | null>(null)
 
-  const loadProducts = useCallback(
-    async (pageIndex: number) => {
-      setLoading(true)
-      setError(null)
+  function updateFilter<K extends keyof ProductFilters>(
+    key: K,
+    value: ProductFilters[K],
+  ) {
+    setFilters((current) => ({
+      ...current,
+      [key]: value,
+    }))
+  }
 
-      try {
-        const params = new URLSearchParams({
-          limit: String(PAGE_SIZE),
-          offset: String(
-            pageIndex * PAGE_SIZE,
-          ),
-        })
+  const loadProducts = useCallback(async () => {
+    setLoading(true)
+    setError(null)
 
-        if (appliedSearch.trim()) {
-          params.set(
-            'search',
-            appliedSearch.trim(),
-          )
-        }
+    try {
+      const params = new URLSearchParams({
+        limit: String(PAGE_SIZE),
+        offset: String(page * PAGE_SIZE),
+      })
 
-        if (modeFilter !== 'all') {
-          params.set(
-            'inclusionMode',
-            modeFilter,
-          )
-        }
-
-        if (includedFilter !== 'all') {
-          params.set(
-            'included',
-            includedFilter === 'included'
-              ? 'true'
-              : 'false',
-          )
-        }
-
-        if (reasonFilter !== 'all') {
-          params.set(
-            'reasonCode',
-            reasonFilter,
-          )
-        }
-
-        const response = await fetch(
-          `${API_BASE_URL}/arukereso/feed/preview?${params.toString()}`,
-        )
-
-        const result =
-          (await response.json()) as FeedProductsResponse
-
-        if (!response.ok) {
-          throw new Error(
-            result.message ??
-              'A terméklista betöltése sikertelen.',
-          )
-        }
-
-        setItems(result.items ?? [])
-        setTotal(
-          result.pagination?.total ?? 0,
-        )
-      } catch (loadError) {
-        setError(
-          loadError instanceof Error
-            ? loadError.message
-            : 'A terméklista betöltése sikertelen.',
-        )
-        setItems([])
-        setTotal(0)
-      } finally {
-        setLoading(false)
+      if (appliedFilters.search) {
+        params.set('search', appliedFilters.search)
       }
-    },
-    [
-      appliedSearch,
-      includedFilter,
-      modeFilter,
-      reasonFilter,
-    ],
-  )
+
+      if (appliedFilters.priceKitStatus !== 'ALL') {
+        params.set(
+          'priceKitStatus',
+          appliedFilters.priceKitStatus,
+        )
+      }
+
+      if (appliedFilters.feedStatus !== 'ALL') {
+        params.set(
+          'included',
+          appliedFilters.feedStatus === 'INCLUDED'
+            ? 'true'
+            : 'false',
+        )
+      }
+
+      if (appliedFilters.inclusionMode !== 'ALL') {
+        params.set(
+          'inclusionMode',
+          appliedFilters.inclusionMode,
+        )
+      }
+
+      if (appliedFilters.stockStatus !== 'ALL') {
+        params.set(
+          'stockStatus',
+          appliedFilters.stockStatus,
+        )
+      }
+
+      const response = await fetch(
+        `${API_BASE_URL}/arukereso/feed/preview?${params.toString()}`,
+      )
+      const result =
+        (await response.json()) as FeedProductsResponse
+
+      if (!response.ok) {
+        throw new Error(
+          result.message ??
+            'A terméklista betöltése sikertelen.',
+        )
+      }
+
+      setItems(result.items ?? [])
+      setSummary(result.summary ?? {})
+      setTotal(result.pagination?.total ?? 0)
+    } catch (loadError) {
+      setError(
+        loadError instanceof Error
+          ? loadError.message
+          : 'A terméklista betöltése sikertelen.',
+      )
+      setItems([])
+      setTotal(0)
+    } finally {
+      setLoading(false)
+    }
+  }, [appliedFilters, page])
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
-      void loadProducts(page)
+      void loadProducts()
     }, 0)
 
     return () => window.clearTimeout(timeoutId)
-  }, [loadProducts, page])
+  }, [loadProducts])
 
   function applyFilters() {
-    setAppliedSearch(search)
+    setAppliedFilters({
+      ...filters,
+      search: filters.search.trim(),
+    })
+    setPage(0)
+  }
+
+  function resetFilters() {
+    setFilters(EMPTY_FILTERS)
+    setAppliedFilters(EMPTY_FILTERS)
     setPage(0)
   }
 
   async function changeOverride(
     productId: string,
-    inclusionMode:
-      | 'INHERIT'
-      | 'FORCE_INCLUDE'
-      | 'FORCE_EXCLUDE',
+    inclusionMode: InclusionMode,
   ) {
     setSavingProductId(productId)
     setMessage(null)
@@ -290,39 +294,33 @@ function ArukeresoProductsPage() {
         {
           method: 'PATCH',
           headers: {
-            'Content-Type':
-              'application/json',
+            'Content-Type': 'application/json',
           },
-          body: JSON.stringify({
-            inclusionMode,
-          }),
+          body: JSON.stringify({ inclusionMode }),
         },
       )
-
       const result = (await response.json()) as {
-        status: string
         message?: string
       }
 
       if (!response.ok) {
         throw new Error(
           result.message ??
-            'Az override mentése sikertelen.',
+            'A felülírás mentése sikertelen.',
         )
       }
 
       setMessage(
         inclusionMode === 'INHERIT'
-          ? 'Felülírás törölve, globális szabály érvényes.'
-          : 'Felülírás elmentve.',
+          ? 'A globális feed-szabály ismét érvényes.'
+          : 'A manuális felülírás mentése sikerült.',
       )
-
-      await loadProducts(page)
+      await loadProducts()
     } catch (saveError) {
       setMessage(
         saveError instanceof Error
           ? saveError.message
-          : 'Az override mentése sikertelen.',
+          : 'A felülírás mentése sikertelen.',
       )
     } finally {
       setSavingProductId(null)
@@ -334,153 +332,161 @@ function ArukeresoProductsPage() {
     Math.ceil(total / PAGE_SIZE),
   )
 
+  const kpis = [
+    ['Összes termék', summary.products ?? 0],
+    ['PriceKit adattal', summary.priceKitWithData ?? 0],
+    [
+      'PriceKit adat nélkül',
+      summary.priceKitWithoutData ?? 0,
+    ],
+    ['Feedben', summary.included ?? 0],
+    ['Kihagyva', summary.excluded ?? 0],
+    ['Készleten', summary.inStock ?? 0],
+    ['Manuális felülírás', summary.manualOverride ?? 0],
+  ] as const
+
   return (
-    <section className="campaigns-page">
+    <section className="campaigns-page arukereso-products-page">
       <div className="campaigns-page-header">
         <div>
-          <p className="section-label">
-            ÁRUKERESŐ FEED
-          </p>
-
-          <h2>Termék-jogosultság</h2>
-
+          <p className="section-label">ÁRUKERESŐ FEED</p>
+          <h2>Termékek</h2>
           <p className="campaigns-page-description">
-            Feed-jogosultság termékenként,
-            a backend döntése alapján.
-            {total > 0 &&
-              ` Összesen ${total} termék.`}
+            A termékek PriceKit adatai, készletállapota és
+            Árukereső feed-jogosultsága egy helyen.
           </p>
         </div>
       </div>
 
-      <div className="campaign-offers-panel">
-        <div className="campaign-offers-heading">
-          <div>
-            <p className="section-label">
-              SZŰRŐK
-            </p>
-
-            <h4>Keresés és szűrés</h4>
+      <div className="arukereso-product-kpis">
+        {kpis.map(([label, value]) => (
+          <div key={label}>
+            <span>{label}</span>
+            <strong>{value}</strong>
           </div>
+        ))}
+      </div>
+
+      <div className="campaign-offers-panel arukereso-filter-panel">
+        <div className="arukereso-product-filters">
+          <label className="arukereso-filter-search">
+            <span>Keresés</span>
+            <input
+              type="search"
+              value={filters.search}
+              placeholder="SKU vagy terméknév"
+              onChange={(event) =>
+                updateFilter('search', event.target.value)
+              }
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  applyFilters()
+                }
+              }}
+            />
+          </label>
+
+          <label>
+            <span>PriceKit adat</span>
+            <select
+              value={filters.priceKitStatus}
+              onChange={(event) =>
+                updateFilter(
+                  'priceKitStatus',
+                  event.target.value as
+                    ProductFilters['priceKitStatus'],
+                )
+              }
+            >
+              <option value="ALL">Mind</option>
+              <option value="HAS_DATA">Van adat</option>
+              <option value="NO_DATA">Nincs adat</option>
+              <option value="STALE_DATA">Elavult</option>
+              <option value="NO_COMPETITOR">
+                Nincs competitor
+              </option>
+            </select>
+          </label>
+
+          <label>
+            <span>Feed státusz</span>
+            <select
+              value={filters.feedStatus}
+              onChange={(event) =>
+                updateFilter(
+                  'feedStatus',
+                  event.target.value as
+                    ProductFilters['feedStatus'],
+                )
+              }
+            >
+              <option value="ALL">Mind</option>
+              <option value="INCLUDED">Feedben</option>
+              <option value="EXCLUDED">Kihagyva</option>
+            </select>
+          </label>
+
+          <label>
+            <span>Szabály</span>
+            <select
+              value={filters.inclusionMode}
+              onChange={(event) =>
+                updateFilter(
+                  'inclusionMode',
+                  event.target.value as
+                    ProductFilters['inclusionMode'],
+                )
+              }
+            >
+              <option value="ALL">Mind</option>
+              <option value="INHERIT">Globális</option>
+              <option value="FORCE_INCLUDE">
+                Mindig feedben
+              </option>
+              <option value="FORCE_EXCLUDE">
+                Mindig kihagyva
+              </option>
+            </select>
+          </label>
+
+          <label>
+            <span>Készlet</span>
+            <select
+              value={filters.stockStatus}
+              onChange={(event) =>
+                updateFilter(
+                  'stockStatus',
+                  event.target.value as
+                    ProductFilters['stockStatus'],
+                )
+              }
+            >
+              <option value="ALL">Mind</option>
+              <option value="IN_STOCK">Készleten</option>
+              <option value="OUT_OF_STOCK">
+                Nincs készleten
+              </option>
+              <option value="MISSING_STOCK">
+                Nincs készletadat
+              </option>
+            </select>
+          </label>
         </div>
 
-        <div className="campaign-offers-table-wrapper">
-          <table className="campaign-offers-table">
-            <tbody>
-              <tr>
-                <td>Keresés (SKU/név)</td>
-                <td>
-                  <input
-                    type="search"
-                    value={search}
-                    onChange={(event) =>
-                      setSearch(
-                        event.target.value,
-                      )
-                    }
-                    placeholder="SKU vagy terméknév"
-                  />
-                </td>
-              </tr>
-
-              <tr>
-                <td>Feed státusz</td>
-                <td>
-                  <select
-                    value={includedFilter}
-                    onChange={(event) =>
-                      setIncludedFilter(
-                        event.target.value as
-                          | 'all'
-                          | 'included'
-                          | 'excluded',
-                      )
-                    }
-                  >
-                    <option value="all">
-                      Mind
-                    </option>
-                    <option value="included">
-                      Feedben
-                    </option>
-                    <option value="excluded">
-                      Kihagyva
-                    </option>
-                  </select>
-                </td>
-              </tr>
-
-              <tr>
-                <td>Szabály</td>
-                <td>
-                  <select
-                    value={modeFilter}
-                    onChange={(event) =>
-                      setModeFilter(
-                        event.target.value as
-                          | 'all'
-                          | 'INHERIT'
-                          | 'FORCE_INCLUDE'
-                          | 'FORCE_EXCLUDE',
-                      )
-                    }
-                  >
-                    <option value="all">
-                      Mind
-                    </option>
-                    <option value="INHERIT">
-                      Globális szabály
-                    </option>
-                    <option value="FORCE_INCLUDE">
-                      Mindig feedben
-                    </option>
-                    <option value="FORCE_EXCLUDE">
-                      Mindig kihagyva
-                    </option>
-                  </select>
-                </td>
-              </tr>
-
-              <tr>
-                <td>Döntés oka</td>
-                <td>
-                  <select
-                    value={reasonFilter}
-                    onChange={(event) =>
-                      setReasonFilter(
-                        event.target.value,
-                      )
-                    }
-                  >
-                    <option value="all">
-                      Mind
-                    </option>
-                    {REASON_CODES.map(
-                      (code) => (
-                        <option
-                          key={code}
-                          value={code}
-                        >
-                          {code}
-                        </option>
-                      ),
-                    )}
-                  </select>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-
-        <div className="campaign-submit-bar">
-          <span>
-            {total} találat
-          </span>
-
-          <div className="campaign-submit-actions">
+        <div className="arukereso-filter-actions">
+          <span>{total} találat</span>
+          <div>
             <button
               type="button"
               className="secondary-button"
+              disabled={loading}
+              onClick={resetFilters}
+            >
+              Szűrők törlése
+            </button>
+            <button
+              type="button"
+              className="campaign-primary-button"
               disabled={loading}
               onClick={applyFilters}
             >
@@ -507,126 +513,78 @@ function ArukeresoProductsPage() {
       ) : items.length === 0 ? (
         <div className="empty-state">
           <h3>Nincs találat</h3>
-
-          <p>
-            A megadott szűrőknek egyetlen
-            termék sem felel meg.
-          </p>
+          <p>A megadott szűrőknek nincs megfelelő termék.</p>
         </div>
       ) : (
         <div className="campaign-offers-panel">
           <div className="campaign-offers-table-wrapper">
-            <table className="campaign-offers-table">
+            <table className="campaign-offers-table arukereso-products-table">
               <thead>
                 <tr>
-                  <th>SKU</th>
-                  <th>Terméknév</th>
-                  <th>Árindexek</th>
+                  <th>SKU / Termék</th>
+                  <th>PriceKit</th>
+                  <th>Árpozíció</th>
                   <th>Készlet</th>
-                  <th>Pricing státusz</th>
                   <th>Feed státusz</th>
-                  <th>Szabály</th>
-                  <th>Művelet</th>
+                  <th>Szabály / Művelet</th>
                 </tr>
               </thead>
-
               <tbody>
                 {items.map((row) => (
-                  <tr key={row.productId}>
-                    <td>{row.sku}</td>
-
+                  <tr
+                    className={
+                      row.inclusionMode === 'INHERIT'
+                        ? undefined
+                        : 'has-manual-override'
+                    }
+                    key={row.productId}
+                  >
                     <td>
-                      {row.name ?? '–'}
+                      <strong>{row.sku}</strong>
+                      <small>{row.name ?? '–'}</small>
                     </td>
-
                     <td>
-                      <div>
-                        Min: {formatPercent(row.priceIndexPercent)}
-                      </div>
-                      <div>
-                        Medián:{' '}
-                        {formatPercent(
-                          row.medianIndexBps === null
-                            ? null
-                            : row.medianIndexBps / 100,
-                        )}
-                      </div>
-                      <div>
-                        Átlag:{' '}
-                        {formatPercent(
-                          row.averageIndexBps === null
-                            ? null
-                            : row.averageIndexBps / 100,
-                        )}
-                      </div>
-                    </td>
-
-                    <td>{formatStock(row)}</td>
-
-                    <td>
-                      {row.dataStatus ??
-                        '–'}
-                    </td>
-
-                    <td>
-                      <span className="status-pill">
-                        {row.included
-                          ? 'Feedben'
-                          : 'Kihagyva'}
+                      <span
+                        className={`arukereso-pricekit-badge is-${row.priceKitStatus.toLowerCase()}`}
+                      >
+                        {getPriceKitLabel(row.priceKitStatus)}
                       </span>
-
-                      <div>
-                        {formatFeedReason(
-                          row,
-                        )}
-                      </div>
                     </td>
-
-                    <td>
-                      {row.inclusionMode ===
-                      'FORCE_INCLUDE' ? (
-                        <span
-                          className="status-pill"
-                          title="Cockpit pricing szabályok figyelmen kívül hagyva"
-                        >
-                          Mindig feedben –
-                          Cockpit pricing
-                          szabályok figyelmen
-                          kívül hagyva
-                        </span>
-                      ) : row.inclusionMode ===
-                        'FORCE_EXCLUDE' ? (
-                        <span
-                          className="status-pill"
-                          title="Manuálisan kizárva"
-                        >
-                          Mindig kihagyva –
-                          manuálisan kizárva
-                        </span>
-                      ) : (
-                        'Globális szabály'
-                      )}
+                    <td className="arukereso-index-cell">
+                      <span>
+                        Min: {formatPercent(row.priceIndexBps)}
+                      </span>
+                      <span>
+                        Medián:{' '}
+                        {formatPercent(row.medianIndexBps)}
+                      </span>
+                      <span>
+                        Átlag: {formatPercent(row.averageIndexBps)}
+                      </span>
                     </td>
-
-                    <td>
+                    <td>{formatStock(row)}</td>
+                    <td className="arukereso-feed-cell">
+                      <span
+                        className={`arukereso-feed-badge ${
+                          row.included
+                            ? 'is-included'
+                            : 'is-excluded'
+                        }`}
+                      >
+                        {row.included ? 'Feedben' : 'Kihagyva'}
+                      </span>
+                      <small>{formatFeedReason(row)}</small>
+                    </td>
+                    <td className="arukereso-override-cell">
                       <select
-                        value={
-                          row.inclusionMode
-                        }
+                        value={row.inclusionMode}
                         disabled={
-                          savingProductId ===
-                          row.productId
+                          savingProductId === row.productId
                         }
-                        onChange={(
-                          event,
-                        ) =>
+                        onChange={(event) =>
                           void changeOverride(
                             row.productId,
-                            event.target
-                              .value as
-                              | 'INHERIT'
-                              | 'FORCE_INCLUDE'
-                              | 'FORCE_EXCLUDE',
+                            event.target.value as InclusionMode,
                           )
                         }
                       >
@@ -640,6 +598,14 @@ function ArukeresoProductsPage() {
                           Mindig kihagyva
                         </option>
                       </select>
+                      {row.inclusionMode === 'FORCE_INCLUDE' && (
+                        <small>
+                          Pricing- és készletszabályok felülírva
+                        </small>
+                      )}
+                      {row.inclusionMode === 'FORCE_EXCLUDE' && (
+                        <small>Manuálisan kizárva</small>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -649,38 +615,27 @@ function ArukeresoProductsPage() {
 
           <div className="campaign-submit-bar">
             <span>
-              {page * PAGE_SIZE + 1}–
-              {Math.min(
-                (page + 1) * PAGE_SIZE,
-                total,
-              )}{' '}
-              / {total}
+              {total === 0
+                ? '0 találat'
+                : `${page * PAGE_SIZE + 1}–${Math.min(
+                    (page + 1) * PAGE_SIZE,
+                    total,
+                  )} / ${total}`}
             </span>
-
             <div className="campaign-submit-actions">
               <button
                 type="button"
                 className="secondary-button"
-                disabled={
-                  loading || page === 0
-                }
-                onClick={() =>
-                  setPage(page - 1)
-                }
+                disabled={loading || page === 0}
+                onClick={() => setPage(page - 1)}
               >
                 Előző
               </button>
-
               <button
                 type="button"
                 className="secondary-button"
-                disabled={
-                  loading ||
-                  page + 1 >= pageCount
-                }
-                onClick={() =>
-                  setPage(page + 1)
-                }
+                disabled={loading || page + 1 >= pageCount}
+                onClick={() => setPage(page + 1)}
               >
                 Következő
               </button>

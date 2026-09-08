@@ -7591,7 +7591,7 @@ input:checked + span::after {
   margin: 0 24px 18px;
 }
 
-/* Árukereső feed settings and pricing monitor */
+/* Árukereső feed settings and product management */
 .arukereso-settings-page {
   max-width: 1040px;
 }
@@ -7738,14 +7738,14 @@ input:checked + span::after {
   font-size: 10px;
 }
 
-.arukereso-pricing-summary {
+.arukereso-product-kpis {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(100px, 1fr));
   gap: 10px;
   margin-bottom: 16px;
 }
 
-.arukereso-pricing-summary > div {
+.arukereso-product-kpis > div {
   display: grid;
   gap: 5px;
   min-height: 78px;
@@ -7755,45 +7755,40 @@ input:checked + span::after {
   background: #fff;
 }
 
-.arukereso-pricing-summary span {
+.arukereso-product-kpis span {
   color: #777;
   font-size: 9px;
   font-weight: 800;
   text-transform: uppercase;
 }
 
-.arukereso-pricing-summary strong {
+.arukereso-product-kpis strong {
   font-size: 22px;
 }
 
-.arukereso-pricing-filters {
-  display: flex;
-  align-items: flex-end;
+.arukereso-product-filters {
+  display: grid;
+  grid-template-columns: minmax(220px, 2fr) repeat(4, minmax(135px, 1fr));
   gap: 12px;
   padding: 16px 18px;
-  border-bottom: 1px solid #ededed;
   background: #fafafa;
 }
 
-.arukereso-pricing-filters label {
+.arukereso-product-filters label {
   display: grid;
   gap: 5px;
 }
 
-.arukereso-pricing-filters label:first-child {
-  flex: 1 1 320px;
-  max-width: 440px;
-}
-
-.arukereso-pricing-filters label > span {
+.arukereso-product-filters label > span {
   color: #666;
   font-size: 9px;
   font-weight: 800;
   text-transform: uppercase;
 }
 
-.arukereso-pricing-filters input,
-.arukereso-pricing-filters select {
+.arukereso-product-filters input,
+.arukereso-product-filters select,
+.arukereso-override-cell select {
   min-height: 36px;
   padding: 0 10px;
   border: 1px solid #d2d2d2;
@@ -7803,42 +7798,113 @@ input:checked + span::after {
   font-size: 11px;
 }
 
-.arukereso-pricing-table td:first-child small,
-.arukereso-pricing-table td:last-child small {
+.arukereso-filter-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 18px;
+  border-top: 1px solid #ededed;
+}
+
+.arukereso-filter-actions > span {
+  color: #777;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.arukereso-filter-actions > div {
+  display: flex;
+  gap: 8px;
+}
+
+.arukereso-products-table {
+  min-width: 930px;
+}
+
+.arukereso-products-table td {
+  vertical-align: top;
+}
+
+.arukereso-products-table td:first-child {
+  min-width: 190px;
+}
+
+.arukereso-products-table td:first-child small,
+.arukereso-feed-cell small,
+.arukereso-override-cell small {
   display: block;
   margin-top: 4px;
-  max-width: 310px;
+  max-width: 280px;
   color: #777;
   font-size: 9px;
   line-height: 1.4;
 }
 
-.arukereso-pricing-table td:nth-child(2) span {
+.arukereso-index-cell span {
   display: block;
   margin-bottom: 3px;
   white-space: nowrap;
 }
 
-.arukereso-pricing-table .status-pill {
-  width: fit-content;
+.arukereso-pricekit-badge,
+.arukereso-feed-badge {
+  display: inline-flex;
+  align-items: center;
   padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.arukereso-pricekit-badge.is-has_data,
+.arukereso-feed-badge.is-included {
   background: #eaf8ef;
   color: #155e37;
 }
 
-.arukereso-pricing-table .status-pill.is-inactive {
+.arukereso-pricekit-badge.is-no_data,
+.arukereso-pricekit-badge.is-partial_data,
+.arukereso-feed-badge.is-excluded {
   background: #f1f1f1;
   color: #555;
 }
 
-.arukereso-manual-note {
-  color: #806d00 !important;
-  font-weight: 800;
+.arukereso-pricekit-badge.is-stale_data,
+.arukereso-pricekit-badge.is-no_competitor {
+  background: #fff6d8;
+  color: #895900;
 }
 
-@media (max-width: 900px) {
-  .arukereso-pricing-summary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+.arukereso-override-cell {
+  min-width: 180px;
+}
+
+.arukereso-override-cell select {
+  width: 100%;
+}
+
+.arukereso-override-cell small {
+  color: #806d00;
+  font-weight: 750;
+}
+
+.arukereso-products-table tr.has-manual-override td:first-child {
+  box-shadow: inset 3px 0 0 #ffee00;
+}
+
+@media (max-width: 1100px) {
+  .arukereso-product-kpis {
+    grid-template-columns: repeat(4, minmax(100px, 1fr));
+  }
+
+  .arukereso-product-filters {
+    grid-template-columns: repeat(3, minmax(140px, 1fr));
+  }
+
+  .arukereso-filter-search {
+    grid-column: span 2;
   }
 }
 
@@ -7856,21 +7922,43 @@ input:checked + span::after {
     border-bottom: 1px solid #ededed;
   }
 
-  .arukereso-settings-footer,
-  .arukereso-pricing-filters {
+  .arukereso-settings-footer {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .arukereso-settings-footer button,
-  .arukereso-pricing-filters button,
-  .arukereso-pricing-filters label,
-  .arukereso-pricing-filters label:first-child {
+  .arukereso-settings-footer button {
     width: 100%;
     max-width: none;
   }
 
-  .arukereso-pricing-summary {
+  .arukereso-product-kpis,
+  .arukereso-product-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .arukereso-filter-search {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 480px) {
+  .arukereso-product-kpis,
+  .arukereso-product-filters {
     grid-template-columns: 1fr;
+  }
+
+  .arukereso-filter-search {
+    grid-column: auto;
+  }
+
+  .arukereso-filter-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .arukereso-filter-actions > div,
+  .arukereso-filter-actions button {
+    width: 100%;
   }
 }

@@ -4394,6 +4394,43 @@ type FeedPricingRowInput = {
   observedAt: Date | null
 } | null
 
+type PriceKitStatus =
+  | 'HAS_DATA'
+  | 'NO_DATA'
+  | 'STALE_DATA'
+  | 'NO_COMPETITOR'
+  | 'PARTIAL_DATA'
+
+function resolvePriceKitStatus(input: {
+  pricingRow: FeedPricingRowInput
+  pricingAgeHours: number | null
+  maxPricingAgeHours: number
+}): PriceKitStatus {
+  if (input.pricingRow === null) {
+    return 'NO_DATA'
+  }
+
+  if (
+    input.pricingAgeHours === null ||
+    input.pricingAgeHours >
+      input.maxPricingAgeHours
+  ) {
+    return 'STALE_DATA'
+  }
+
+  if (
+    input.pricingRow.dataStatus ===
+    'NO_COMPETITOR'
+  ) {
+    return 'NO_COMPETITOR'
+  }
+
+  return input.pricingRow.dataStatus ===
+    'HAS_COMPETITOR'
+    ? 'HAS_DATA'
+    : 'PARTIAL_DATA'
+}
+
 type FeedEligibilityReasonDetails = {
   inclusionMode: FeedEligibilityOverride
   ruleVersion: number
@@ -4412,6 +4449,7 @@ type FeedEligibilityReasonDetails = {
   dataStatus: string | null
   observedAt: string | null
   pricingAgeHours: number | null
+  priceKitStatus: PriceKitStatus
 }
 
 function evaluateFeedEligibility(input: {
@@ -4448,6 +4486,13 @@ function evaluateFeedEligibility(input: {
         ) / 10
       : null
 
+  const priceKitStatus = resolvePriceKitStatus({
+    pricingRow,
+    pricingAgeHours,
+    maxPricingAgeHours:
+      settings.maxPricingAgeHours,
+  })
+
   const reasonDetails: FeedEligibilityReasonDetails =
     {
       inclusionMode,
@@ -4479,6 +4524,7 @@ function evaluateFeedEligibility(input: {
         pricingRow?.dataStatus ?? null,
       observedAt: observedAtIso,
       pricingAgeHours,
+      priceKitStatus,
     }
 
   if (
@@ -4723,6 +4769,12 @@ arukeresoApi.get(
 
       const reasonCodeFilter =
         context.req.query('reasonCode')
+
+      const priceKitStatusFilter =
+        context.req.query('priceKitStatus')
+
+      const stockStatusFilter =
+        context.req.query('stockStatus')
 
       const database =
         requireDatabase()
@@ -4969,6 +5021,10 @@ arukeresoApi.get(
         blockedByAverageIndex: 0,
         blockedByStock: 0,
         missingEnabledMetric: 0,
+        priceKitWithData: 0,
+        priceKitWithoutData: 0,
+        inStock: 0,
+        manualOverride: 0,
       }
 
       const reasonCounts: Record<
@@ -5000,6 +5056,17 @@ arukeresoApi.get(
               now,
             })
 
+          const priceKitStatus =
+            result.reasonDetails.priceKitStatus
+
+          const stockStatus =
+            result.reasonDetails.stockAvailable ===
+            null
+              ? 'MISSING_STOCK'
+              : result.reasonDetails.stockAvailable
+                ? 'IN_STOCK'
+                : 'OUT_OF_STOCK'
+
           summary.products += 1
 
           if (result.included) {
@@ -5013,13 +5080,25 @@ arukeresoApi.get(
             'FORCE_INCLUDE'
           ) {
             summary.forceIncluded += 1
+            summary.manualOverride += 1
           } else if (
             inclusionMode ===
             'FORCE_EXCLUDE'
           ) {
             summary.forceExcluded += 1
+            summary.manualOverride += 1
           } else {
             summary.ruleBased += 1
+          }
+
+          if (pricingRow === null) {
+            summary.priceKitWithoutData += 1
+          } else {
+            summary.priceKitWithData += 1
+          }
+
+          if (stockStatus === 'IN_STOCK') {
+            summary.inStock += 1
           }
 
           if (pricingRow === null) {
@@ -5094,6 +5173,9 @@ arukeresoApi.get(
             name: product.name,
             included: result.included,
             inclusionMode,
+            hasPriceKitData:
+              pricingRow !== null,
+            priceKitStatus,
             priceIndexBps:
               result.reasonDetails
                 .priceIndexBps,
@@ -5115,6 +5197,7 @@ arukeresoApi.get(
             stockAvailable:
               result.reasonDetails
                 .stockAvailable,
+            stockStatus,
             dataStatus:
               result.reasonDetails
                 .dataStatus,
@@ -5169,6 +5252,22 @@ arukeresoApi.get(
             reasonCodeFilter &&
             item.reasonCode !==
               reasonCodeFilter
+          ) {
+            return false
+          }
+
+          if (
+            priceKitStatusFilter &&
+            item.priceKitStatus !==
+              priceKitStatusFilter
+          ) {
+            return false
+          }
+
+          if (
+            stockStatusFilter &&
+            item.stockStatus !==
+              stockStatusFilter
           ) {
             return false
           }
@@ -5874,6 +5973,7 @@ arukeresoApi.delete(
 export {
   arukeresoApi,
   evaluateFeedEligibility,
+  resolvePriceKitStatus,
   resolveFeedEligibilitySettings,
   FEED_ELIGIBILITY_DEFAULT_SETTINGS,
   FEED_CHANNEL_CODE,
