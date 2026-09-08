@@ -8076,7 +8076,8 @@ input:checked + span::after {
   font-size: 9px;
 }
 
-.arukereso-preview-latest a {
+.arukereso-preview-latest a,
+.arukereso-preview-latest button {
   display: inline-flex;
   align-items: center;
   justify-content: center;

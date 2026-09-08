@@ -218,6 +218,8 @@ function ArukeresoFeedPreviewPage() {
     useState<LatestRun | null>(null)
   const [showConfirm, setShowConfirm] = useState(false)
   const [generating, setGenerating] = useState(false)
+  const [downloadingCsv, setDownloadingCsv] =
+    useState(false)
   const [generatedRun, setGeneratedRun] =
     useState<LatestRun | null>(null)
 
@@ -381,6 +383,12 @@ function ArukeresoFeedPreviewPage() {
         message?: string
       }
 
+      if (response.status === 401) {
+        throw new Error(
+          'A munkamenet lejárt. Jelentkezz be újra.',
+        )
+      }
+
       if (!response.ok || !result.runId || !result.summary) {
         throw new Error(
           result.message ??
@@ -415,6 +423,59 @@ function ArukeresoFeedPreviewPage() {
       setShowConfirm(false)
     } finally {
       setGenerating(false)
+    }
+  }
+
+  async function downloadCsv(runId: string) {
+    // Plain browser navigation cannot send the
+    // Authorization header, so the protected CSV
+    // endpoint must be fetched with the shared
+    // authenticated request layer instead.
+    setDownloadingCsv(true)
+    setError(null)
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/arukereso/feed/runs/${runId}/csv`,
+      )
+
+      if (response.status === 401) {
+        throw new Error(
+          'A munkamenet lejárt. Jelentkezz be újra.',
+        )
+      }
+
+      if (!response.ok) {
+        const result = (await response
+          .json()
+          .catch(() => null)) as {
+          message?: string
+        } | null
+
+        throw new Error(
+          result?.message ??
+            'A CSV letöltése sikertelen.',
+        )
+      }
+
+      const blob = await response.blob()
+      const objectUrl =
+        window.URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = objectUrl
+      link.download = 'arukereso-feed.csv'
+      document.body.append(link)
+      link.click()
+      link.remove()
+      window.URL.revokeObjectURL(objectUrl)
+    } catch (downloadError) {
+      setError(
+        downloadError instanceof Error
+          ? downloadError.message
+          : 'A CSV letöltése sikertelen.',
+      )
+    } finally {
+      setDownloadingCsv(false)
     }
   }
 
@@ -594,14 +655,26 @@ function ArukeresoFeedPreviewPage() {
               {(generatedRun ?? latestRun)?.runId.slice(0, 8)}…
             </small>
           </div>
-          <a
+          <button
+            type="button"
             className="campaign-primary-button"
-            href={`${API_BASE_URL}/arukereso/feed/runs/${(generatedRun ?? latestRun)?.runId}/csv`}
+            disabled={downloadingCsv}
+            onClick={() => {
+              const runId = (
+                generatedRun ?? latestRun
+              )?.runId
+
+              if (runId) {
+                void downloadCsv(runId)
+              }
+            }}
           >
-            {generatedRun
-              ? 'CSV letöltése'
-              : 'Legutóbbi CSV letöltése'}
-          </a>
+            {downloadingCsv
+              ? 'Letöltés…'
+              : generatedRun
+                ? 'CSV letöltése'
+                : 'Legutóbbi CSV letöltése'}
+          </button>
         </article>
       )}
 
