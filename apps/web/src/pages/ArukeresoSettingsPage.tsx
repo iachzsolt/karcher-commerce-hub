@@ -24,8 +24,6 @@ type SettingsDraft = {
   maxAverageIndexPercent: string
   useStockRule: boolean
   allowNoCompetitor: boolean
-  allowMissingPricingData: boolean
-  maxPricingAgeHours: string
 }
 
 const INITIAL_DRAFT: SettingsDraft = {
@@ -37,8 +35,6 @@ const INITIAL_DRAFT: SettingsDraft = {
   maxAverageIndexPercent: '110',
   useStockRule: false,
   allowNoCompetitor: false,
-  allowMissingPricingData: false,
-  maxPricingAgeHours: '48',
 }
 
 const PRICING_RULES = [
@@ -85,11 +81,6 @@ function toDraft(settings: FeedSettings): SettingsDraft {
     useStockRule: settings.useStockRule,
     allowNoCompetitor:
       settings.allowNoCompetitor,
-    allowMissingPricingData:
-      settings.allowMissingPricingData,
-    maxPricingAgeHours: String(
-      settings.maxPricingAgeHours,
-    ),
   }
 }
 
@@ -106,9 +97,6 @@ function ArukeresoSettingsPage() {
     useState(false)
   const [pricingError, setPricingError] =
     useState<string | null>(null)
-  const [dataError, setDataError] = useState<
-    string | null
-  >(null)
   const [feedback, setFeedback] = useState<{
     kind: 'success' | 'error'
     text: string
@@ -179,7 +167,6 @@ function ArukeresoSettingsPage() {
 
   async function saveSettings() {
     setPricingError(null)
-    setDataError(null)
     setFeedback(null)
 
     for (const rule of PRICING_RULES) {
@@ -199,20 +186,6 @@ function ArukeresoSettingsPage() {
         )
         return
       }
-    }
-
-    const hours = Number(draft.maxPricingAgeHours)
-
-    if (
-      !draft.maxPricingAgeHours.trim() ||
-      !Number.isInteger(hours) ||
-      hours <= 0 ||
-      hours > 8760
-    ) {
-      setDataError(
-        'A pricing adat maximális életkora 1 és 8760 közötti egész óraszám lehet.',
-      )
-      return
     }
 
     setSaving(true)
@@ -244,9 +217,6 @@ function ArukeresoSettingsPage() {
             useStockRule: draft.useStockRule,
             allowNoCompetitor:
               draft.allowNoCompetitor,
-            allowMissingPricingData:
-              draft.allowMissingPricingData,
-            maxPricingAgeHours: hours,
           }),
         },
       )
@@ -444,62 +414,15 @@ function ArukeresoSettingsPage() {
                 </p>
               </div>
 
-              <div className="arukereso-settings-toggle-row">
-                <label className="schedule-switch">
-                  <input
-                    type="checkbox"
-                    checked={draft.allowMissingPricingData}
-                    disabled={saving}
-                    onChange={(event) =>
-                      updateDraft(
-                        'allowMissingPricingData',
-                        event.target.checked,
-                      )
-                    }
-                  />
-                  <span aria-hidden="true" />
-                  <strong>
-                    Pricing adat nélküli termékek engedélyezése
-                  </strong>
-                </label>
-                <p>
-                  Engedélyezd, ha Cockpit pricing adat nélkül
-                  is kimehet a termék.
-                </p>
-              </div>
-
-              <div className="arukereso-settings-age-row">
-                <label className="arukereso-settings-number">
-                  <span>Pricing adat maximális életkora</span>
-                  <span>
-                    <input
-                      type="number"
-                      min={1}
-                      max={8760}
-                      step={1}
-                      value={draft.maxPricingAgeHours}
-                      disabled={saving}
-                      onChange={(event) =>
-                        updateDraft(
-                          'maxPricingAgeHours',
-                          event.target.value,
-                        )
-                      }
-                    />
-                    <b>óra</b>
-                  </span>
-                </label>
-                <p>
-                  Ennél régebbi pricing adat elavultnak számít.
-                </p>
-              </div>
             </div>
 
-            {dataError && (
-              <div className="allegro-settings-error">
-                {dataError}
-              </div>
-            )}
+            <div className="allegro-settings-info">
+              Alapértelmezés szerint csak a mai
+              PriceKit/Cockpit adatokban szereplő termékek
+              kerülhetnek a feedbe. PriceKit adat nélküli
+              terméket egyedileg a Termékek oldalon lehet
+              engedélyezni.
+            </div>
           </article>
 
           <div className="arukereso-settings-footer">

@@ -3945,13 +3945,8 @@ function matchesFeedReasonCategory(
       'FEED_BLOCKED_OUT_OF_STOCK',
       'FEED_BLOCKED_MISSING_STOCK',
     ],
-    MISSING_PRICING: [
-      'FEED_ELIGIBLE_MISSING_PRICING',
-      'FEED_BLOCKED_MISSING_PRICING',
-    ],
-    STALE_PRICING: [
-      'FEED_ELIGIBLE_STALE_PRICING',
-      'FEED_BLOCKED_STALE_PRICING',
+    NO_PRICEKIT: [
+      'FEED_BLOCKED_NO_CURRENT_PRICEKIT',
     ],
     NO_COMPETITOR: [
       'FEED_ELIGIBLE_NO_COMPETITOR',
@@ -4445,7 +4440,15 @@ type FeedEligibilitySettings = {
   maxAverageIndexBps: number
   useStockRule: boolean
   allowNoCompetitor: boolean
+  /**
+   * Legacy, no longer used by eligibility. The daily
+   * PriceKit snapshot membership decides currency:
+   * an existing pricing row is current, a missing row
+   * means no current PriceKit data. Parsed only for
+   * backward compatibility; never delete stored values.
+   */
   allowMissingPricingData: boolean
+  /** Legacy, ignored by eligibility. See above. */
   maxPricingAgeHours: number
   ruleVersion: number
 }
@@ -4603,10 +4606,7 @@ type FeedEligibilityReasonCode =
   | 'FEED_BLOCKED_NO_COMPETITOR'
   | 'FEED_ELIGIBLE_MANUAL_OVERRIDE'
   | 'FEED_BLOCKED_MANUAL_OVERRIDE'
-  | 'FEED_ELIGIBLE_MISSING_PRICING'
-  | 'FEED_BLOCKED_MISSING_PRICING'
-  | 'FEED_ELIGIBLE_STALE_PRICING'
-  | 'FEED_BLOCKED_STALE_PRICING'
+  | 'FEED_BLOCKED_NO_CURRENT_PRICEKIT'
   | 'FEED_BLOCKED_PARTIAL_MARKET_DATA'
 
 type FeedEligibilityOverride =
@@ -4625,25 +4625,22 @@ type FeedPricingRowInput = {
 type PriceKitStatus =
   | 'HAS_DATA'
   | 'NO_DATA'
-  | 'STALE_DATA'
   | 'NO_COMPETITOR'
   | 'PARTIAL_DATA'
 
 function resolvePriceKitStatus(input: {
   pricingRow: FeedPricingRowInput
-  pricingAgeHours: number | null
-  maxPricingAgeHours: number
+  pricingAgeHours?: number | null
+  maxPricingAgeHours?: number
 }): PriceKitStatus {
+  // Currency comes from daily snapshot membership:
+  // applyPricingSnapshot deletes rows that are absent
+  // from the latest Cockpit sync, so an existing row is
+  // current PriceKit data regardless of observedAt.
+  // The age arguments are accepted but ignored for
+  // backward compatibility with existing callers.
   if (input.pricingRow === null) {
     return 'NO_DATA'
-  }
-
-  if (
-    input.pricingAgeHours === null ||
-    input.pricingAgeHours >
-      input.maxPricingAgeHours
-  ) {
-    return 'STALE_DATA'
   }
 
   if (
@@ -4716,9 +4713,6 @@ function evaluateFeedEligibility(input: {
 
   const priceKitStatus = resolvePriceKitStatus({
     pricingRow,
-    pricingAgeHours,
-    maxPricingAgeHours:
-      settings.maxPricingAgeHours,
   })
 
   const reasonDetails: FeedEligibilityReasonDetails =
@@ -4756,18 +4750,6 @@ function evaluateFeedEligibility(input: {
     }
 
   if (
-    inclusionMode === 'FORCE_INCLUDE'
-  ) {
-    return {
-      included: true,
-      decision: 'INCLUDED',
-      reasonCode:
-        'FEED_ELIGIBLE_MANUAL_OVERRIDE',
-      reasonDetails,
-    }
-  }
-
-  if (
     inclusionMode === 'FORCE_EXCLUDE'
   ) {
     return {
@@ -4779,42 +4761,56 @@ function evaluateFeedEligibility(input: {
     }
   }
 
+  if (
+    inclusionMode === 'FORCE_INCLUDE'
+  ) {
+    // Manual include bypasses PriceKit/index rules,
+    // but inventory safety still applies when enabled.
+    if (settings.useStockRule) {
+      if (input.stockQuantity === null) {
+        return {
+          included: false,
+          decision: 'EXCLUDED',
+          reasonCode:
+            'FEED_BLOCKED_MISSING_STOCK',
+          reasonDetails,
+        }
+      }
+
+      if (input.stockQuantity <= 0) {
+        return {
+          included: false,
+          decision: 'EXCLUDED',
+          reasonCode:
+            'FEED_BLOCKED_OUT_OF_STOCK',
+          reasonDetails,
+        }
+      }
+    }
+
+    return {
+      included: true,
+      decision: 'INCLUDED',
+      reasonCode:
+        'FEED_ELIGIBLE_MANUAL_OVERRIDE',
+      reasonDetails,
+    }
+  }
+
   let successReasonCode: FeedEligibilityReasonCode =
     'FEED_ELIGIBLE_PRICING_RULES'
 
   if (pricingRow === null) {
-    if (!settings.allowMissingPricingData) {
-      return {
-        included: false,
-        decision: 'EXCLUDED',
-        reasonCode:
-          'FEED_BLOCKED_MISSING_PRICING',
-        reasonDetails,
-      }
+    // No row in the current daily PriceKit snapshot
+    // means no current PriceKit data. Only an explicit
+    // FORCE_INCLUDE can still include such a product.
+    return {
+      included: false,
+      decision: 'EXCLUDED',
+      reasonCode:
+        'FEED_BLOCKED_NO_CURRENT_PRICEKIT',
+      reasonDetails,
     }
-
-    successReasonCode =
-      'FEED_ELIGIBLE_MISSING_PRICING'
-  }
-
-  if (
-    pricingRow !== null &&
-    (pricingAgeHours === null ||
-      pricingAgeHours >
-        settings.maxPricingAgeHours)
-  ) {
-    if (!settings.allowMissingPricingData) {
-      return {
-        included: false,
-        decision: 'EXCLUDED',
-        reasonCode:
-          'FEED_BLOCKED_STALE_PRICING',
-        reasonDetails,
-      }
-    }
-
-    successReasonCode =
-      'FEED_ELIGIBLE_STALE_PRICING'
   }
 
   if (
@@ -5470,6 +5466,7 @@ async function buildCatalogFeedOutput(
     forceExcluded: 0,
     ruleBasedIncluded: 0,
     ruleBasedExcluded: 0,
+    priceKitWithData: 0,
     priceKitWithoutData: 0,
     blockedByStock: 0,
     blockedByIndex: 0,
@@ -5482,6 +5479,12 @@ async function buildCatalogFeedOutput(
       summary.includedRows += 1
     } else {
       summary.excludedRows += 1
+    }
+
+    if (item.pricingRow === null) {
+      summary.priceKitWithoutData += 1
+    } else {
+      summary.priceKitWithData += 1
     }
 
     if (item.inclusionMode === 'FORCE_INCLUDE') {
@@ -5499,13 +5502,6 @@ async function buildCatalogFeedOutput(
     reasonCounts[item.result.reasonCode] =
       (reasonCounts[item.result.reasonCode] ?? 0) +
       1
-
-    if (
-      item.result.reasonDetails.priceKitStatus ===
-      'NO_DATA'
-    ) {
-      summary.priceKitWithoutData += 1
-    }
 
     if (
       item.result.reasonCode ===
@@ -6507,7 +6503,6 @@ arukeresoApi.get(
         hasCompetitor: 0,
         noCompetitor: 0,
         missingPricing: 0,
-        stalePricing: 0,
         partialMarketData: 0,
         blockedByMinIndex: 0,
         blockedByMedianIndex: 0,
@@ -6596,14 +6591,6 @@ arukeresoApi.get(
 
           if (pricingRow === null) {
             summary.missingPricing += 1
-          } else if (
-            result.reasonDetails
-              .pricingAgeHours === null ||
-            result.reasonDetails
-              .pricingAgeHours >
-              settings.maxPricingAgeHours
-          ) {
-            summary.stalePricing += 1
           } else if (
             pricingRow.dataStatus ===
             'HAS_COMPETITOR'
@@ -7111,14 +7098,41 @@ arukeresoApi.patch(
         }
       }
 
+      // Only active rules affect eligibility and the
+      // rule version. Legacy keys (allowMissingPricingData,
+      // maxPricingAgeHours) are preserved but ignored.
+      const activeKeys = [
+        'useMinIndex',
+        'maxMinIndexBps',
+        'useMedianIndex',
+        'maxMedianIndexBps',
+        'useAverageIndex',
+        'maxAverageIndexBps',
+        'useStockRule',
+        'allowNoCompetitor',
+      ] as Array<
+        keyof FeedEligibilitySettings
+      >
+
       const materialChanged =
-        (Object.keys(updates) as Array<
-          keyof FeedEligibilitySettings
-        >).some(
+        activeKeys.some(
           (key) => next[key] !== current[key],
         )
 
-      if (!materialChanged) {
+      // Legacy keys are accepted and preserved, but
+      // never affect the rule version on their own.
+      const inactiveChanged = (
+        [
+          'allowMissingPricingData',
+          'maxPricingAgeHours',
+        ] as const
+      ).some(
+        (key) =>
+          updates[key] !== undefined &&
+          stored[key] !== updates[key],
+      )
+
+      if (!materialChanged && !inactiveChanged) {
         const resolved =
           resolveFeedEligibilitySettings(
             channel.settingsJson,
@@ -7137,15 +7151,17 @@ arukeresoApi.patch(
       const storedRuleVersion =
         stored['ruleVersion']
 
-      next['ruleVersion'] =
-        typeof storedRuleVersion ===
-          'number' &&
-        Number.isInteger(
-          storedRuleVersion,
-        ) &&
-        storedRuleVersion > 0
-          ? storedRuleVersion + 1
-          : current.ruleVersion + 1
+      if (materialChanged) {
+        next['ruleVersion'] =
+          typeof storedRuleVersion ===
+            'number' &&
+          Number.isInteger(
+            storedRuleVersion,
+          ) &&
+          storedRuleVersion > 0
+            ? storedRuleVersion + 1
+            : current.ruleVersion + 1
+      }
 
       await database
         .update(feedChannels)

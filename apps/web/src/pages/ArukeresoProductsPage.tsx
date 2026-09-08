@@ -13,7 +13,6 @@ type InclusionMode =
 type PriceKitStatus =
   | 'HAS_DATA'
   | 'NO_DATA'
-  | 'STALE_DATA'
   | 'NO_COMPETITOR'
   | 'PARTIAL_DATA'
 
@@ -59,8 +58,8 @@ type ProductFilters = {
     | 'ALL'
     | 'HAS_DATA'
     | 'NO_DATA'
-    | 'STALE_DATA'
     | 'NO_COMPETITOR'
+    | 'PARTIAL_DATA'
   feedStatus: 'ALL' | 'INCLUDED' | 'EXCLUDED'
   inclusionMode: 'ALL' | InclusionMode
   stockStatus: 'ALL' | StockStatus
@@ -98,15 +97,13 @@ function formatStock(row: FeedProductRow) {
 function getPriceKitLabel(status: PriceKitStatus) {
   switch (status) {
     case 'HAS_DATA':
-      return 'Van adat'
+      return 'Van mai adat'
     case 'NO_DATA':
-      return 'Nincs adat'
-    case 'STALE_DATA':
-      return 'Elavult'
+      return 'Nincs mai adat'
     case 'NO_COMPETITOR':
       return 'Nincs competitor'
     case 'PARTIAL_DATA':
-      return 'Hiányos adat'
+      return 'Részleges adat'
   }
 }
 
@@ -134,18 +131,12 @@ function formatFeedReason(row: FeedProductRow) {
       return 'Competitor nélkül engedélyezve'
     case 'FEED_BLOCKED_NO_COMPETITOR':
       return 'Nincs competitor'
-    case 'FEED_ELIGIBLE_MISSING_PRICING':
-      return 'PriceKit adat nélkül engedélyezve'
-    case 'FEED_BLOCKED_MISSING_PRICING':
-      return 'Nincs PriceKit adat'
-    case 'FEED_ELIGIBLE_STALE_PRICING':
-      return 'Elavult PriceKit adattal engedélyezve'
-    case 'FEED_BLOCKED_STALE_PRICING':
-      return 'A PriceKit adat elavult'
+    case 'FEED_BLOCKED_NO_CURRENT_PRICEKIT':
+      return 'Kihagyva – nincs mai PriceKit adat'
     case 'FEED_BLOCKED_PARTIAL_MARKET_DATA':
       return 'A piaci adat hiányos'
     case 'FEED_ELIGIBLE_MANUAL_OVERRIDE':
-      return 'Manuális felülírás'
+      return 'Feedben – manuálisan engedélyezve'
     case 'FEED_BLOCKED_MANUAL_OVERRIDE':
       return 'Manuálisan kihagyva'
     default:
@@ -399,11 +390,17 @@ function ArukeresoProductsPage() {
               }
             >
               <option value="ALL">Mind</option>
-              <option value="HAS_DATA">Van adat</option>
-              <option value="NO_DATA">Nincs adat</option>
-              <option value="STALE_DATA">Elavult</option>
+              <option value="HAS_DATA">
+                Van mai adat
+              </option>
+              <option value="NO_DATA">
+                Nincs mai adat
+              </option>
               <option value="NO_COMPETITOR">
                 Nincs competitor
+              </option>
+              <option value="PARTIAL_DATA">
+                Részleges adat
               </option>
             </select>
           </label>
