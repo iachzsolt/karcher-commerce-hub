@@ -5,6 +5,8 @@ import {
   dataConnections,
   feedChannels,
   feedProductOverrides,
+  feedRunItems,
+  feedRuns,
   inventorySourceItems,
   pricingSourceItems,
   productIdentifiers,
@@ -18,6 +20,8 @@ import {
 } from 'node:crypto'
 import {
   and,
+  asc,
+  desc,
   eq,
   inArray,
   isNull,
@@ -26,7 +30,7 @@ import {
   or,
   sql,
 } from 'drizzle-orm'
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import * as XLSX from 'xlsx'
 
 const arukeresoApi = new Hono()
@@ -3883,6 +3887,230 @@ async function analyzeCatalogPromotion(): Promise<CatalogPromotionAnalysis> {
   }
 }
 
+function createFeedFingerprint(value: string) {
+  return createHash('sha256')
+    .update(value, 'utf8')
+    .digest('hex')
+}
+
+function createCatalogFeedCsv(
+  items: CatalogFeedOutputItem[],
+) {
+  return serializeCatalogFeedCsv(
+    items
+      .filter((item) => item.result.included)
+      .map((item) => item.source),
+  )
+}
+
+function toFeedOutputSample(
+  item: CatalogFeedOutputItem,
+) {
+  return {
+    productId: item.productId,
+    sku: item.sku,
+    identifier: item.source.Identifier,
+    name: item.source.Name,
+    included: item.result.included,
+    inclusionMode: item.inclusionMode,
+    reasonCode: item.result.reasonCode,
+    reasonDetails: item.result.reasonDetails,
+    priceKitStatus:
+      item.result.reasonDetails.priceKitStatus,
+    priceIndexBps:
+      item.result.reasonDetails.priceIndexBps,
+    medianIndexBps:
+      item.result.reasonDetails.medianIndexBps,
+    averageIndexBps:
+      item.result.reasonDetails.averageIndexBps,
+    stockQuantity: item.stockQuantity,
+    stockStatus: item.stockStatus,
+  }
+}
+
+function matchesFeedReasonCategory(
+  reasonCode: FeedEligibilityReasonCode,
+  category: string | null,
+) {
+  const categories: Record<string, string[]> = {
+    INDEX: [
+      'FEED_BLOCKED_MIN_INDEX',
+      'FEED_BLOCKED_MEDIAN_INDEX',
+      'FEED_BLOCKED_AVERAGE_INDEX',
+      'FEED_BLOCKED_MISSING_MIN_INDEX',
+      'FEED_BLOCKED_MISSING_MEDIAN_INDEX',
+      'FEED_BLOCKED_MISSING_AVERAGE_INDEX',
+    ],
+    STOCK: [
+      'FEED_BLOCKED_OUT_OF_STOCK',
+      'FEED_BLOCKED_MISSING_STOCK',
+    ],
+    MISSING_PRICING: [
+      'FEED_ELIGIBLE_MISSING_PRICING',
+      'FEED_BLOCKED_MISSING_PRICING',
+    ],
+    STALE_PRICING: [
+      'FEED_ELIGIBLE_STALE_PRICING',
+      'FEED_BLOCKED_STALE_PRICING',
+    ],
+    NO_COMPETITOR: [
+      'FEED_ELIGIBLE_NO_COMPETITOR',
+      'FEED_BLOCKED_NO_COMPETITOR',
+    ],
+    MANUAL: [
+      'FEED_ELIGIBLE_MANUAL_OVERRIDE',
+      'FEED_BLOCKED_MANUAL_OVERRIDE',
+    ],
+  }
+
+  return (
+    category === null ||
+    (categories[category]?.includes(reasonCode) ??
+      true)
+  )
+}
+
+arukeresoApi.get(
+  '/feed/output-preview',
+  async (context) => {
+    try {
+      const requestedLimit = Number(
+        context.req.query('limit') ??
+          FEED_OUTPUT_SAMPLE_DEFAULT,
+      )
+      const limit = Number.isFinite(
+        requestedLimit,
+      )
+        ? Math.min(
+            Math.max(
+              Math.trunc(requestedLimit),
+              0,
+            ),
+            FEED_OUTPUT_SAMPLE_MAX,
+          )
+        : FEED_OUTPUT_SAMPLE_DEFAULT
+      const requestedOffset = Number(
+        context.req.query('offset') ?? 0,
+      )
+      const offset = Number.isFinite(
+        requestedOffset,
+      )
+        ? Math.max(
+            Math.trunc(requestedOffset),
+            0,
+          )
+        : 0
+      const search =
+        context.req
+          .query('search')
+          ?.trim()
+          .toLowerCase() || null
+      const included =
+        context.req.query('included')
+      const priceKitStatus =
+        context.req.query('priceKitStatus')
+      const stockStatus =
+        context.req.query('stockStatus')
+      const reasonCategory =
+        context.req.query('reasonCategory') ?? null
+      const output =
+        await buildCatalogFeedOutput()
+      const filteredItems = output.items.filter(
+        (item) => {
+          if (
+            search !== null &&
+            !item.sku
+              .toLowerCase()
+              .includes(search) &&
+            !item.source.Name.toLowerCase().includes(
+              search,
+            )
+          ) {
+            return false
+          }
+
+          if (
+            included === 'true' &&
+            !item.result.included
+          ) {
+            return false
+          }
+
+          if (
+            included === 'false' &&
+            item.result.included
+          ) {
+            return false
+          }
+
+          if (
+            priceKitStatus &&
+            item.result.reasonDetails
+              .priceKitStatus !== priceKitStatus
+          ) {
+            return false
+          }
+
+          if (
+            stockStatus &&
+            item.stockStatus !== stockStatus
+          ) {
+            return false
+          }
+
+          return matchesFeedReasonCategory(
+            item.result.reasonCode,
+            reasonCategory,
+          )
+        },
+      )
+
+      return context.json({
+        status: 'ok',
+        channel: FEED_CHANNEL_CODE,
+        summary: output.summary,
+        reasonCounts: output.reasonCounts,
+        settings: output.settings,
+        appliedDefaults:
+          output.appliedDefaults,
+        safety: output.safety,
+        ordering:
+          'Identifier ascending; sourceItemKey, SKU and catalog row ID are stable fallbacks.',
+        pagination: {
+          limit,
+          offset,
+          total: filteredItems.length,
+        },
+        sample: filteredItems
+          .slice(offset, offset + limit)
+          .map(toFeedOutputSample),
+      })
+    } catch (error) {
+      console.error(
+        'Feed output preview failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          code:
+            error instanceof FeedOutputError
+              ? error.code
+              : 'FEED_OUTPUT_PREVIEW_FAILED',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Feed output preview failed.',
+        },
+        error instanceof FeedOutputError
+          ? 422
+          : 500,
+      )
+    }
+  },
+)
+
 arukeresoApi.get(
   '/catalog/promotion-preview',
   async (context) => {
@@ -4722,6 +4950,1271 @@ function evaluateFeedEligibility(input: {
     reasonDetails,
   }
 }
+
+const FEED_GENERATOR_VERSION =
+  'ARUKERESO_FILTERED_CMS_CSV_V1'
+const FEED_OUTPUT_FILE_NAME =
+  'arukereso-feed.csv'
+const FEED_OUTPUT_SAMPLE_DEFAULT = 20
+const FEED_OUTPUT_SAMPLE_MAX = 100
+const FEED_MIN_INCLUDED_ITEMS_DEFAULT = 1
+
+type CatalogFeedSourceRow = Record<
+  CatalogHeader,
+  string
+>
+
+type CatalogFeedOutputItem = {
+  catalogSourceItemId: string
+  sourceItemKey: string
+  sourceFingerprint: string | null
+  productId: string
+  sku: string
+  identifier: string | null
+  eanCode: string | null
+  name: string | null
+  priceMinor: number | null
+  netPriceMinor: number | null
+  deliveryCostMinor: number | null
+  deliveryTimeDays: number | null
+  source: CatalogFeedSourceRow
+  pricingRow: FeedPricingRowInput
+  stockQuantity: number | null
+  inclusionMode: FeedEligibilityOverride
+  result: ReturnType<
+    typeof evaluateFeedEligibility
+  >
+  stockStatus:
+    | 'IN_STOCK'
+    | 'OUT_OF_STOCK'
+    | 'MISSING_STOCK'
+}
+
+class FeedOutputError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+  ) {
+    super(message)
+    this.name = 'FeedOutputError'
+  }
+}
+
+function parseCatalogFeedSourceRow(
+  rawDataJson: string | null,
+  catalogSourceItemId: string,
+): CatalogFeedSourceRow {
+  let parsed: unknown
+
+  try {
+    parsed =
+      rawDataJson === null
+        ? null
+        : JSON.parse(rawDataJson)
+  } catch {
+    throw new FeedOutputError(
+      `A katalógussor raw_data_json mezője nem értelmezhető: ${catalogSourceItemId}.`,
+      'INVALID_RAW_DATA_JSON',
+    )
+  }
+
+  if (
+    parsed === null ||
+    typeof parsed !== 'object' ||
+    Array.isArray(parsed)
+  ) {
+    throw new FeedOutputError(
+      `A katalógussor raw_data_json mezője nem objektum: ${catalogSourceItemId}.`,
+      'INVALID_RAW_DATA_JSON',
+    )
+  }
+
+  const source = parsed as Record<
+    string,
+    unknown
+  >
+  const result = {} as CatalogFeedSourceRow
+
+  for (const header of EXPECTED_CATALOG_HEADERS) {
+    if (typeof source[header] !== 'string') {
+      throw new FeedOutputError(
+        `A katalógussorból hiányzik a(z) ${header} forrásmező: ${catalogSourceItemId}.`,
+        'MISSING_RAW_SOURCE_FIELD',
+      )
+    }
+
+    result[header] = source[header]
+  }
+
+  return result
+}
+
+function escapeFeedCsvCell(value: string) {
+  return /[;"\r\n]/.test(value)
+    ? `"${value.replace(/"/g, '""')}"`
+    : value
+}
+
+function serializeCatalogFeedCsv(
+  rows: CatalogFeedSourceRow[],
+) {
+  // ProductNumber is intentionally omitted until its CMS mapping is confirmed.
+  const lines = [
+    EXPECTED_CATALOG_HEADERS.join(';'),
+  ]
+
+  for (const row of rows) {
+    lines.push(
+      EXPECTED_CATALOG_HEADERS.map(
+        (header) =>
+          escapeFeedCsvCell(row[header]),
+      ).join(';'),
+    )
+  }
+
+  return `${lines.join('\r\n')}\r\n`
+}
+
+function resolveFeedGenerationSafety(
+  settingsJson: string | null,
+) {
+  const stored =
+    readStoredFeedSettings(settingsJson)
+  const configured = stored['minIncludedItems']
+
+  return {
+    minIncludedItems:
+      typeof configured === 'number' &&
+      Number.isInteger(configured) &&
+      configured >= 1
+        ? configured
+        : FEED_MIN_INCLUDED_ITEMS_DEFAULT,
+  }
+}
+
+function assertFeedOutputSafety(
+  includedRows: number,
+  minIncludedItems: number,
+) {
+  if (includedRows < minIncludedItems) {
+    throw new FeedOutputError(
+      `A generálás leállt: ${includedRows} feed-sor nem éri el a minimális ${minIncludedItems} sort.`,
+      'MIN_INCLUDED_ITEMS_NOT_MET',
+    )
+  }
+}
+
+type FeedOutputContext = {
+  database: ReturnType<typeof requireDatabase>
+  channel: NonNullable<
+    Awaited<
+      ReturnType<typeof resolveFeedChannel>
+    >['channel']
+  >
+}
+
+async function buildCatalogFeedOutput(
+  context?: FeedOutputContext,
+) {
+  const resolved =
+    context ?? (await resolveFeedChannel())
+
+  if (!resolved.channel) {
+    throw new FeedOutputError(
+      'Az Árukereső feed csatorna nincs konfigurálva (ARUKERESO_HU).',
+      'FEED_CHANNEL_NOT_FOUND',
+    )
+  }
+
+  const { database, channel } = resolved
+  const { settings, appliedDefaults } =
+    resolveFeedEligibilitySettings(
+      channel.settingsJson,
+    )
+
+  const [
+    catalogConnections,
+    pricingConnections,
+    inventoryConnections,
+    overrides,
+  ] = await Promise.all([
+    database
+      .select({ id: dataConnections.id })
+      .from(dataConnections)
+      .where(
+        and(
+          eq(
+            dataConnections.sourceType,
+            'CSV_UPLOAD',
+          ),
+          eq(
+            dataConnections.purpose,
+            'CATALOG',
+          ),
+          eq(dataConnections.isActive, true),
+        ),
+      ),
+    database
+      .select({ id: dataConnections.id })
+      .from(dataConnections)
+      .where(
+        and(
+          eq(
+            dataConnections.purpose,
+            'PRICING',
+          ),
+          eq(dataConnections.isActive, true),
+        ),
+      ),
+    database
+      .select({ id: dataConnections.id })
+      .from(dataConnections)
+      .where(
+        and(
+          eq(
+            dataConnections.purpose,
+            'INVENTORY',
+          ),
+          eq(dataConnections.isActive, true),
+        ),
+      )
+      .limit(1),
+    database
+      .select({
+        productId:
+          feedProductOverrides.productId,
+        inclusionMode:
+          feedProductOverrides.inclusionMode,
+      })
+      .from(feedProductOverrides)
+      .where(
+        eq(
+          feedProductOverrides.channelId,
+          channel.id,
+        ),
+      ),
+  ])
+
+  if (catalogConnections.length !== 1) {
+    throw new FeedOutputError(
+      catalogConnections.length === 0
+        ? 'Nincs aktív CSV katalóguskapcsolat.'
+        : 'Több aktív CSV katalóguskapcsolat található; a forrás nem egyértelmű.',
+      'CATALOG_CONNECTION_NOT_UNIQUE',
+    )
+  }
+
+  const catalogConnection =
+    catalogConnections[0]
+
+  if (!catalogConnection) {
+    throw new FeedOutputError(
+      'Nincs aktív CSV katalóguskapcsolat.',
+      'CATALOG_CONNECTION_NOT_FOUND',
+    )
+  }
+
+  const pricingConnectionIds =
+    pricingConnections.map(
+      (connection) => connection.id,
+    )
+  const activeInventoryConnection =
+    inventoryConnections[0] ?? null
+
+  const [
+    catalogRows,
+    pricingRows,
+    inventoryRows,
+  ] = await Promise.all([
+    database
+      .select({
+        id: catalogSourceItems.id,
+        productId: catalogSourceItems.productId,
+        sourceItemKey:
+          catalogSourceItems.sourceItemKey,
+        identifier:
+          catalogSourceItems.identifier,
+        eanCode: catalogSourceItems.eanCode,
+        name: catalogSourceItems.name,
+        priceMinor:
+          catalogSourceItems.priceMinor,
+        netPriceMinor:
+          catalogSourceItems.netPriceMinor,
+        deliveryCostMinor:
+          catalogSourceItems.deliveryCostMinor,
+        deliveryTimeDays:
+          catalogSourceItems.deliveryTimeDays,
+        sourceFingerprint:
+          catalogSourceItems.sourceFingerprint,
+        rawDataJson:
+          catalogSourceItems.rawDataJson,
+        lastImportRunId:
+          catalogSourceItems.lastImportRunId,
+        sku: products.sku,
+      })
+      .from(catalogSourceItems)
+      .leftJoin(
+        products,
+        eq(
+          products.id,
+          catalogSourceItems.productId,
+        ),
+      )
+      .where(
+        eq(
+          catalogSourceItems.connectionId,
+          catalogConnection.id,
+        ),
+      ),
+    pricingConnectionIds.length > 0
+      ? database
+          .select({
+            productId:
+              pricingSourceItems.productId,
+            priceIndexBps:
+              pricingSourceItems.priceIndexBps,
+            medianIndexBps:
+              pricingSourceItems.medianIndexBps,
+            averageIndexBps:
+              pricingSourceItems.averageIndexBps,
+            dataStatus:
+              pricingSourceItems.dataStatus,
+            observedAt:
+              pricingSourceItems.observedAt,
+          })
+          .from(pricingSourceItems)
+          .where(
+            and(
+              inArray(
+                pricingSourceItems.connectionId,
+                pricingConnectionIds,
+              ),
+              eq(
+                pricingSourceItems.marketCode,
+                'HU',
+              ),
+              eq(
+                pricingSourceItems.currency,
+                'HUF',
+              ),
+            ),
+          )
+      : [],
+    activeInventoryConnection
+      ? database
+          .select({
+            sku: inventorySourceItems.sku,
+            stock: inventorySourceItems.stock,
+          })
+          .from(inventorySourceItems)
+          .where(
+            eq(
+              inventorySourceItems.connectionId,
+              activeInventoryConnection.id,
+            ),
+          )
+      : [],
+  ])
+
+  if (catalogRows.length === 0) {
+    throw new FeedOutputError(
+      'Az aktív katalógusforrás nem tartalmaz feed-sorokat.',
+      'EMPTY_CATALOG_SOURCE',
+    )
+  }
+
+  const pricingByProduct = new Map<
+    string,
+    NonNullable<FeedPricingRowInput>
+  >()
+
+  for (const row of pricingRows) {
+    if (row.productId === null) {
+      continue
+    }
+
+    const current = pricingByProduct.get(
+      row.productId,
+    )
+
+    if (
+      !current ||
+      (row.observedAt instanceof Date &&
+        (!(current.observedAt instanceof Date) ||
+          row.observedAt.getTime() >
+            current.observedAt.getTime()))
+    ) {
+      pricingByProduct.set(row.productId, {
+        priceIndexBps: row.priceIndexBps,
+        medianIndexBps: row.medianIndexBps,
+        averageIndexBps: row.averageIndexBps,
+        dataStatus: row.dataStatus,
+        observedAt: row.observedAt,
+      })
+    }
+  }
+
+  const inventoryStockBySku = new Map(
+    inventoryRows.map((row) => [
+      row.sku,
+      row.stock,
+    ]),
+  )
+  const overrideByProduct = new Map(
+    overrides.map((row) => [
+      row.productId,
+      row.inclusionMode,
+    ]),
+  )
+  const seenProductIds = new Set<string>()
+  const now = new Date()
+  const items: CatalogFeedOutputItem[] = []
+
+  for (const row of catalogRows) {
+    if (row.productId === null || row.sku === null) {
+      continue
+    }
+
+    if (seenProductIds.has(row.productId)) {
+      throw new FeedOutputError(
+        `Több katalógussor kapcsolódik ugyanahhoz a termékhez: ${row.productId}.`,
+        'DUPLICATE_CATALOG_PRODUCT',
+      )
+    }
+
+    seenProductIds.add(row.productId)
+
+    const source = parseCatalogFeedSourceRow(
+      row.rawDataJson,
+      row.id,
+    )
+    const pricingRow =
+      pricingByProduct.get(row.productId) ?? null
+    const stockQuantity =
+      inventoryStockBySku.get(row.sku) ?? null
+    const inclusionMode =
+      overrideByProduct.get(row.productId) ??
+      'INHERIT'
+    const result = evaluateFeedEligibility({
+      pricingRow,
+      stockQuantity,
+      override: inclusionMode,
+      settings,
+      now,
+    })
+
+    items.push({
+      catalogSourceItemId: row.id,
+      sourceItemKey: row.sourceItemKey,
+      sourceFingerprint: row.sourceFingerprint,
+      productId: row.productId,
+      sku: row.sku,
+      identifier: row.identifier,
+      eanCode: row.eanCode,
+      name: row.name,
+      priceMinor: row.priceMinor,
+      netPriceMinor: row.netPriceMinor,
+      deliveryCostMinor:
+        row.deliveryCostMinor,
+      deliveryTimeDays:
+        row.deliveryTimeDays,
+      source,
+      pricingRow,
+      stockQuantity,
+      inclusionMode,
+      result,
+      stockStatus:
+        stockQuantity === null
+          ? 'MISSING_STOCK'
+          : stockQuantity > 0
+            ? 'IN_STOCK'
+            : 'OUT_OF_STOCK',
+    })
+  }
+
+  if (items.length === 0) {
+    throw new FeedOutputError(
+      'Az aktív katalógusforrás nem tartalmaz termékhez kapcsolt sorokat.',
+      'NO_MATCHED_CATALOG_ROWS',
+    )
+  }
+
+  items.sort((left, right) => {
+    const leftKey =
+      left.source.Identifier ||
+      left.sourceItemKey ||
+      left.sku
+    const rightKey =
+      right.source.Identifier ||
+      right.sourceItemKey ||
+      right.sku
+
+    if (leftKey !== rightKey) {
+      return leftKey < rightKey ? -1 : 1
+    }
+
+    return left.catalogSourceItemId <
+      right.catalogSourceItemId
+      ? -1
+      : 1
+  })
+
+  const summary = {
+    sourceRows: catalogRows.length,
+    matchedRows: items.length,
+    unmatchedRows:
+      catalogRows.length - items.length,
+    includedRows: 0,
+    excludedRows: 0,
+    forceIncluded: 0,
+    forceExcluded: 0,
+    ruleBasedIncluded: 0,
+    ruleBasedExcluded: 0,
+    priceKitWithoutData: 0,
+    blockedByStock: 0,
+    blockedByIndex: 0,
+    missingEnabledMetric: 0,
+  }
+  const reasonCounts: Record<string, number> = {}
+
+  for (const item of items) {
+    if (item.result.included) {
+      summary.includedRows += 1
+    } else {
+      summary.excludedRows += 1
+    }
+
+    if (item.inclusionMode === 'FORCE_INCLUDE') {
+      summary.forceIncluded += 1
+    } else if (
+      item.inclusionMode === 'FORCE_EXCLUDE'
+    ) {
+      summary.forceExcluded += 1
+    } else if (item.result.included) {
+      summary.ruleBasedIncluded += 1
+    } else {
+      summary.ruleBasedExcluded += 1
+    }
+
+    reasonCounts[item.result.reasonCode] =
+      (reasonCounts[item.result.reasonCode] ?? 0) +
+      1
+
+    if (
+      item.result.reasonDetails.priceKitStatus ===
+      'NO_DATA'
+    ) {
+      summary.priceKitWithoutData += 1
+    }
+
+    if (
+      item.result.reasonCode ===
+        'FEED_BLOCKED_OUT_OF_STOCK' ||
+      item.result.reasonCode ===
+        'FEED_BLOCKED_MISSING_STOCK'
+    ) {
+      summary.blockedByStock += 1
+    }
+
+    if (
+      item.result.reasonCode ===
+        'FEED_BLOCKED_MIN_INDEX' ||
+      item.result.reasonCode ===
+        'FEED_BLOCKED_MEDIAN_INDEX' ||
+      item.result.reasonCode ===
+        'FEED_BLOCKED_AVERAGE_INDEX'
+    ) {
+      summary.blockedByIndex += 1
+    }
+
+    if (
+      item.result.reasonCode ===
+        'FEED_BLOCKED_MISSING_MIN_INDEX' ||
+      item.result.reasonCode ===
+        'FEED_BLOCKED_MISSING_MEDIAN_INDEX' ||
+      item.result.reasonCode ===
+        'FEED_BLOCKED_MISSING_AVERAGE_INDEX'
+    ) {
+      summary.missingEnabledMetric += 1
+    }
+  }
+
+  return {
+    database,
+    channel,
+    settings,
+    appliedDefaults,
+    safety: resolveFeedGenerationSafety(
+      channel.settingsJson,
+    ),
+    sourceSnapshot: {
+      catalogConnectionId: catalogConnection.id,
+      catalogImportRunIds: Array.from(
+        new Set(
+          catalogRows
+            .map((row) => row.lastImportRunId)
+            .filter(
+              (value): value is string =>
+                value !== null,
+            ),
+        ),
+      ).sort(),
+      pricingConnectionIds:
+        pricingConnectionIds.slice().sort(),
+      inventoryConnectionId:
+        activeInventoryConnection?.id ?? null,
+      sourceRows: catalogRows.length,
+      matchedRows: items.length,
+    },
+    items,
+    summary,
+    reasonCounts,
+  }
+}
+
+arukeresoApi.post(
+  '/feed/generate',
+  async (context) => {
+    let body: unknown
+
+    try {
+      body = await context.req.json()
+    } catch {
+      body = null
+    }
+
+    if (
+      body === null ||
+      typeof body !== 'object' ||
+      Array.isArray(body) ||
+      (body as Record<string, unknown>)[
+        'confirm'
+      ] !== true
+    ) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'A feed generálásához confirm=true szükséges.',
+        },
+        400,
+      )
+    }
+
+    const { database, channel } =
+      await resolveFeedChannel()
+
+    if (!channel) {
+      return context.json(
+        {
+          status: 'error',
+          code: 'FEED_CHANNEL_NOT_FOUND',
+          message:
+            'Az Árukereső feed csatorna nincs konfigurálva (ARUKERESO_HU).',
+        },
+        409,
+      )
+    }
+
+    const resolvedSettings =
+      resolveFeedEligibilitySettings(
+        channel.settingsJson,
+      )
+    const safety = resolveFeedGenerationSafety(
+      channel.settingsJson,
+    )
+    const channelSnapshot = {
+      id: channel.id,
+      code: channel.code,
+      targetCountry: channel.targetCountry,
+      contentLanguage:
+        channel.contentLanguage,
+      currency: channel.currency,
+      format: channel.format,
+    }
+    const [run] = await database
+      .insert(feedRuns)
+      .values({
+        channelId: channel.id,
+        triggerType: 'MANUAL',
+        status: 'RUNNING',
+        generatorVersion:
+          FEED_GENERATOR_VERSION,
+        ruleVersion: String(
+          resolvedSettings.settings.ruleVersion,
+        ),
+        channelSnapshotJson:
+          JSON.stringify(channelSnapshot),
+        sourceSnapshotJson: JSON.stringify({
+          status: 'RESOLVING',
+        }),
+        ruleSnapshotJson: JSON.stringify({
+          settings: resolvedSettings.settings,
+          appliedDefaults:
+            resolvedSettings.appliedDefaults,
+          safety,
+        }),
+        startedAt: new Date(),
+      })
+      .returning({ id: feedRuns.id })
+
+    if (!run) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'A feed generálási futás nem hozható létre.',
+        },
+        500,
+      )
+    }
+
+    let output: Awaited<
+      ReturnType<typeof buildCatalogFeedOutput>
+    > | null = null
+
+    try {
+      output = await buildCatalogFeedOutput({
+        database,
+        channel,
+      })
+
+      assertFeedOutputSafety(
+        output.summary.includedRows,
+        output.safety.minIncludedItems,
+      )
+
+      const csv = createCatalogFeedCsv(
+        output.items,
+      )
+      const artifactFingerprint =
+        createFeedFingerprint(csv)
+      const inputFingerprint =
+        createFeedFingerprint(
+          JSON.stringify(
+            output.items.map((item) => ({
+              catalogSourceItemId:
+                item.catalogSourceItemId,
+              sourceFingerprint:
+                item.sourceFingerprint,
+              productId: item.productId,
+              pricingRow: item.pricingRow,
+              stockQuantity: item.stockQuantity,
+              inclusionMode:
+                item.inclusionMode,
+              decision: item.result.decision,
+              reasonCode:
+                item.result.reasonCode,
+            })),
+          ),
+        )
+      const insertItemQueries = []
+
+      for (
+        let offset = 0;
+        offset < output.items.length;
+        offset += 200
+      ) {
+        const chunk = output.items
+          .slice(offset, offset + 200)
+          .map((item, chunkIndex) => {
+            const resolvedItem = {
+              catalogSourceItemId:
+                item.catalogSourceItemId,
+              source: item.source,
+            }
+
+            return {
+              runId: run.id,
+              productId: item.productId,
+              itemIndex: offset + chunkIndex,
+              externalItemId:
+                `catalog:${item.catalogSourceItemId}`,
+              sku: item.sku,
+              identifier: item.identifier,
+              eanCode: item.eanCode,
+              name: item.name,
+              decision: item.result.decision,
+              reasonCodesJson: JSON.stringify([
+                item.result.reasonCode,
+              ]),
+              stock: item.stockQuantity,
+              priceMinor: item.priceMinor,
+              netPriceMinor:
+                item.netPriceMinor,
+              deliveryCostMinor:
+                item.deliveryCostMinor,
+              deliveryTimeDays:
+                item.deliveryTimeDays,
+              currency: channel.currency,
+              manualOverrideApplied:
+                item.inclusionMode !== 'INHERIT',
+              inputSnapshotJson: JSON.stringify({
+                catalogSourceItemId:
+                  item.catalogSourceItemId,
+                sourceFingerprint:
+                  item.sourceFingerprint,
+                pricingRow: item.pricingRow,
+                stockQuantity:
+                  item.stockQuantity,
+              }),
+              overrideSnapshotJson:
+                item.inclusionMode === 'INHERIT'
+                  ? null
+                  : JSON.stringify({
+                      inclusionMode:
+                        item.inclusionMode,
+                    }),
+              decisionDetailsJson:
+                JSON.stringify(
+                  item.result.reasonDetails,
+                ),
+              resolvedItemJson:
+                JSON.stringify(resolvedItem),
+              payloadFingerprint:
+                createFeedFingerprint(
+                  JSON.stringify(resolvedItem),
+                ),
+            }
+          })
+
+        insertItemQueries.push(
+          database
+            .insert(feedRunItems)
+            .values(chunk),
+        )
+      }
+
+      const completeRun = database
+        .update(feedRuns)
+        .set({
+          status: 'COMPLETED',
+          itemsEvaluated:
+            output.summary.matchedRows,
+          itemsIncluded:
+            output.summary.includedRows,
+          itemsExcluded:
+            output.summary.excludedRows,
+          inputFingerprint,
+          outputFingerprint:
+            artifactFingerprint,
+          sourceSnapshotJson: JSON.stringify(
+            output.sourceSnapshot,
+          ),
+          ruleSnapshotJson: JSON.stringify({
+            settings: output.settings,
+            appliedDefaults:
+              output.appliedDefaults,
+            safety: output.safety,
+          }),
+          artifactFileName:
+            FEED_OUTPUT_FILE_NAME,
+          artifactContentType:
+            'text/csv; charset=utf-8',
+          artifactFingerprint,
+          finishedAt: new Date(),
+        })
+        .where(eq(feedRuns.id, run.id))
+      const markChannelSuccessful = database
+        .update(feedChannels)
+        .set({
+          lastSuccessfulAt: new Date(),
+          lastError: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(feedChannels.id, channel.id))
+      const batchQueries = [
+        ...insertItemQueries,
+        completeRun,
+        markChannelSuccessful,
+      ]
+
+      await database.batch(
+        batchQueries as [
+          (typeof batchQueries)[number],
+          ...(typeof batchQueries)[number][],
+        ],
+      )
+
+      return context.json({
+        status: 'ok',
+        channel: FEED_CHANNEL_CODE,
+        runId: run.id,
+        summary: output.summary,
+        reasonCounts: output.reasonCounts,
+        artifact: {
+          fileName: FEED_OUTPUT_FILE_NAME,
+          contentType:
+            'text/csv; charset=utf-8',
+          fingerprint: artifactFingerprint,
+          downloadPath:
+            `/arukereso/feed/runs/${run.id}/csv`,
+        },
+      })
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Feed generation failed.'
+
+      await database
+        .update(feedRuns)
+        .set({
+          status: 'FAILED',
+          itemsEvaluated:
+            output?.summary.matchedRows ?? 0,
+          itemsIncluded:
+            output?.summary.includedRows ?? 0,
+          itemsExcluded:
+            output?.summary.excludedRows ?? 0,
+          sourceSnapshotJson: JSON.stringify(
+            output?.sourceSnapshot ?? {
+              status: 'LOAD_FAILED',
+            },
+          ),
+          error:
+            error instanceof FeedOutputError
+              ? `[${error.code}] ${message}`
+              : message,
+          finishedAt: new Date(),
+        })
+        .where(eq(feedRuns.id, run.id))
+
+      console.error(
+        'Feed generation failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          runId: run.id,
+          code:
+            error instanceof FeedOutputError
+              ? error.code
+              : 'FEED_GENERATION_FAILED',
+          message,
+        },
+        error instanceof FeedOutputError
+          ? 422
+          : 500,
+      )
+    }
+  },
+)
+
+async function buildFeedRunCsv(runId: string) {
+  const { database, channel } =
+    await resolveFeedChannel()
+
+  if (!channel) {
+    throw new FeedOutputError(
+      'Az Árukereső feed csatorna nincs konfigurálva.',
+      'FEED_CHANNEL_NOT_FOUND',
+    )
+  }
+
+  const [run] = await database
+    .select({
+      id: feedRuns.id,
+      status: feedRuns.status,
+      itemsIncluded: feedRuns.itemsIncluded,
+      artifactFileName:
+        feedRuns.artifactFileName,
+      artifactFingerprint:
+        feedRuns.artifactFingerprint,
+      generatorVersion:
+        feedRuns.generatorVersion,
+    })
+    .from(feedRuns)
+    .where(
+      and(
+        eq(feedRuns.id, runId),
+        eq(feedRuns.channelId, channel.id),
+      ),
+    )
+    .limit(1)
+
+  if (!run) {
+    throw new FeedOutputError(
+      'A feed futás nem található.',
+      'FEED_RUN_NOT_FOUND',
+    )
+  }
+
+  if (run.status !== 'COMPLETED') {
+    throw new FeedOutputError(
+      'Csak sikeresen befejezett feed tölthető le.',
+      'FEED_RUN_NOT_COMPLETED',
+    )
+  }
+
+  if (
+    run.generatorVersion !==
+    FEED_GENERATOR_VERSION
+  ) {
+    throw new FeedOutputError(
+      'A feed futás nem ezzel a generátorverzióval készült.',
+      'UNSUPPORTED_FEED_GENERATOR_VERSION',
+    )
+  }
+
+  const runItems = await database
+    .select({
+      resolvedItemJson:
+        feedRunItems.resolvedItemJson,
+    })
+    .from(feedRunItems)
+    .where(
+      and(
+        eq(feedRunItems.runId, run.id),
+        eq(feedRunItems.decision, 'INCLUDED'),
+      ),
+    )
+    .orderBy(asc(feedRunItems.itemIndex))
+
+  if (runItems.length !== run.itemsIncluded) {
+    throw new FeedOutputError(
+      'A feed futás elemszáma nem egyezik a naplózott értékkel.',
+      'FEED_RUN_ITEM_COUNT_MISMATCH',
+    )
+  }
+
+  const rows = runItems.map((item, index) => {
+    let resolved: unknown
+
+    try {
+      resolved =
+        item.resolvedItemJson === null
+          ? null
+          : JSON.parse(item.resolvedItemJson)
+    } catch {
+      resolved = null
+    }
+
+    if (
+      resolved === null ||
+      typeof resolved !== 'object' ||
+      Array.isArray(resolved) ||
+      !('source' in resolved)
+    ) {
+      throw new FeedOutputError(
+        `A feed futás ${index + 1}. elemének tartalma sérült.`,
+        'INVALID_RESOLVED_FEED_ITEM',
+      )
+    }
+
+    return parseCatalogFeedSourceRow(
+      JSON.stringify(
+        (resolved as { source: unknown })
+          .source,
+      ),
+      `${run.id}:${index}`,
+    )
+  })
+  const csv = serializeCatalogFeedCsv(rows)
+  const fingerprint =
+    createFeedFingerprint(csv)
+
+  if (
+    run.artifactFingerprint === null ||
+    run.artifactFingerprint !== fingerprint
+  ) {
+    throw new FeedOutputError(
+      'A regenerált feed ujjlenyomata nem egyezik a futás rekordjával.',
+      'FEED_ARTIFACT_FINGERPRINT_MISMATCH',
+    )
+  }
+
+  return {
+    csv,
+    fileName:
+      run.artifactFileName ??
+      FEED_OUTPUT_FILE_NAME,
+  }
+}
+
+function feedCsvResponse(input: {
+  csv: string
+  fileName: string
+}) {
+  return new Response(input.csv, {
+    headers: {
+      'Content-Type':
+        'text/csv; charset=utf-8',
+      'Content-Disposition':
+        `attachment; filename="${input.fileName}"`,
+      'Cache-Control': 'no-store',
+    },
+  })
+}
+
+async function feedDownloadErrorResponse(
+  context: Context,
+  action: () => Promise<{
+    csv: string
+    fileName: string
+  }>,
+) {
+  try {
+    return feedCsvResponse(await action())
+  } catch (error) {
+    return context.json(
+      {
+        status: 'error',
+        code:
+          error instanceof FeedOutputError
+            ? error.code
+            : 'FEED_DOWNLOAD_FAILED',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Feed download failed.',
+      },
+      error instanceof FeedOutputError
+        ? 422
+        : 500,
+    )
+  }
+}
+
+arukeresoApi.get(
+  '/feed/runs/:runId/csv',
+  async (context) => {
+    const runId = context.req.param('runId')
+
+    if (!isUuid(runId)) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Érvénytelen runId.',
+        },
+        400,
+      )
+    }
+
+    return feedDownloadErrorResponse(
+      context,
+      () => buildFeedRunCsv(runId),
+    )
+  },
+)
+
+arukeresoApi.get(
+  '/feed/latest',
+  async (context) => {
+    try {
+      const { database, channel } =
+        await resolveFeedChannel()
+
+      if (!channel) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Az Árukereső feed csatorna nincs konfigurálva.',
+          },
+          409,
+        )
+      }
+
+      const [latestRun] = await database
+        .select({
+          runId: feedRuns.id,
+          status: feedRuns.status,
+          includedRows:
+            feedRuns.itemsIncluded,
+          excludedRows:
+            feedRuns.itemsExcluded,
+          finishedAt: feedRuns.finishedAt,
+          artifactFingerprint:
+            feedRuns.artifactFingerprint,
+        })
+        .from(feedRuns)
+        .where(
+          and(
+            eq(
+              feedRuns.channelId,
+              channel.id,
+            ),
+            eq(feedRuns.status, 'COMPLETED'),
+            eq(
+              feedRuns.generatorVersion,
+              FEED_GENERATOR_VERSION,
+            ),
+          ),
+        )
+        .orderBy(desc(feedRuns.startedAt))
+        .limit(1)
+
+      return context.json({
+        status: 'ok',
+        latestRun: latestRun ?? null,
+      })
+    } catch (error) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'A legutóbbi feed betöltése sikertelen.',
+        },
+        500,
+      )
+    }
+  },
+)
+
+arukeresoApi.get(
+  '/feed/latest.csv',
+  async (context) =>
+    feedDownloadErrorResponse(
+      context,
+      async () => {
+        const { database, channel } =
+          await resolveFeedChannel()
+
+        if (!channel) {
+          throw new FeedOutputError(
+            'Az Árukereső feed csatorna nincs konfigurálva.',
+            'FEED_CHANNEL_NOT_FOUND',
+          )
+        }
+
+        const [latestRun] = await database
+          .select({ id: feedRuns.id })
+          .from(feedRuns)
+          .where(
+            and(
+              eq(
+                feedRuns.channelId,
+                channel.id,
+              ),
+              eq(
+                feedRuns.status,
+                'COMPLETED',
+              ),
+              eq(
+                feedRuns.generatorVersion,
+                FEED_GENERATOR_VERSION,
+              ),
+            ),
+          )
+          .orderBy(desc(feedRuns.startedAt))
+          .limit(1)
+
+        if (!latestRun) {
+          throw new FeedOutputError(
+            'Még nincs sikeresen generált feed.',
+            'SUCCESSFUL_FEED_RUN_NOT_FOUND',
+          )
+        }
+
+        return buildFeedRunCsv(latestRun.id)
+      },
+    ),
+)
 
 arukeresoApi.get(
   '/feed/preview',
@@ -5972,9 +7465,15 @@ arukeresoApi.delete(
 
 export {
   arukeresoApi,
+  assertFeedOutputSafety,
+  buildCatalogFeedOutput,
+  createCatalogFeedCsv,
   evaluateFeedEligibility,
+  parseSemicolonCsv,
+  parseCatalogFeedSourceRow,
   resolvePriceKitStatus,
   resolveFeedEligibilitySettings,
+  serializeCatalogFeedCsv,
   FEED_ELIGIBILITY_DEFAULT_SETTINGS,
   FEED_CHANNEL_CODE,
 }
