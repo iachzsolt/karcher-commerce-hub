@@ -8149,6 +8149,14 @@ input:checked + span::after {
   line-height: 1.45;
 }
 
+.arukereso-preview-delivery {
+  display: block;
+  margin-top: 4px;
+  color: #777;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
 .arukereso-preview-management-link {
   margin-top: 12px;
   color: #777;

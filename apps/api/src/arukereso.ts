@@ -3893,13 +3893,28 @@ function createFeedFingerprint(value: string) {
     .digest('hex')
 }
 
+function toCatalogFeedOutputRow(
+  item: CatalogFeedOutputItem,
+): CatalogFeedOutputRow {
+  // Every valid matched catalog row stays in the
+  // output. Eligibility only controls DeliveryTime:
+  // excluded offers are disabled via DeliveryTime=NO.
+  // raw_data_json in the database is never mutated;
+  // the override applies to the output representation.
+  return {
+    ...item.source,
+    DeliveryTime: item.result.included
+      ? item.source.DeliveryTime
+      : 'NO',
+    ProductNumber: item.sku,
+  }
+}
+
 function createCatalogFeedCsv(
   items: CatalogFeedOutputItem[],
 ) {
   return serializeCatalogFeedCsv(
-    items
-      .filter((item) => item.result.included)
-      .map((item) => item.source),
+    items.map(toCatalogFeedOutputRow),
   )
 }
 
@@ -3925,6 +3940,10 @@ function toFeedOutputSample(
       item.result.reasonDetails.averageIndexBps,
     stockQuantity: item.stockQuantity,
     stockStatus: item.stockStatus,
+    productNumber: item.sku,
+    outputDeliveryTime: item.result.included
+      ? item.source.DeliveryTime
+      : 'NO',
   }
 }
 
@@ -4764,30 +4783,10 @@ function evaluateFeedEligibility(input: {
   if (
     inclusionMode === 'FORCE_INCLUDE'
   ) {
-    // Manual include bypasses PriceKit/index rules,
-    // but inventory safety still applies when enabled.
-    if (settings.useStockRule) {
-      if (input.stockQuantity === null) {
-        return {
-          included: false,
-          decision: 'EXCLUDED',
-          reasonCode:
-            'FEED_BLOCKED_MISSING_STOCK',
-          reasonDetails,
-        }
-      }
-
-      if (input.stockQuantity <= 0) {
-        return {
-          included: false,
-          decision: 'EXCLUDED',
-          reasonCode:
-            'FEED_BLOCKED_OUT_OF_STOCK',
-          reasonDetails,
-        }
-      }
-    }
-
+    // Absolute manual include: bypasses the current
+    // PriceKit requirement, all index rules, the
+    // no-competitor rule and the stock rule.
+    // "Mindig feedben" truly means always active.
     return {
       included: true,
       decision: 'INCLUDED',
@@ -4948,7 +4947,7 @@ function evaluateFeedEligibility(input: {
 }
 
 const FEED_GENERATOR_VERSION =
-  'ARUKERESO_FILTERED_CMS_CSV_V1'
+  'ARUKERESO_FULL_CMS_CSV_V2'
 const FEED_OUTPUT_FILE_NAME =
   'arukereso-feed.csv'
 const FEED_OUTPUT_SAMPLE_DEFAULT = 20
@@ -5051,17 +5050,38 @@ function escapeFeedCsvCell(value: string) {
     : value
 }
 
+/**
+ * Final Árukereső output field order. The official
+ * field documentation does not mandate a strict
+ * column order, so the confirmed ProductNumber is
+ * appended after the 13 original CMS source fields
+ * to minimize disruption. Identifier keeps the
+ * original CMS value; ProductNumber carries the Hub
+ * SKU, which is the official Kärcher manufacturer
+ * product number (e.g. Identifier 10040620 ->
+ * ProductNumber 1.004-062.0).
+ */
+const FEED_OUTPUT_HEADERS = [
+  ...EXPECTED_CATALOG_HEADERS,
+  'ProductNumber',
+] as const
+
+type FeedOutputHeader =
+  (typeof FEED_OUTPUT_HEADERS)[number]
+
+type CatalogFeedOutputRow = Record<
+  FeedOutputHeader,
+  string
+>
+
 function serializeCatalogFeedCsv(
-  rows: CatalogFeedSourceRow[],
+  rows: CatalogFeedOutputRow[],
 ) {
-  // ProductNumber is intentionally omitted until its CMS mapping is confirmed.
-  const lines = [
-    EXPECTED_CATALOG_HEADERS.join(';'),
-  ]
+  const lines = [FEED_OUTPUT_HEADERS.join(';')]
 
   for (const row of rows) {
     lines.push(
-      EXPECTED_CATALOG_HEADERS.map(
+      FEED_OUTPUT_HEADERS.map(
         (header) =>
           escapeFeedCsvCell(row[header]),
       ).join(';'),
@@ -5071,30 +5091,70 @@ function serializeCatalogFeedCsv(
   return `${lines.join('\r\n')}\r\n`
 }
 
+function parseCatalogFeedOutputRow(
+  value: unknown,
+  rowLabel: string,
+): CatalogFeedOutputRow {
+  if (
+    value === null ||
+    typeof value !== 'object' ||
+    Array.isArray(value)
+  ) {
+    throw new FeedOutputError(
+      `A feed-sor nem értelmezhető: ${rowLabel}.`,
+      'INVALID_RESOLVED_FEED_ITEM',
+    )
+  }
+
+  const source = value as Record<string, unknown>
+  const result = {} as CatalogFeedOutputRow
+
+  for (const header of FEED_OUTPUT_HEADERS) {
+    if (typeof source[header] !== 'string') {
+      throw new FeedOutputError(
+        `A feed-sorból hiányzik a(z) ${header} mező: ${rowLabel}.`,
+        'MISSING_FEED_OUTPUT_FIELD',
+      )
+    }
+
+    result[header] = source[header]
+  }
+
+  return result
+}
+
 function resolveFeedGenerationSafety(
   settingsJson: string | null,
 ) {
   const stored =
     readStoredFeedSettings(settingsJson)
-  const configured = stored['minIncludedItems']
+  // Safety applies to active offers, never to the raw
+  // output row count. minIncludedItems is kept as a
+  // backward-compatible fallback and alias.
+  const configured =
+    stored['minActiveItems'] ??
+    stored['minIncludedItems']
+
+  const minimum =
+    typeof configured === 'number' &&
+    Number.isInteger(configured) &&
+    configured >= 1
+      ? configured
+      : FEED_MIN_INCLUDED_ITEMS_DEFAULT
 
   return {
-    minIncludedItems:
-      typeof configured === 'number' &&
-      Number.isInteger(configured) &&
-      configured >= 1
-        ? configured
-        : FEED_MIN_INCLUDED_ITEMS_DEFAULT,
+    minActiveItems: minimum,
+    minIncludedItems: minimum,
   }
 }
 
 function assertFeedOutputSafety(
-  includedRows: number,
-  minIncludedItems: number,
+  activeRows: number,
+  minActiveItems: number,
 ) {
-  if (includedRows < minIncludedItems) {
+  if (activeRows < minActiveItems) {
     throw new FeedOutputError(
-      `A generálás leállt: ${includedRows} feed-sor nem éri el a minimális ${minIncludedItems} sort.`,
+      `A generálás leállt: ${activeRows} aktív ajánlat nem éri el a minimális ${minActiveItems} értéket.`,
       'MIN_INCLUDED_ITEMS_NOT_MET',
     )
   }
@@ -5460,6 +5520,15 @@ async function buildCatalogFeedOutput(
     matchedRows: items.length,
     unmatchedRows:
       catalogRows.length - items.length,
+    // Every valid matched row is emitted; eligibility
+    // only toggles the output DeliveryTime. New model:
+    // outputRows === sourceRows, activeRows hold the
+    // original DeliveryTime, disabledRows get "NO".
+    // includedRows/excludedRows are kept as aliases of
+    // activeRows/disabledRows for API compatibility.
+    outputRows: items.length,
+    activeRows: 0,
+    disabledRows: 0,
     includedRows: 0,
     excludedRows: 0,
     forceIncluded: 0,
@@ -5476,8 +5545,10 @@ async function buildCatalogFeedOutput(
 
   for (const item of items) {
     if (item.result.included) {
+      summary.activeRows += 1
       summary.includedRows += 1
     } else {
+      summary.disabledRows += 1
       summary.excludedRows += 1
     }
 
@@ -5676,8 +5747,8 @@ arukeresoApi.post(
       })
 
       assertFeedOutputSafety(
-        output.summary.includedRows,
-        output.safety.minIncludedItems,
+        output.summary.activeRows,
+        output.safety.minActiveItems,
       )
 
       const csv = createCatalogFeedCsv(
@@ -5718,6 +5789,11 @@ arukeresoApi.post(
               catalogSourceItemId:
                 item.catalogSourceItemId,
               source: item.source,
+              outputDeliveryTime:
+                item.result.included
+                  ? item.source.DeliveryTime
+                  : 'NO',
+              productNumber: item.sku,
             }
 
             return {
@@ -5914,6 +5990,7 @@ async function buildFeedRunCsv(runId: string) {
     .select({
       id: feedRuns.id,
       status: feedRuns.status,
+      itemsEvaluated: feedRuns.itemsEvaluated,
       itemsIncluded: feedRuns.itemsIncluded,
       artifactFileName:
         feedRuns.artifactFileName,
@@ -5961,15 +6038,10 @@ async function buildFeedRunCsv(runId: string) {
         feedRunItems.resolvedItemJson,
     })
     .from(feedRunItems)
-    .where(
-      and(
-        eq(feedRunItems.runId, run.id),
-        eq(feedRunItems.decision, 'INCLUDED'),
-      ),
-    )
+    .where(eq(feedRunItems.runId, run.id))
     .orderBy(asc(feedRunItems.itemIndex))
 
-  if (runItems.length !== run.itemsIncluded) {
+  if (runItems.length !== run.itemsEvaluated) {
     throw new FeedOutputError(
       'A feed futás elemszáma nem egyezik a naplózott értékkel.',
       'FEED_RUN_ITEM_COUNT_MISMATCH',
@@ -6000,13 +6072,33 @@ async function buildFeedRunCsv(runId: string) {
       )
     }
 
-    return parseCatalogFeedSourceRow(
-      JSON.stringify(
-        (resolved as { source: unknown })
-          .source,
-      ),
+    const entry = resolved as {
+      source: unknown
+      outputDeliveryTime?: unknown
+      productNumber?: unknown
+    }
+
+    const sourceRow = parseCatalogFeedSourceRow(
+      JSON.stringify(entry.source),
       `${run.id}:${index}`,
     )
+
+    if (
+      typeof entry.outputDeliveryTime !==
+        'string' ||
+      typeof entry.productNumber !== 'string'
+    ) {
+      throw new FeedOutputError(
+        `A feed futás ${index + 1}. elemének tartalma sérült.`,
+        'INVALID_RESOLVED_FEED_ITEM',
+      )
+    }
+
+    return {
+      ...sourceRow,
+      DeliveryTime: entry.outputDeliveryTime,
+      ProductNumber: entry.productNumber,
+    }
   })
   const csv = serializeCatalogFeedCsv(rows)
   const fingerprint =
@@ -7487,6 +7579,9 @@ export {
   evaluateFeedEligibility,
   parseSemicolonCsv,
   parseCatalogFeedSourceRow,
+  parseCatalogFeedOutputRow,
+  toCatalogFeedOutputRow,
+  FEED_OUTPUT_HEADERS,
   resolvePriceKitStatus,
   resolveFeedEligibilitySettings,
   serializeCatalogFeedCsv,

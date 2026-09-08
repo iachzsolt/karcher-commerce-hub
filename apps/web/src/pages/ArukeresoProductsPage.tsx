@@ -597,11 +597,13 @@ function ArukeresoProductsPage() {
                       </select>
                       {row.inclusionMode === 'FORCE_INCLUDE' && (
                         <small>
-                          Pricing- és készletszabályok felülírva
+                          Manuálisan aktív – minden
+                          automatikus szabály figyelmen
+                          kívül hagyva
                         </small>
                       )}
                       {row.inclusionMode === 'FORCE_EXCLUDE' && (
-                        <small>Manuálisan kizárva</small>
+                        <small>Manuálisan letiltva</small>
                       )}
                     </td>
                   </tr>

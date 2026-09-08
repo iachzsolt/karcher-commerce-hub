@@ -36,6 +36,8 @@ type PreviewItem = {
   averageIndexBps: number | null
   stockQuantity: number | null
   stockStatus: StockStatus
+  productNumber: string
+  outputDeliveryTime: string
   reasonDetails: {
     maxMinIndexBps: number
     maxMedianIndexBps: number
@@ -151,35 +153,35 @@ function ruleLabel(mode: InclusionMode) {
 function reasonLabel(item: PreviewItem) {
   switch (item.reasonCode) {
     case 'FEED_ELIGIBLE_PRICING_RULES':
-      return 'Minden aktív feed-szabály teljesül'
+      return 'Aktív – pricing szabályok teljesülnek'
     case 'FEED_BLOCKED_MIN_INDEX':
-      return `Minimum index ${formatPercent(item.priceIndexBps)} > ${formatPercent(item.reasonDetails.maxMinIndexBps)}`
+      return `Letiltva – minimum index túl magas (${formatPercent(item.priceIndexBps)} > ${formatPercent(item.reasonDetails.maxMinIndexBps)})`
     case 'FEED_BLOCKED_MEDIAN_INDEX':
-      return `Medián index ${formatPercent(item.medianIndexBps)} > ${formatPercent(item.reasonDetails.maxMedianIndexBps)}`
+      return `Letiltva – medián index túl magas (${formatPercent(item.medianIndexBps)} > ${formatPercent(item.reasonDetails.maxMedianIndexBps)})`
     case 'FEED_BLOCKED_AVERAGE_INDEX':
-      return `Átlagindex ${formatPercent(item.averageIndexBps)} > ${formatPercent(item.reasonDetails.maxAverageIndexBps)}`
+      return `Letiltva – átlagindex túl magas (${formatPercent(item.averageIndexBps)} > ${formatPercent(item.reasonDetails.maxAverageIndexBps)})`
     case 'FEED_BLOCKED_MISSING_MIN_INDEX':
-      return 'Az aktív minimumindex-szabályhoz nincs adat'
+      return 'Letiltva – az aktív minimumindex-szabályhoz nincs adat'
     case 'FEED_BLOCKED_MISSING_MEDIAN_INDEX':
-      return 'Az aktív mediánszabályhoz nincs adat'
+      return 'Letiltva – az aktív mediánszabályhoz nincs adat'
     case 'FEED_BLOCKED_MISSING_AVERAGE_INDEX':
-      return 'Az aktív átlagindex-szabályhoz nincs adat'
+      return 'Letiltva – az aktív átlagindex-szabályhoz nincs adat'
     case 'FEED_BLOCKED_OUT_OF_STOCK':
-      return 'Nincs készleten'
+      return 'Letiltva – nincs készleten'
     case 'FEED_BLOCKED_MISSING_STOCK':
-      return 'Nincs készletadat'
+      return 'Letiltva – nincs készletadat'
     case 'FEED_ELIGIBLE_NO_COMPETITOR':
-      return 'Competitor nélkül engedélyezve'
+      return 'Aktív – competitor nélkül engedélyezve'
     case 'FEED_BLOCKED_NO_COMPETITOR':
-      return 'Nincs competitor'
+      return 'Letiltva – nincs competitor'
     case 'FEED_BLOCKED_NO_CURRENT_PRICEKIT':
-      return 'Kihagyva – nincs mai PriceKit adat'
+      return 'Letiltva – nincs mai PriceKit adat'
     case 'FEED_BLOCKED_PARTIAL_MARKET_DATA':
-      return 'A piaci adat hiányos'
+      return 'Letiltva – a piaci adat hiányos'
     case 'FEED_ELIGIBLE_MANUAL_OVERRIDE':
-      return 'Feedben – manuálisan engedélyezve'
+      return 'Aktív – manuálisan engedélyezve'
     case 'FEED_BLOCKED_MANUAL_OVERRIDE':
-      return 'Manuálisan kihagyva'
+      return 'Letiltva – manuálisan letiltva'
     default:
       return 'A döntés részlete nem elérhető'
   }
@@ -487,10 +489,10 @@ function ArukeresoFeedPreviewPage() {
   )
   const kpis = [
     ['Forrássorok', summary.sourceRows ?? 0],
-    ['Feedben', summary.includedRows ?? 0],
-    ['Kihagyva', summary.excludedRows ?? 0],
+    ['Aktív ajánlatok', summary.activeRows ?? 0],
+    ['Letiltott ajánlatok', summary.disabledRows ?? 0],
     ['Manuálisan engedélyezve', summary.forceIncluded ?? 0],
-    ['Manuálisan kizárva', summary.forceExcluded ?? 0],
+    ['Manuálisan letiltva', summary.forceExcluded ?? 0],
     ['PriceKit mai adat', summary.priceKitWithData ?? 0],
     ['PriceKit adat nélkül', summary.priceKitWithoutData ?? 0],
     ['Készlet miatt blokkolva', summary.blockedByStock ?? 0],
@@ -538,9 +540,10 @@ function ArukeresoFeedPreviewPage() {
         <div className="arukereso-preview-safety-warning">
           <strong>A feed jelenleg nem generálható.</strong>
           <span>
-            Túl kevés termék felel meg a szabályoknak. Minimum:{' '}
+            Túl kevés aktív ajánlat van a szabályok alapján.
+            Minimum:{' '}
             {minIncludedItems}, jelenleg:{' '}
-            {summary.includedRows ?? 0}.
+            {summary.activeRows ?? summary.includedRows ?? 0}.
           </span>
         </div>
       )}
@@ -644,8 +647,9 @@ function ArukeresoFeedPreviewPage() {
                 : 'LEGUTÓBBI GENERÁLT FEED'}
             </span>
             <strong>
-              {(generatedRun ?? latestRun)?.includedRows} feedben ·{' '}
-              {(generatedRun ?? latestRun)?.excludedRows} kihagyva
+              {(generatedRun ?? latestRun)?.includedRows} aktív ·{' '}
+              {(generatedRun ?? latestRun)?.excludedRows}{' '}
+              letiltva
             </strong>
             <small>
               {formatDate(
@@ -709,8 +713,8 @@ function ArukeresoFeedPreviewPage() {
               }
             >
               <option value="ALL">Mind</option>
-              <option value="INCLUDED">Feedben</option>
-              <option value="EXCLUDED">Kihagyva</option>
+              <option value="INCLUDED">Aktív</option>
+              <option value="EXCLUDED">Letiltva</option>
             </select>
           </label>
           <label>
@@ -871,8 +875,14 @@ function ArukeresoFeedPreviewPage() {
                             : 'is-excluded'
                         }`}
                       >
-                        {item.included ? 'Feedben' : 'Kihagyva'}
+                        {item.included
+                          ? 'Aktív'
+                          : 'Letiltva'}
                       </span>
+                      <small className="arukereso-preview-delivery">
+                        DeliveryTime:{' '}
+                        {item.outputDeliveryTime}
+                      </small>
                     </td>
                     <td className="arukereso-preview-reason">
                       {reasonLabel(item)}
@@ -948,12 +958,12 @@ function ArukeresoFeedPreviewPage() {
             </p>
             <div className="arukereso-preview-dialog-summary">
               <span>
-                <strong>{summary.includedRows ?? 0}</strong>
-                Feedben
+                <strong>{summary.activeRows ?? 0}</strong>
+                Aktív ajánlat
               </span>
               <span>
-                <strong>{summary.excludedRows ?? 0}</strong>
-                Kihagyva
+                <strong>{summary.disabledRows ?? 0}</strong>
+                Letiltott ajánlat
               </span>
             </div>
             <div className="arukereso-preview-dialog-actions">
