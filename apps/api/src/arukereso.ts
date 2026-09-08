@@ -3452,6 +3452,116 @@ arukeresoApi.post(
       )
     }
 
+    console.log(
+      'Pricing sync completed:',
+      resolvedConnection.connectionId,
+      `${snapshot.importedRows} rows,`,
+      `${snapshot.inserted} inserted,`,
+      `${snapshot.updated} updated,`,
+      `${snapshot.staleRemoved} removed.`,
+    )
+
+    // Automatic feed regeneration runs only after the
+    // pricing snapshot is fully committed, uses the
+    // exact same generation path as manual runs, and
+    // never replaces the previous public feed on
+    // failure. Disabled unless explicitly enabled.
+    let feedGeneration:
+      | {
+          status: 'ok'
+          runId: string
+          sourceRows: number
+          outputRows: number
+          activeRows: number
+          disabledRows: number
+        }
+      | { status: 'error'; message: string }
+      | undefined
+
+    if (
+      process.env
+        .ARUKERESO_AUTO_GENERATE_ENABLED === 'true'
+    ) {
+      console.log(
+        'Automatic feed generation started after pricing sync.',
+      )
+
+      try {
+        const generationResponse =
+          await arukeresoApi.request(
+            '/feed/generate',
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type':
+                  'application/json',
+              },
+              body: JSON.stringify({
+                confirm: true,
+                triggerType: 'PRICING_SYNC',
+              }),
+            },
+          )
+        const generated =
+          (await generationResponse.json()) as {
+            runId?: string
+            summary?: {
+              sourceRows: number
+              outputRows: number
+              activeRows: number
+              disabledRows: number
+            }
+            message?: string
+          }
+
+        if (
+          !generationResponse.ok ||
+          !generated.runId ||
+          !generated.summary
+        ) {
+          throw new Error(
+            generated.message ??
+              'Automatic feed generation failed.',
+          )
+        }
+
+        feedGeneration = {
+          status: 'ok',
+          runId: generated.runId,
+          sourceRows:
+            generated.summary.sourceRows,
+          outputRows:
+            generated.summary.outputRows,
+          activeRows:
+            generated.summary.activeRows,
+          disabledRows:
+            generated.summary.disabledRows,
+        }
+
+        console.log(
+          'Automatic feed generation completed:',
+          generated.runId,
+          `${generated.summary.activeRows} active,`,
+          `${generated.summary.disabledRows} disabled.`,
+        )
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Automatic feed generation failed.'
+
+        console.error(
+          'Automatic feed generation failed after pricing sync:',
+          message,
+        )
+
+        feedGeneration = {
+          status: 'error',
+          message,
+        }
+      }
+    }
+
     return context.json({
       status: 'ok',
       connectionId:
@@ -3483,6 +3593,10 @@ arukeresoApi.post(
 
       unmatchedSample:
         normalized.unmatchedSample,
+
+      ...(feedGeneration
+        ? { feedGeneration }
+        : {}),
     })
   },
 )
@@ -5699,11 +5813,21 @@ arukeresoApi.post(
       currency: channel.currency,
       format: channel.format,
     }
+    // Internal callers (e.g. automatic generation
+    // after pricing sync) may label the run; external
+    // callers always get 'MANUAL'.
+    const requestedTriggerType = (
+      body as Record<string, unknown>
+    )['triggerType']
+    const triggerType =
+      requestedTriggerType === 'PRICING_SYNC'
+        ? 'PRICING_SYNC'
+        : 'MANUAL'
     const [run] = await database
       .insert(feedRuns)
       .values({
         channelId: channel.id,
-        triggerType: 'MANUAL',
+        triggerType,
         status: 'RUNNING',
         generatorVersion:
           FEED_GENERATOR_VERSION,
@@ -6254,6 +6378,50 @@ arukeresoApi.get(
   },
 )
 
+async function findLatestCompletedFeedRunId(
+  database: ReturnType<typeof requireDatabase>,
+  channelId: string,
+): Promise<string | null> {
+  const [latestRun] = await database
+    .select({ id: feedRuns.id })
+    .from(feedRuns)
+    .where(
+      and(
+        eq(feedRuns.channelId, channelId),
+        eq(feedRuns.status, 'COMPLETED'),
+        eq(
+          feedRuns.generatorVersion,
+          FEED_GENERATOR_VERSION,
+        ),
+      ),
+    )
+    .orderBy(desc(feedRuns.startedAt))
+    .limit(1)
+
+  return latestRun?.id ?? null
+}
+
+function isPublicFeedTokenValid(
+  provided: string | undefined,
+): boolean {
+  const expected =
+    process.env.ARUKERESO_PUBLIC_FEED_TOKEN?.trim() ??
+    ''
+
+  if (
+    expected.length < 16 ||
+    typeof provided !== 'string' ||
+    !/^[A-Za-z0-9_-]{16,128}$/.test(provided)
+  ) {
+    return false
+  }
+
+  return isPricingSyncTokenValid(
+    provided,
+    expected,
+  )
+}
+
 arukeresoApi.get(
   '/feed/latest.csv',
   async (context) =>
@@ -6270,38 +6438,91 @@ arukeresoApi.get(
           )
         }
 
-        const [latestRun] = await database
-          .select({ id: feedRuns.id })
-          .from(feedRuns)
-          .where(
-            and(
-              eq(
-                feedRuns.channelId,
-                channel.id,
-              ),
-              eq(
-                feedRuns.status,
-                'COMPLETED',
-              ),
-              eq(
-                feedRuns.generatorVersion,
-                FEED_GENERATOR_VERSION,
-              ),
-            ),
+        const latestRunId =
+          await findLatestCompletedFeedRunId(
+            database,
+            channel.id,
           )
-          .orderBy(desc(feedRuns.startedAt))
-          .limit(1)
 
-        if (!latestRun) {
+        if (!latestRunId) {
           throw new FeedOutputError(
             'Még nincs sikeresen generált feed.',
             'SUCCESSFUL_FEED_RUN_NOT_FOUND',
           )
         }
 
-        return buildFeedRunCsv(latestRun.id)
+        return buildFeedRunCsv(latestRunId)
       },
     ),
+)
+
+// Dedicated public Árukereső feed. Served directly by
+// the API deployment (same pattern as the Cockpit
+// pricing sync); it does not pass through the
+// Cloudflare Pages proxy auth. The opaque URL token is
+// the only credential. Read-only: never triggers
+// generation and never mutates data.
+arukeresoApi.get(
+  '/feed/public/:filename',
+  async (context) => {
+    const notFound = () =>
+      context.json(
+        {
+          status: 'error',
+          message: 'Not found.',
+        },
+        404,
+      )
+
+    // The .csv suffix is part of the stable public
+    // URL. It is validated here because this Hono
+    // version cannot reliably capture a
+    // ':token.csv' suffix pattern in the route.
+    const filename =
+      context.req.param('filename') ?? ''
+    const token = /^([A-Za-z0-9_-]{16,128})\.csv$/.exec(
+      filename,
+    )?.[1]
+
+    if (!token || !isPublicFeedTokenValid(token)) {
+      return notFound()
+    }
+
+    try {
+      const { database, channel } =
+        await resolveFeedChannel()
+
+      if (!channel) {
+        return notFound()
+      }
+
+      const latestRunId =
+        await findLatestCompletedFeedRunId(
+          database,
+          channel.id,
+        )
+
+      if (!latestRunId) {
+        return notFound()
+      }
+
+      const { csv, fileName } =
+        await buildFeedRunCsv(latestRunId)
+
+      return new Response(csv, {
+        headers: {
+          'Content-Type':
+            'text/csv; charset=utf-8',
+          'Content-Disposition':
+            `inline; filename="${fileName}"`,
+          'Cache-Control':
+            'public, max-age=300',
+        },
+      })
+    } catch {
+      return notFound()
+    }
+  },
 )
 
 arukeresoApi.get(

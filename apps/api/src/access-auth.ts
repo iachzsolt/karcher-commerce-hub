@@ -35,6 +35,13 @@ const PUBLIC_PATHS = new Set([
   '/arukereso/pricing/sync',
 ])
 
+// Exact public route prefixes. Each entry must cover
+// one dedicated tokenized route only; never add a
+// broad prefix such as '/arukereso/feed/'.
+const PUBLIC_PATH_PREFIXES = [
+  '/arukereso/feed/public/',
+]
+
 let cachedJwksUrl: string | null = null
 let cachedJwks:
   | ReturnType<typeof createRemoteJWKSet>
@@ -212,7 +219,10 @@ export const accessAuthMiddleware:
   }> = async (context, next) => {
     if (
       context.req.method === 'OPTIONS' ||
-      PUBLIC_PATHS.has(context.req.path)
+      PUBLIC_PATHS.has(context.req.path) ||
+      PUBLIC_PATH_PREFIXES.some((prefix) =>
+        context.req.path.startsWith(prefix),
+      )
     ) {
       await next()
       return
