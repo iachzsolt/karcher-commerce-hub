@@ -33,14 +33,12 @@ function PlatformCard({
   description: string
   to: string
   active: boolean
-  accent?: 'arukereso'
+  accent?: 'arukereso' | 'allegro'
 }) {
   return (
     <Link
       className={`platform-card${
-        accent === 'arukereso'
-          ? ' platform-card-arukereso'
-          : ''
+        accent ? ` platform-card-${accent}` : ''
       }`}
       to={to}
     >
@@ -168,6 +166,7 @@ function OverviewSection({
             description="Ajánlatok, kampányok és szinkronizáció kezelése."
             to="/allegro/overview"
             active
+            accent="allegro"
           />
 
           <PlatformCard
@@ -227,6 +226,7 @@ function PlatformsSection({
           description="Az Allegro integráció működik. Ajánlatok, kampányok és szinkronizáció kezelhető."
           to="/allegro/overview"
           active
+          accent="allegro"
         />
 
         <PlatformCard
