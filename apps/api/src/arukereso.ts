@@ -4205,16 +4205,11 @@ function createFeedFingerprint(value: string) {
 function toCatalogFeedOutputRow(
   item: CatalogFeedOutputItem,
 ): CatalogFeedOutputRow {
-  // Every valid matched catalog row stays in the
-  // output. Eligibility only controls DeliveryTime:
-  // excluded offers are disabled via DeliveryTime=NO.
-  // raw_data_json in the database is never mutated;
-  // the override applies to the output representation.
+  // V3 publishes eligible rows only and preserves the
+  // original CMS DeliveryTime. Historical V2 rows are
+  // reconstructed from their immutable run snapshots.
   return {
     ...item.source,
-    DeliveryTime: item.result.included
-      ? item.source.DeliveryTime
-      : 'NO',
     ProductNumber: item.sku,
   }
 }
@@ -4223,7 +4218,9 @@ function createCatalogFeedCsv(
   items: CatalogFeedOutputItem[],
 ) {
   return serializeCatalogFeedCsv(
-    items.map(toCatalogFeedOutputRow),
+    items
+      .filter((item) => item.result.included)
+      .map(toCatalogFeedOutputRow),
   )
 }
 
@@ -4252,7 +4249,7 @@ function toFeedOutputSample(
     productNumber: item.sku,
     outputDeliveryTime: item.result.included
       ? item.source.DeliveryTime
-      : 'NO',
+      : null,
   }
 }
 
@@ -5260,8 +5257,10 @@ function evaluateFeedEligibility(input: {
   }
 }
 
-const FEED_GENERATOR_VERSION =
+const FEED_GENERATOR_VERSION_V2 =
   'ARUKERESO_FULL_CMS_CSV_V2'
+const FEED_GENERATOR_VERSION =
+  'ARUKERESO_FILTERED_CMS_CSV_V3'
 const FEED_OUTPUT_FILE_NAME =
   'arukereso-feed.csv'
 const FEED_OUTPUT_SAMPLE_DEFAULT = 20
@@ -5834,13 +5833,10 @@ async function buildCatalogFeedOutput(
     matchedRows: items.length,
     unmatchedRows:
       catalogRows.length - items.length,
-    // Every valid matched row is emitted; eligibility
-    // only toggles the output DeliveryTime. New model:
-    // outputRows === sourceRows, activeRows hold the
-    // original DeliveryTime, disabledRows get "NO".
-    // includedRows/excludedRows are kept as aliases of
-    // activeRows/disabledRows for API compatibility.
-    outputRows: items.length,
+    // Preview evaluates every matched row, while V3
+    // publishes eligible rows only. The legacy aliases
+    // remain for API compatibility.
+    outputRows: 0,
     activeRows: 0,
     disabledRows: 0,
     includedRows: 0,
@@ -5859,6 +5855,7 @@ async function buildCatalogFeedOutput(
 
   for (const item of items) {
     if (item.result.included) {
+      summary.outputRows += 1
       summary.activeRows += 1
       summary.includedRows += 1
     } else {
@@ -5920,6 +5917,10 @@ async function buildCatalogFeedOutput(
     }
   }
 
+  const publishedItems = items.filter(
+    (item) => item.result.included,
+  )
+
   return {
     database,
     channel,
@@ -5948,6 +5949,7 @@ async function buildCatalogFeedOutput(
       matchedRows: items.length,
     },
     items,
+    publishedItems,
     summary,
     reasonCounts,
   }
@@ -6071,12 +6073,12 @@ arukeresoApi.post(
       })
 
       assertFeedOutputSafety(
-        output.summary.activeRows,
+        output.summary.outputRows,
         output.safety.minActiveItems,
       )
 
       const csv = createCatalogFeedCsv(
-        output.items,
+        output.publishedItems,
       )
       const artifactFingerprint =
         createFeedFingerprint(csv)
@@ -6103,10 +6105,10 @@ arukeresoApi.post(
 
       for (
         let offset = 0;
-        offset < output.items.length;
+        offset < output.publishedItems.length;
         offset += 200
       ) {
-        const chunk = output.items
+        const chunk = output.publishedItems
           .slice(offset, offset + 200)
           .map((item, chunkIndex) => {
             const resolvedItem = {
@@ -6114,9 +6116,7 @@ arukeresoApi.post(
                 item.catalogSourceItemId,
               source: item.source,
               outputDeliveryTime:
-                item.result.included
-                  ? item.source.DeliveryTime
-                  : 'NO',
+                item.source.DeliveryTime,
               productNumber: item.sku,
             }
 
@@ -6348,7 +6348,8 @@ async function buildFeedRunCsv(runId: string) {
 
   if (
     run.generatorVersion !==
-    FEED_GENERATOR_VERSION
+      FEED_GENERATOR_VERSION_V2 &&
+    run.generatorVersion !== FEED_GENERATOR_VERSION
   ) {
     throw new FeedOutputError(
       'A feed futás nem ezzel a generátorverzióval készült.',
@@ -6358,6 +6359,7 @@ async function buildFeedRunCsv(runId: string) {
 
   const runItems = await database
     .select({
+      decision: feedRunItems.decision,
       resolvedItemJson:
         feedRunItems.resolvedItemJson,
     })
@@ -6365,10 +6367,28 @@ async function buildFeedRunCsv(runId: string) {
     .where(eq(feedRunItems.runId, run.id))
     .orderBy(asc(feedRunItems.itemIndex))
 
-  if (runItems.length !== run.itemsEvaluated) {
+  const expectedRunItemCount =
+    run.generatorVersion ===
+    FEED_GENERATOR_VERSION_V2
+      ? run.itemsEvaluated
+      : run.itemsIncluded
+
+  if (runItems.length !== expectedRunItemCount) {
     throw new FeedOutputError(
       'A feed futás elemszáma nem egyezik a naplózott értékkel.',
       'FEED_RUN_ITEM_COUNT_MISMATCH',
+    )
+  }
+
+  if (
+    run.generatorVersion === FEED_GENERATOR_VERSION &&
+    runItems.some(
+      (item) => item.decision !== 'INCLUDED',
+    )
+  ) {
+    throw new FeedOutputError(
+      'A V3 feed futás kizárt elemet tartalmaz.',
+      'INVALID_V3_RUN_ITEM_DECISION',
     )
   }
 
@@ -6538,6 +6558,7 @@ arukeresoApi.get(
             feedRuns.itemsIncluded,
           excludedRows:
             feedRuns.itemsExcluded,
+          outputRows: feedRuns.itemsIncluded,
           finishedAt: feedRuns.finishedAt,
           artifactFingerprint:
             feedRuns.artifactFingerprint,

@@ -37,7 +37,7 @@ type PreviewItem = {
   stockQuantity: number | null
   stockStatus: StockStatus
   productNumber: string
-  outputDeliveryTime: string
+  outputDeliveryTime: string | null
   reasonDetails: {
     maxMinIndexBps: number
     maxMedianIndexBps: number
@@ -76,6 +76,7 @@ type LatestRun = {
   status: string
   includedRows: number
   excludedRows: number
+  outputRows: number
   finishedAt: string | null
 }
 
@@ -384,6 +385,7 @@ function ArukeresoFeedPreviewPage() {
         summary?: {
           includedRows: number
           excludedRows: number
+          outputRows: number
         }
         message?: string
       }
@@ -406,6 +408,7 @@ function ArukeresoFeedPreviewPage() {
         status: 'COMPLETED',
         includedRows: result.summary.includedRows,
         excludedRows: result.summary.excludedRows,
+        outputRows: result.summary.outputRows,
         finishedAt: null,
       }
       setGeneratedRun(run)
@@ -485,15 +488,17 @@ function ArukeresoFeedPreviewPage() {
   }
 
   const generationBlocked =
-    (summary.includedRows ?? 0) < minIncludedItems
+    (summary.outputRows ?? 0) < minIncludedItems
   const pageCount = Math.max(
     1,
     Math.ceil(total / PAGE_SIZE),
   )
   const kpis = [
     ['Forrássorok', summary.sourceRows ?? 0],
-    ['Aktív ajánlatok', summary.activeRows ?? 0],
-    ['Letiltott ajánlatok', summary.disabledRows ?? 0],
+    ['Párosított sorok', summary.matchedRows ?? 0],
+    ['Jogosult sorok', summary.includedRows ?? 0],
+    ['Kizárt sorok', summary.excludedRows ?? 0],
+    ['Generált CSV-sorok', summary.outputRows ?? 0],
     ['Nem párosított CMS-sorok', summary.unmatchedRows ?? 0],
     ['Manuálisan engedélyezve', summary.forceIncluded ?? 0],
     ['Manuálisan letiltva', summary.forceExcluded ?? 0],
@@ -511,8 +516,9 @@ function ArukeresoFeedPreviewPage() {
           <p className="section-label">ÁRUKERESŐ FEED</p>
           <h2>Feed előnézet</h2>
           <p className="campaigns-page-description">
-            Az aktuális szabályok alapján várható Árukereső
-            feed tartalma.
+            Az előnézet minden párosított sort megmutat; a
+            kizárt sorok diagnosztikai célból láthatók, de a
+            generált CSV-be csak a jogosult sorok kerülnek.
           </p>
           <small className="arukereso-preview-readonly-note">
             Az előnézet nem hoz létre új feed-verziót.
@@ -547,7 +553,7 @@ function ArukeresoFeedPreviewPage() {
             Túl kevés aktív ajánlat van a szabályok alapján.
             Minimum:{' '}
             {minIncludedItems}, jelenleg:{' '}
-            {summary.activeRows ?? summary.includedRows ?? 0}.
+            {summary.outputRows ?? 0}.
           </span>
         </div>
       )}
@@ -653,9 +659,9 @@ function ArukeresoFeedPreviewPage() {
                 : 'LEGUTÓBBI GENERÁLT FEED'}
             </span>
             <strong>
-              {(generatedRun ?? latestRun)?.includedRows} aktív ·{' '}
+              {(generatedRun ?? latestRun)?.outputRows} CSV-sor ·{' '}
               {(generatedRun ?? latestRun)?.excludedRows}{' '}
-              letiltva
+              kihagyva
             </strong>
             <small>
               {formatDate(
@@ -707,7 +713,7 @@ function ArukeresoFeedPreviewPage() {
             />
           </label>
           <label>
-            <span>Feed státusz</span>
+            <span>Jogosultság</span>
             <select
               value={filters.feedStatus}
               onChange={(event) =>
@@ -719,8 +725,8 @@ function ArukeresoFeedPreviewPage() {
               }
             >
               <option value="ALL">Mind</option>
-              <option value="INCLUDED">Aktív</option>
-              <option value="EXCLUDED">Letiltva</option>
+              <option value="INCLUDED">Jogosult</option>
+              <option value="EXCLUDED">Kizárt</option>
             </select>
           </label>
           <label>
@@ -889,12 +895,13 @@ function ArukeresoFeedPreviewPage() {
                         }`}
                       >
                         {item.included
-                          ? 'Aktív'
-                          : 'Letiltva'}
+                          ? 'Jogosult'
+                          : 'Kizárt'}
                       </span>
                       <small className="arukereso-preview-delivery">
-                        DeliveryTime:{' '}
-                        {item.outputDeliveryTime}
+                        {item.included
+                          ? `DeliveryTime: ${item.outputDeliveryTime ?? '–'}`
+                          : 'Nem kerül a generált CSV-be'}
                       </small>
                     </td>
                     <td className="arukereso-preview-reason">
@@ -971,12 +978,12 @@ function ArukeresoFeedPreviewPage() {
             </p>
             <div className="arukereso-preview-dialog-summary">
               <span>
-                <strong>{summary.activeRows ?? 0}</strong>
-                Aktív ajánlat
+                <strong>{summary.outputRows ?? 0}</strong>
+                Generált CSV-sor
               </span>
               <span>
-                <strong>{summary.disabledRows ?? 0}</strong>
-                Letiltott ajánlat
+                <strong>{summary.excludedRows ?? 0}</strong>
+                Kihagyott sor
               </span>
             </div>
             <div className="arukereso-preview-dialog-actions">
