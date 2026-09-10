@@ -3670,6 +3670,11 @@ arukeresoApi.post(
           activeRows: number
           disabledRows: number
         }
+      | {
+          status: 'skipped'
+          code: 'CHANNEL_INACTIVE'
+          message: string
+        }
       | { status: 'error'; message: string }
       | undefined
 
@@ -3699,6 +3704,8 @@ arukeresoApi.post(
           )
         const generated =
           (await generationResponse.json()) as {
+            status?: string
+            code?: string
             runId?: string
             summary?: {
               sourceRows: number
@@ -3710,6 +3717,21 @@ arukeresoApi.post(
           }
 
         if (
+          generationResponse.ok &&
+          generated.status === 'skipped' &&
+          generated.code === 'CHANNEL_INACTIVE'
+        ) {
+          feedGeneration = {
+            status: 'skipped',
+            code: 'CHANNEL_INACTIVE',
+            message:
+              generated.message ??
+              'Automatic feed generation skipped because the channel is inactive.',
+          }
+          console.log(
+            'Automatic feed generation skipped: channel is inactive.',
+          )
+        } else if (
           !generationResponse.ok ||
           !generated.runId ||
           !generated.summary
@@ -3718,27 +3740,27 @@ arukeresoApi.post(
             generated.message ??
               'Automatic feed generation failed.',
           )
-        }
+        } else {
+          feedGeneration = {
+            status: 'ok',
+            runId: generated.runId,
+            sourceRows:
+              generated.summary.sourceRows,
+            outputRows:
+              generated.summary.outputRows,
+            activeRows:
+              generated.summary.activeRows,
+            disabledRows:
+              generated.summary.disabledRows,
+          }
 
-        feedGeneration = {
-          status: 'ok',
-          runId: generated.runId,
-          sourceRows:
-            generated.summary.sourceRows,
-          outputRows:
-            generated.summary.outputRows,
-          activeRows:
-            generated.summary.activeRows,
-          disabledRows:
-            generated.summary.disabledRows,
+          console.log(
+            'Automatic feed generation completed:',
+            generated.runId,
+            `${generated.summary.activeRows} active,`,
+            `${generated.summary.disabledRows} disabled.`,
+          )
         }
-
-        console.log(
-          'Automatic feed generation completed:',
-          generated.runId,
-          `${generated.summary.activeRows} active,`,
-          `${generated.summary.disabledRows} disabled.`,
-        )
       } catch (error) {
         const message =
           error instanceof Error
@@ -4394,6 +4416,7 @@ arukeresoApi.get(
       return context.json({
         status: 'ok',
         channel: FEED_CHANNEL_CODE,
+        isActive: output.channel.isActive,
         summary: output.summary,
         reasonCounts: output.reasonCounts,
         settings: output.settings,
@@ -5999,6 +6022,15 @@ arukeresoApi.post(
       )
     }
 
+    if (!channel.isActive) {
+      return context.json({
+        status: 'skipped',
+        code: 'CHANNEL_INACTIVE',
+        message:
+          'Az Árukereső feed csatorna ki van kapcsolva. Generálás nem történt.',
+      })
+    }
+
     const resolvedSettings =
       resolveFeedEligibilitySettings(
         channel.settingsJson,
@@ -6686,14 +6718,17 @@ arukeresoApi.get(
 arukeresoApi.get(
   '/feed/public/:filename',
   async (context) => {
-    const notFound = () =>
-      context.json(
+    const notFound = () => {
+      context.header('Cache-Control', 'no-store')
+
+      return context.json(
         {
           status: 'error',
           message: 'Not found.',
         },
         404,
       )
+    }
 
     // The .csv suffix is part of the stable public
     // URL. It is validated here because this Hono
@@ -6713,7 +6748,7 @@ arukeresoApi.get(
       const { database, channel } =
         await resolveFeedChannel()
 
-      if (!channel) {
+      if (!channel || !channel.isActive) {
         return notFound()
       }
 
@@ -6736,8 +6771,7 @@ arukeresoApi.get(
             'text/csv; charset=utf-8',
           'Content-Disposition':
             `inline; filename="${fileName}"`,
-          'Cache-Control':
-            'public, max-age=300',
+          'Cache-Control': 'no-store',
         },
       })
     } catch {
@@ -7482,6 +7516,7 @@ arukeresoApi.get(
       return context.json({
         status: 'ok',
         channel: FEED_CHANNEL_CODE,
+        isActive: channel.isActive,
         settings,
         appliedDefaults,
       })
@@ -7532,6 +7567,7 @@ arukeresoApi.patch(
       }
 
       const {
+        isActive,
         useMinIndex,
         maxMinIndexBps,
         useMedianIndex,
@@ -7551,6 +7587,19 @@ arukeresoApi.patch(
             status: 'error',
             message:
               'A ruleVersion nem állítható közvetlenül.',
+          },
+          400,
+        )
+      }
+
+      if (
+        isActive !== undefined &&
+        typeof isActive !== 'boolean'
+      ) {
+        return context.json(
+          {
+            status: 'error',
+            message: 'isActive csak true/false lehet.',
           },
           400,
         )
@@ -7727,7 +7776,15 @@ arukeresoApi.patch(
           stored[key] !== updates[key],
       )
 
-      if (!materialChanged && !inactiveChanged) {
+      const activationChanged =
+        isActive !== undefined &&
+        isActive !== channel.isActive
+
+      if (
+        !materialChanged &&
+        !inactiveChanged &&
+        !activationChanged
+      ) {
         const resolved =
           resolveFeedEligibilitySettings(
             channel.settingsJson,
@@ -7736,6 +7793,7 @@ arukeresoApi.patch(
         return context.json({
           status: 'ok',
           channel: FEED_CHANNEL_CODE,
+          isActive: channel.isActive,
           settings: resolved.settings,
           appliedDefaults:
             resolved.appliedDefaults,
@@ -7761,9 +7819,16 @@ arukeresoApi.patch(
       await database
         .update(feedChannels)
         .set({
-          settingsJson: JSON.stringify(
-            next,
-          ),
+          ...(materialChanged || inactiveChanged
+            ? {
+                settingsJson: JSON.stringify(
+                  next,
+                ),
+              }
+            : {}),
+          ...(activationChanged
+            ? { isActive }
+            : {}),
           updatedAt: new Date(),
         })
         .where(
@@ -7778,6 +7843,8 @@ arukeresoApi.patch(
       return context.json({
         status: 'ok',
         channel: FEED_CHANNEL_CODE,
+        isActive:
+          isActive ?? channel.isActive,
         settings: resolved.settings,
         appliedDefaults:
           resolved.appliedDefaults,

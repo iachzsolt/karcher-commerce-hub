@@ -95,6 +95,9 @@ function ArukeresoSettingsPage() {
     useState<SettingsDraft>(INITIAL_DRAFT)
   const [savedDraft, setSavedDraft] =
     useState<SettingsDraft>(INITIAL_DRAFT)
+  const [isActive, setIsActive] = useState(false)
+  const [savedIsActive, setSavedIsActive] =
+    useState(false)
   const [ruleVersion, setRuleVersion] =
     useState<number | null>(null)
   const [usesDefaults, setUsesDefaults] =
@@ -108,7 +111,8 @@ function ArukeresoSettingsPage() {
 
   const dirty =
     JSON.stringify(draft) !==
-    JSON.stringify(savedDraft)
+      JSON.stringify(savedDraft) ||
+    isActive !== savedIsActive
 
   function updateDraft<K extends keyof SettingsDraft>(
     key: K,
@@ -129,6 +133,7 @@ function ArukeresoSettingsPage() {
         `${API_BASE_URL}/arukereso/feed/settings`,
       )
       const result = (await response.json()) as {
+        isActive?: boolean
         settings?: FeedSettings
         appliedDefaults?: string[]
         message?: string
@@ -144,6 +149,8 @@ function ArukeresoSettingsPage() {
       const nextDraft = toDraft(result.settings)
       setDraft(nextDraft)
       setSavedDraft(nextDraft)
+      setIsActive(result.isActive === true)
+      setSavedIsActive(result.isActive === true)
       setRuleVersion(result.settings.ruleVersion)
       setUsesDefaults(
         (result.appliedDefaults?.length ?? 0) > 0,
@@ -203,6 +210,7 @@ function ArukeresoSettingsPage() {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
+            isActive,
             useMinIndex: draft.useMinIndex,
             maxMinIndexBps:
               Math.round(
@@ -227,6 +235,7 @@ function ArukeresoSettingsPage() {
         },
       )
       const result = (await response.json()) as {
+        isActive?: boolean
         settings?: FeedSettings
         appliedDefaults?: string[]
         updated?: boolean
@@ -243,6 +252,8 @@ function ArukeresoSettingsPage() {
       const nextDraft = toDraft(result.settings)
       setDraft(nextDraft)
       setSavedDraft(nextDraft)
+      setIsActive(result.isActive === true)
+      setSavedIsActive(result.isActive === true)
       setRuleVersion(result.settings.ruleVersion)
       setUsesDefaults(
         (result.appliedDefaults?.length ?? 0) > 0,
@@ -284,6 +295,39 @@ function ArukeresoSettingsPage() {
         </div>
       ) : (
         <>
+          <article
+            className={`arukereso-activation-card${
+              isActive ? ' is-active' : ''
+            }`}
+          >
+            <div className="arukereso-activation-copy">
+              <span className="allegro-settings-eyebrow">
+                MASTER KAPCSOLÓ
+              </span>
+              <h3>Árukereső feed publikálása</h3>
+              <p>
+                {isActive
+                  ? 'A csatorna aktív: a feed generálható, és a publikus URL a legutóbbi sikeres V3 feedet szolgálja ki.'
+                  : 'A csatorna ki van kapcsolva: az előnézet elérhető marad, de generálás és publikus kiszolgálás nem történik.'}
+              </p>
+            </div>
+            <label className="schedule-switch arukereso-activation-switch">
+              <input
+                type="checkbox"
+                checked={isActive}
+                disabled={saving}
+                onChange={(event) => {
+                  setIsActive(event.target.checked)
+                  setFeedback(null)
+                }}
+              />
+              <span aria-hidden="true" />
+              <strong>
+                {isActive ? 'Aktív' : 'Kikapcsolva'}
+              </strong>
+            </label>
+          </article>
+
           <article className="allegro-settings-card">
             <header className="allegro-settings-card-header">
               <div>

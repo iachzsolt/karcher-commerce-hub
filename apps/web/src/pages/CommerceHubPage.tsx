@@ -1,7 +1,9 @@
 import DataConnectionsSettings from '../components/DataConnectionsSettings'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import CommerceHubTopbar from '../components/CommerceHubTopbar'
+import { API_BASE_URL } from '../config/api'
 
 import '../CommerceHub.css'
 
@@ -23,6 +25,7 @@ function PlatformCard({
   description,
   to,
   active,
+  accent,
 }: {
   name: string
   type: string
@@ -30,10 +33,15 @@ function PlatformCard({
   description: string
   to: string
   active: boolean
+  accent?: 'arukereso'
 }) {
   return (
     <Link
-      className="platform-card"
+      className={`platform-card${
+        accent === 'arukereso'
+          ? ' platform-card-arukereso'
+          : ''
+      }`}
       to={to}
     >
       <div className="platform-card-top">
@@ -68,7 +76,11 @@ function PlatformCard({
   )
 }
 
-function OverviewSection() {
+function OverviewSection({
+  arukeresoActive,
+}: {
+  arukeresoActive: boolean | null
+}) {
   return (
     <>
       <section className="hub-page-heading">
@@ -95,7 +107,11 @@ function OverviewSection() {
           <strong>2</strong>
 
           <span>
-            1 aktív · 1 nincs bekötve
+            {arukeresoActive === null
+              ? 'Állapot betöltése…'
+              : arukeresoActive
+                ? '2 aktív'
+                : '1 aktív · 1 kikapcsolva'}
           </span>
         </article>
 
@@ -157,10 +173,23 @@ function OverviewSection() {
           <PlatformCard
             name="Árukereső"
             type="PRICE COMPARISON"
-            status="Nincs bekötve"
-            description="Az integráció helye előkészítve, adatkapcsolat még nincs beállítva."
+            status={
+              arukeresoActive === null
+                ? 'Betöltés…'
+                : arukeresoActive
+                  ? 'Aktív'
+                  : 'Kikapcsolva'
+            }
+            description={
+              arukeresoActive === null
+                ? 'A feed csatorna állapotának betöltése folyamatban van.'
+                : arukeresoActive
+                  ? 'Az Árukereső feed generálása és publikus kiszolgálása aktív.'
+                  : 'A feed előnézete elérhető, a generálás és publikus kiszolgálás ki van kapcsolva.'
+            }
             to="/arukereso/overview"
-            active={false}
+            active={arukeresoActive === true}
+            accent="arukereso"
           />
         </div>
       </section>
@@ -168,7 +197,11 @@ function OverviewSection() {
   )
 }
 
-function PlatformsSection() {
+function PlatformsSection({
+  arukeresoActive,
+}: {
+  arukeresoActive: boolean | null
+}) {
   return (
     <>
       <section className="hub-page-heading">
@@ -199,10 +232,23 @@ function PlatformsSection() {
         <PlatformCard
           name="Árukereső"
           type="PRICE COMPARISON"
-          status="Nincs bekötve"
-          description="A modul előkészítve. Az Árukereső integráció később kerül bekötésre."
+          status={
+            arukeresoActive === null
+              ? 'Betöltés…'
+              : arukeresoActive
+                ? 'Aktív'
+                : 'Kikapcsolva'
+          }
+          description={
+            arukeresoActive === null
+              ? 'A feed csatorna állapotának betöltése folyamatban van.'
+              : arukeresoActive
+                ? 'Az Árukereső feed generálása és publikus kiszolgálása aktív.'
+                : 'A feed előnézete elérhető, a generálás és publikus kiszolgálás ki van kapcsolva.'
+          }
           to="/arukereso/overview"
-          active={false}
+          active={arukeresoActive === true}
+          accent="arukereso"
         />
       </div>
     </>
@@ -235,6 +281,30 @@ function SettingsSection() {
 function CommerceHubPage({
   section,
 }: CommerceHubPageProps) {
+  const [arukeresoActive, setArukeresoActive] =
+    useState<boolean | null>(null)
+
+  useEffect(() => {
+    const controller = new AbortController()
+
+    void fetch(
+      `${API_BASE_URL}/arukereso/feed/settings`,
+      { signal: controller.signal },
+    )
+      .then(async (response) => {
+        const result = (await response.json()) as {
+          isActive?: boolean
+        }
+
+        if (response.ok) {
+          setArukeresoActive(result.isActive === true)
+        }
+      })
+      .catch(() => undefined)
+
+    return () => controller.abort()
+  }, [section])
+
   return (
     <div className="app-shell">
       <CommerceHubTopbar />
@@ -242,11 +312,15 @@ function CommerceHubPage({
       <main className="content">
 
         {section === 'overview' && (
-          <OverviewSection />
+          <OverviewSection
+            arukeresoActive={arukeresoActive}
+          />
         )}
 
         {section === 'platforms' && (
-          <PlatformsSection />
+          <PlatformsSection
+            arukeresoActive={arukeresoActive}
+          />
         )}
 
         {section === 'settings' && (

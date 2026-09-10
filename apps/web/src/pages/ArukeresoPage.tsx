@@ -1,27 +1,40 @@
 import CommerceHubTopbar from '../components/CommerceHubTopbar'
+import { useEffect, useState } from 'react'
 import {
   NavLink,
   Navigate,
   Route,
   Routes,
+  useLocation,
 } from 'react-router-dom'
 import ArukeresoCatalogPage from './ArukeresoCatalogPage'
 import ArukeresoFeedPreviewPage from './ArukeresoFeedPreviewPage'
 import ArukeresoProductsPage from './ArukeresoProductsPage'
 import ArukeresoSettingsPage from './ArukeresoSettingsPage'
+import { API_BASE_URL } from '../config/api'
 
 import '../CommerceHub.css'
 
 function ArukeresoOverview({
   title,
+  isActive,
 }: {
   title: string
+  isActive: boolean | null
 }) {
   return (
     <section className="module-placeholder">
-      <div className="module-placeholder-status">
+      <div
+        className={`module-placeholder-status${
+          isActive === false ? ' is-inactive' : ''
+        }`}
+      >
         <span className="platform-status-dot" />
-        Aktív integráció
+        {isActive === null
+          ? 'Állapot betöltése…'
+          : isActive
+            ? 'Aktív feed csatorna'
+            : 'Feed csatorna kikapcsolva'}
       </div>
 
       <h3>{title}</h3>
@@ -36,6 +49,31 @@ function ArukeresoOverview({
 }
 
 function ArukeresoPage() {
+  const location = useLocation()
+  const [isActive, setIsActive] =
+    useState<boolean | null>(null)
+
+  useEffect(() => {
+    const controller = new AbortController()
+
+    void fetch(
+      `${API_BASE_URL}/arukereso/feed/settings`,
+      { signal: controller.signal },
+    )
+      .then(async (response) => {
+        const result = (await response.json()) as {
+          isActive?: boolean
+        }
+
+        if (response.ok) {
+          setIsActive(result.isActive === true)
+        }
+      })
+      .catch(() => undefined)
+
+    return () => controller.abort()
+  }, [location.pathname])
+
   return (
     <div className="app-shell">
       <CommerceHubTopbar />
@@ -96,6 +134,7 @@ function ArukeresoPage() {
             element={
               <ArukeresoOverview
                 title="Áttekintés"
+                isActive={isActive}
               />
             }
           />

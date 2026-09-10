@@ -59,6 +59,7 @@ type FeedSettings = {
 }
 
 type PreviewResponse = {
+  isActive?: boolean
   summary?: Record<string, number>
   settings?: FeedSettings
   safety?: { minIncludedItems: number }
@@ -214,6 +215,8 @@ function ArukeresoFeedPreviewPage() {
   >({})
   const [settings, setSettings] =
     useState<FeedSettings | null>(null)
+  const [isActive, setIsActive] =
+    useState<boolean | null>(null)
   const [minIncludedItems, setMinIncludedItems] =
     useState(1)
   const [total, setTotal] = useState(0)
@@ -300,6 +303,7 @@ function ArukeresoFeedPreviewPage() {
         setItems(result.sample ?? [])
         setSummary(result.summary ?? {})
         setSettings(result.settings ?? null)
+        setIsActive(result.isActive === true)
         setMinIncludedItems(
           result.safety?.minIncludedItems ?? 1,
         )
@@ -523,6 +527,18 @@ function ArukeresoFeedPreviewPage() {
           <small className="arukereso-preview-readonly-note">
             Az előnézet nem hoz létre új feed-verziót.
           </small>
+          <span
+            className={`arukereso-channel-status${
+              isActive === true ? ' is-active' : ''
+            }`}
+          >
+            <span className="platform-status-dot" />
+            {isActive === null
+              ? 'Csatornaállapot betöltése…'
+              : isActive
+                ? 'Csatorna aktív'
+                : 'Csatorna kikapcsolva'}
+          </span>
         </div>
         <div className="arukereso-preview-header-actions">
           <button
@@ -537,7 +553,10 @@ function ArukeresoFeedPreviewPage() {
             type="button"
             className="campaign-primary-button"
             disabled={
-              loading || generating || generationBlocked
+              loading ||
+              generating ||
+              generationBlocked ||
+              isActive !== true
             }
             onClick={() => setShowConfirm(true)}
           >
@@ -545,6 +564,22 @@ function ArukeresoFeedPreviewPage() {
           </button>
         </div>
       </div>
+
+      {isActive === false && !loading && (
+        <div className="arukereso-preview-inactive-banner">
+          <div>
+            <strong>A feed csatorna ki van kapcsolva.</strong>
+            <span>
+              A diagnosztikai előnézet továbbra is használható,
+              de generálás és publikus feed-kiszolgálás nem
+              történik.
+            </span>
+          </div>
+          <Link to="/arukereso/settings">
+            Aktiválási beállítások
+          </Link>
+        </div>
+      )}
 
       {generationBlocked && !loading && (
         <div className="arukereso-preview-safety-warning">

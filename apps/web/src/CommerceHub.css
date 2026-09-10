@@ -3520,6 +3520,25 @@ textarea {
   box-shadow: 0 8px 26px rgba(0, 0, 0, 0.07);
 }
 
+.platform-card-arukereso {
+  position: relative;
+  overflow: hidden;
+  border-color: #cbddec;
+}
+
+.platform-card-arukereso::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  height: 4px;
+  background: linear-gradient(90deg, #0873c5 0 72%, #f28b22 72%);
+}
+
+.platform-card-arukereso .platform-type,
+.platform-card-arukereso .platform-card-action {
+  color: #0868ad;
+}
+
 .platform-card-top {
   display: flex;
   justify-content: space-between;
@@ -6343,6 +6362,10 @@ input:checked + span::after {
   font-size: 10px;
   font-weight: 700;
 }
+
+.module-placeholder-status.is-inactive {
+  color: #a25814;
+}
 /* Allegro brand color in inventory sync flow */
 .allegro-settings-source-node:last-child > span {
   background: #ff5a00;
@@ -7596,6 +7619,49 @@ input:checked + span::after {
   max-width: 1040px;
 }
 
+.arukereso-activation-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 28px;
+  margin-bottom: 18px;
+  padding: 22px 24px;
+  border: 1px solid #e5c7a5;
+  border-left: 5px solid #f28b22;
+  border-radius: 12px;
+  background: linear-gradient(120deg, #fff9f2, #fff);
+}
+
+.arukereso-activation-card.is-active {
+  border-color: #a9cee9;
+  border-left-color: #0873c5;
+  background: linear-gradient(120deg, #edf7ff, #fff);
+}
+
+.arukereso-activation-copy h3 {
+  margin: 5px 0 7px;
+  font-size: 19px;
+}
+
+.arukereso-activation-copy p {
+  max-width: 680px;
+  margin: 0;
+  color: #5f6c76;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.arukereso-activation-switch {
+  flex: 0 0 auto;
+  padding: 10px 13px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.arukereso-activation-switch input:checked + span {
+  background: #0873c5;
+}
+
 .arukereso-settings-rules {
   display: grid;
 }
@@ -7909,6 +7975,11 @@ input:checked + span::after {
 }
 
 @media (max-width: 720px) {
+  .arukereso-activation-card {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .arukereso-settings-rule,
   .arukereso-settings-data-grid {
     grid-template-columns: 1fr;
@@ -7971,6 +8042,25 @@ input:checked + span::after {
   font-size: 10px;
 }
 
+.arukereso-channel-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  margin-top: 10px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: #fff0e1;
+  color: #a25814;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.arukereso-channel-status.is-active {
+  background: #e7f4fd;
+  color: #0868ad;
+}
+
 .arukereso-preview-header-actions {
   display: flex;
   align-items: center;
@@ -7988,6 +8078,34 @@ input:checked + span::after {
   background: #fffbed;
   color: #5d510b;
   font-size: 11px;
+}
+
+.arukereso-preview-inactive-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 16px;
+  padding: 15px 17px;
+  border: 1px solid #e5c7a5;
+  border-left: 4px solid #f28b22;
+  border-radius: 9px;
+  background: #fff8f0;
+  color: #704214;
+}
+
+.arukereso-preview-inactive-banner > div {
+  display: grid;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.arukereso-preview-inactive-banner a {
+  flex: 0 0 auto;
+  color: #0868ad;
+  font-size: 11px;
+  font-weight: 800;
 }
 
 .arukereso-preview-kpis {
@@ -8243,7 +8361,8 @@ input:checked + span::after {
 
 @media (max-width: 720px) {
   .arukereso-preview-header-actions,
-  .arukereso-preview-latest {
+  .arukereso-preview-latest,
+  .arukereso-preview-inactive-banner {
     align-items: stretch;
     flex-direction: column;
   }
