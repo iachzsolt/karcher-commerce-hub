@@ -10,8 +10,6 @@ type FeedSettings = {
   maxAverageIndexBps: number
   useStockRule: boolean
   allowNoCompetitor: boolean
-  allowMissingPricingData: boolean
-  maxPricingAgeHours: number
   ruleVersion: number
 }
 
@@ -23,7 +21,6 @@ type SettingsDraft = {
   useAverageIndex: boolean
   maxAverageIndexPercent: string
   useStockRule: boolean
-  allowMissingPricingData: boolean
   allowNoCompetitor: boolean
 }
 
@@ -35,7 +32,6 @@ const INITIAL_DRAFT: SettingsDraft = {
   useAverageIndex: false,
   maxAverageIndexPercent: '110',
   useStockRule: false,
-  allowMissingPricingData: false,
   allowNoCompetitor: false,
 }
 
@@ -45,7 +41,7 @@ const PRICING_RULES = [
     thresholdKey: 'maxMinIndexPercent' as const,
     label: 'Minimum index figyelembevétele',
     helper:
-      'A termék csak akkor kerülhet a feedbe, ha a minimum árindex nem haladja meg a megadott értéket.',
+      'Ha a minimum árindex meghaladja a határt, az ajánlat a feedben marad, de DeliveryTime=NO értéket kap.',
     thresholdLabel: 'Maximum minimum index',
   },
   {
@@ -53,7 +49,7 @@ const PRICING_RULES = [
     thresholdKey: 'maxMedianIndexPercent' as const,
     label: 'Medián index figyelembevétele',
     helper:
-      'A medián árindexnek is meg kell felelnie a beállított határnak.',
+      'Ha a medián árindex nem felel meg, az ajánlat DeliveryTime=NO értéket kap.',
     thresholdLabel: 'Maximum medián index',
   },
   {
@@ -61,10 +57,34 @@ const PRICING_RULES = [
     thresholdKey: 'maxAverageIndexPercent' as const,
     label: 'Átlagindex figyelembevétele',
     helper:
-      'Az átlagos piaci árpozíció alapján is szűrheted a termékeket.',
+      'Ha az átlagos árpozíció nem felel meg, az ajánlat DeliveryTime=NO értéket kap.',
     thresholdLabel: 'Maximum átlagindex',
   },
 ]
+
+function isFeedSettings(value: unknown): value is FeedSettings {
+  if (
+    value === null ||
+    typeof value !== 'object' ||
+    Array.isArray(value)
+  ) {
+    return false
+  }
+
+  const settings = value as Record<string, unknown>
+
+  return (
+    typeof settings['useMinIndex'] === 'boolean' &&
+    typeof settings['maxMinIndexBps'] === 'number' &&
+    typeof settings['useMedianIndex'] === 'boolean' &&
+    typeof settings['maxMedianIndexBps'] === 'number' &&
+    typeof settings['useAverageIndex'] === 'boolean' &&
+    typeof settings['maxAverageIndexBps'] === 'number' &&
+    typeof settings['useStockRule'] === 'boolean' &&
+    typeof settings['allowNoCompetitor'] === 'boolean' &&
+    typeof settings['ruleVersion'] === 'number'
+  )
+}
 
 function toDraft(settings: FeedSettings): SettingsDraft {
   return {
@@ -81,8 +101,6 @@ function toDraft(settings: FeedSettings): SettingsDraft {
       settings.maxAverageIndexBps / 100,
     ),
     useStockRule: settings.useStockRule,
-    allowMissingPricingData:
-      settings.allowMissingPricingData,
     allowNoCompetitor:
       settings.allowNoCompetitor,
   }
@@ -90,6 +108,7 @@ function toDraft(settings: FeedSettings): SettingsDraft {
 
 function ArukeresoSettingsPage() {
   const [loading, setLoading] = useState(true)
+  const [loaded, setLoaded] = useState(false)
   const [saving, setSaving] = useState(false)
   const [draft, setDraft] =
     useState<SettingsDraft>(INITIAL_DRAFT)
@@ -127,6 +146,8 @@ function ArukeresoSettingsPage() {
 
   async function loadSettings() {
     setLoading(true)
+    setLoaded(false)
+    setFeedback(null)
 
     try {
       const response = await fetch(
@@ -139,7 +160,11 @@ function ArukeresoSettingsPage() {
         message?: string
       }
 
-      if (!response.ok || !result.settings) {
+      if (
+        !response.ok ||
+        !isFeedSettings(result.settings) ||
+        typeof result.isActive !== 'boolean'
+      ) {
         throw new Error(
           result.message ??
             'A beállítások betöltése sikertelen.',
@@ -149,12 +174,13 @@ function ArukeresoSettingsPage() {
       const nextDraft = toDraft(result.settings)
       setDraft(nextDraft)
       setSavedDraft(nextDraft)
-      setIsActive(result.isActive === true)
-      setSavedIsActive(result.isActive === true)
+      setIsActive(result.isActive)
+      setSavedIsActive(result.isActive)
       setRuleVersion(result.settings.ruleVersion)
       setUsesDefaults(
         (result.appliedDefaults?.length ?? 0) > 0,
       )
+      setLoaded(true)
     } catch (error) {
       setFeedback({
         kind: 'error',
@@ -227,8 +253,6 @@ function ArukeresoSettingsPage() {
                 Number(draft.maxAverageIndexPercent) * 100,
               ),
             useStockRule: draft.useStockRule,
-            allowMissingPricingData:
-              draft.allowMissingPricingData,
             allowNoCompetitor:
               draft.allowNoCompetitor,
           }),
@@ -242,7 +266,11 @@ function ArukeresoSettingsPage() {
         message?: string
       }
 
-      if (!response.ok || !result.settings) {
+      if (
+        !response.ok ||
+        !isFeedSettings(result.settings) ||
+        typeof result.isActive !== 'boolean'
+      ) {
         throw new Error(
           result.message ??
             'A beállítások mentése sikertelen.',
@@ -252,8 +280,8 @@ function ArukeresoSettingsPage() {
       const nextDraft = toDraft(result.settings)
       setDraft(nextDraft)
       setSavedDraft(nextDraft)
-      setIsActive(result.isActive === true)
-      setSavedIsActive(result.isActive === true)
+      setIsActive(result.isActive)
+      setSavedIsActive(result.isActive)
       setRuleVersion(result.settings.ruleVersion)
       setUsesDefaults(
         (result.appliedDefaults?.length ?? 0) > 0,
@@ -284,14 +312,28 @@ function ArukeresoSettingsPage() {
         <span>ÁRUKERESŐ FEED</span>
         <h2>Árukereső beállítások</h2>
         <p>
-          Állítsd be, milyen feltételek alapján kerülhetnek
-          termékek az Árukereső feedbe.
+          A PriceKit-lefedettség adja a feed alapját; a
+          szabályok az ajánlatok elérhetőségét vezérlik.
         </p>
       </div>
 
       {loading ? (
         <div className="campaign-message">
           Beállítások betöltése…
+        </div>
+      ) : !loaded ? (
+        <div className="campaign-message campaign-message-error">
+          <span>
+            {feedback?.text ??
+              'A beállítások betöltése sikertelen.'}
+          </span>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => void loadSettings()}
+          >
+            Újrapróbálás
+          </button>
         </div>
       ) : (
         <>
@@ -307,8 +349,8 @@ function ArukeresoSettingsPage() {
               <h3>Árukereső feed publikálása</h3>
               <p>
                 {isActive
-                  ? 'A csatorna aktív: a feed generálható, és a publikus URL a legutóbbi sikeres V3 feedet szolgálja ki.'
-                  : 'A csatorna ki van kapcsolva: az előnézet elérhető marad, de generálás és publikus kiszolgálás nem történik.'}
+                  ? 'Az Árukereső integráció aktív. A publikus feed a normál aktuális ajánlatokat szolgálja ki.'
+                  : 'Az Árukereső integráció leállított állapotban van. A publikus feed továbbra is elérhető, de minden ajánlat DeliveryTime=NO értékkel kerül átadásra.'}
               </p>
             </div>
             <label className="schedule-switch arukereso-activation-switch">
@@ -323,7 +365,7 @@ function ArukeresoSettingsPage() {
               />
               <span aria-hidden="true" />
               <strong>
-                {isActive ? 'Aktív' : 'Kikapcsolva'}
+                {isActive ? 'Bekapcsolva' : 'Kikapcsolva'}
               </strong>
             </label>
           </article>
@@ -332,12 +374,13 @@ function ArukeresoSettingsPage() {
             <header className="allegro-settings-card-header">
               <div>
                 <span className="allegro-settings-eyebrow">
-                  FEED-JOGOSULTSÁG
+                  AJÁNLAT ELÉRHETŐSÉG
                 </span>
                 <h3>Árpozíciós szabályok</h3>
                 <p>
                   Ha több árindexszabály aktív, minden
-                  bekapcsolt feltételnek teljesülnie kell.
+                  bekapcsolt feltételnek teljesülnie kell az
+                  eredeti DeliveryTime megtartásához.
                 </p>
               </div>
             </header>
@@ -412,7 +455,7 @@ function ArukeresoSettingsPage() {
                 <h3>Készlet és pricing adatok</h3>
                 <p>
                   Határozd meg, milyen készlet- és
-                  adatállapot mellett kerülhet ki egy termék.
+                  adatállapot mellett maradhat aktív egy ajánlat.
                 </p>
               </div>
             </header>
@@ -435,33 +478,8 @@ function ArukeresoSettingsPage() {
                   <strong>Készlet figyelembevétele</strong>
                 </label>
                 <p>
-                  Bekapcsolva csak a készleten lévő termékek
-                  kerülhetnek a feedbe.
-                </p>
-              </div>
-
-              <div className="arukereso-settings-toggle-row">
-                <label className="schedule-switch">
-                  <input
-                    type="checkbox"
-                    checked={draft.allowMissingPricingData}
-                    disabled={saving}
-                    onChange={(event) =>
-                      updateDraft(
-                        'allowMissingPricingData',
-                        event.target.checked,
-                      )
-                    }
-                  />
-                  <span aria-hidden="true" />
-                  <strong>
-                    PriceKit adat nélküli termékek engedélyezése
-                  </strong>
-                </label>
-                <p>
-                  Bekapcsolva azok a termékek is
-                  megjelenhetnek, amelyekhez nincs aktuális
-                  PriceKit/Cockpit adat.
+                  Készlethiány esetén a feed-sor megmarad, de
+                  DeliveryTime=NO értéket kap.
                 </p>
               </div>
 
@@ -485,16 +503,17 @@ function ArukeresoSettingsPage() {
                 </label>
                 <p>
                   Bekapcsolva a PriceKitben szereplő, de
-                  versenytársi ár nélküli termékek is
-                  megjelenhetnek.
+                  versenytársi ár nélküli ajánlatok is aktívak
+                  maradhatnak.
                 </p>
               </div>
 
             </div>
 
             <div className="allegro-settings-info">
-              A PriceKit-lefedettség, competitor-adatok és
-              készlet kezelése külön szabályozható.
+              PriceKit adat nélkül a termék alapból nincs a
+              feedben. Egyedi kivétel a Termékek oldalon,
+              „Mindig aktív” beállítással adható hozzá.
             </div>
           </article>
 

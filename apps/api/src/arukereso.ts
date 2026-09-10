@@ -2200,7 +2200,7 @@ async function analyzePricingWorkbook(
       unmatchedRows,
       validMatchedRows,
       invalidMatchedRows,
-      duplicateSkuRows,
+      duplicateSkuRows: 0,
       rowsWithIndex,
       rowsWithMedianIndex,
       rowsWithAverageIndex,
@@ -2314,6 +2314,7 @@ function createPricingSourceFingerprint(
   return createHash('sha256')
     .update(
       JSON.stringify({
+        productId: item.productId,
         sku: item.sku,
         priceIndexBps:
           item.priceIndexBps,
@@ -2787,18 +2788,43 @@ type PricingSyncPayloadSummary = {
   partialMarketData: number
 }
 
+type UnmatchedPricingPayloadItem = {
+  rowIndex: number
+  sku: string
+  name: string | null
+  ean: string | null
+  index: number | null
+  medianIndex: number | null
+  averageIndex: number | null
+  priceIndexBps: number | null
+  medianIndexBps: number | null
+  averageIndexBps: number | null
+  marketStatus: PricingMarketStatus
+}
+
 type NormalizePricingPayloadResult =
   | {
       ok: true
       validItems: NormalizedPricingItem[]
       summary: PricingSyncPayloadSummary
       unmatchedSample: string[]
+      unmatchedItems: UnmatchedPricingPayloadItem[]
+      invalidRows: Array<{
+        rowIndex: number
+        sku: string
+        errors: string[]
+      }>
+      duplicateRows: Array<{
+        rowIndex: number
+        sku: string
+      }>
     }
   | {
       ok: false
       message: string
       summary: PricingSyncPayloadSummary
       invalidRows: Array<{
+        rowIndex: number
         sku: string
         errors: string[]
       }>
@@ -2807,6 +2833,10 @@ type NormalizePricingPayloadResult =
 
 async function normalizePricingPayload(
   body: unknown,
+  options?: {
+    allowNoMatches?: boolean
+    fullDiagnostics?: boolean
+  },
 ): Promise<NormalizePricingPayloadResult> {
   const emptySummary: PricingSyncPayloadSummary =
     {
@@ -2913,10 +2943,15 @@ async function normalizePricingPayload(
     }
   }
 
-  const duplicateSkus = [...skuOccurrences]
+  const allDuplicateSkus = [...skuOccurrences]
     .filter(([, count]) => count > 1)
     .map(([sku]) => sku)
-    .slice(0, PRICING_SYNC_SAMPLE_LIMIT)
+  const duplicateSkus = options?.fullDiagnostics
+    ? allDuplicateSkus
+    : allDuplicateSkus.slice(
+        0,
+        PRICING_SYNC_SAMPLE_LIMIT,
+      )
 
   const duplicateSkuRows = [
     ...skuOccurrences,
@@ -2928,7 +2963,10 @@ async function normalizePricingPayload(
       0,
     )
 
-  if (duplicateSkus.length > 0) {
+  if (
+    duplicateSkus.length > 0 &&
+    !options?.fullDiagnostics
+  ) {
     return fail(
       'A szinkron kérés duplikált Cikkszám sorokat tartalmaz.',
       {
@@ -2964,11 +3002,20 @@ async function normalizePricingPayload(
     []
 
   const invalidRows: Array<{
+    rowIndex: number
     sku: string
     errors: string[]
   }> = []
 
   const unmatchedSample: string[] = []
+  const unmatchedItems: UnmatchedPricingPayloadItem[] = []
+  const duplicateRows: Array<{
+    rowIndex: number
+    sku: string
+  }> = []
+  const duplicateSkuSet = new Set(
+    allDuplicateSkus,
+  )
 
   let matchedRows = 0
   let unmatchedRows = 0
@@ -2976,13 +3023,14 @@ async function normalizePricingPayload(
   let noCompetitor = 0
   let partialMarketData = 0
 
-  for (const row of items) {
+  for (const [rowIndex, row] of items.entries()) {
     if (
       !row ||
       typeof row !== 'object' ||
       Array.isArray(row)
     ) {
       invalidRows.push({
+        rowIndex,
         sku: '',
         errors: ['INVALID_ROW'],
       })
@@ -2991,11 +3039,19 @@ async function normalizePricingPayload(
 
     const {
       sku: rawSku,
+      name: rawName,
+      productName: rawProductName,
+      ean: rawEan,
+      eanCode: rawEanCode,
       index: rawIndex,
       medianIndex: rawMedianIndex,
       averageIndex: rawAverageIndex,
     } = row as {
       sku?: unknown
+      name?: unknown
+      productName?: unknown
+      ean?: unknown
+      eanCode?: unknown
       index?: unknown
       medianIndex?: unknown
       averageIndex?: unknown
@@ -3006,6 +3062,7 @@ async function normalizePricingPayload(
       !rawSku.trim()
     ) {
       invalidRows.push({
+        rowIndex,
         sku:
           typeof rawSku === 'string'
             ? rawSku
@@ -3016,6 +3073,12 @@ async function normalizePricingPayload(
     }
 
     const sku = rawSku.trim()
+
+    if (duplicateSkuSet.has(sku)) {
+      duplicateRows.push({ rowIndex, sku })
+      continue
+    }
+
     const errors: string[] = []
 
     const parseField = (
@@ -3061,9 +3124,16 @@ async function normalizePricingPayload(
       medianIndex === undefined ||
       averageIndex === undefined
     ) {
-      invalidRows.push({ sku, errors })
+      invalidRows.push({ rowIndex, sku, errors })
       continue
     }
+
+    const marketStatus =
+      derivePricingMarketStatus(
+        index,
+        medianIndex,
+        averageIndex,
+      )
 
     const matchedProduct =
       productBySku.get(sku) ?? null
@@ -3078,22 +3148,41 @@ async function normalizePricingPayload(
         unmatchedSample.push(sku)
       }
 
+      unmatchedItems.push({
+        rowIndex,
+        sku,
+        name:
+          [rawName, rawProductName].find(
+            (value): value is string =>
+              typeof value === 'string' &&
+              Boolean(value.trim()),
+          )?.trim() ?? null,
+        ean:
+          [rawEan, rawEanCode].find(
+            (value): value is string =>
+              typeof value === 'string' &&
+              Boolean(value.trim()),
+          )?.trim() ?? null,
+        index,
+        medianIndex,
+        averageIndex,
+        priceIndexBps: toPricingBps(index),
+        medianIndexBps:
+          toPricingBps(medianIndex),
+        averageIndexBps:
+          toPricingBps(averageIndex),
+        marketStatus,
+      })
+
       continue
     }
 
     if (errors.length > 0) {
-      invalidRows.push({ sku, errors })
+      invalidRows.push({ rowIndex, sku, errors })
       continue
     }
 
     matchedRows += 1
-
-    const marketStatus =
-      derivePricingMarketStatus(
-        index,
-        medianIndex,
-        averageIndex,
-      )
 
     if (
       marketStatus === 'HAS_COMPETITOR'
@@ -3130,28 +3219,36 @@ async function normalizePricingPayload(
         validItems.length,
       invalidMatchedRows:
         invalidRows.length,
-      duplicateSkuRows: 0,
+      duplicateSkuRows,
       hasCompetitor,
       noCompetitor,
       partialMarketData,
     }
 
-  if (invalidRows.length > 0) {
+  if (
+    invalidRows.length > 0 &&
+    !options?.fullDiagnostics
+  ) {
     return {
       ok: false,
       message:
         'A szinkron kérés hibás sorokat tartalmaz.',
       summary,
       invalidRows:
-        invalidRows.slice(
-          0,
-          PRICING_SYNC_SAMPLE_LIMIT,
-        ),
+        options?.fullDiagnostics
+          ? invalidRows
+          : invalidRows.slice(
+              0,
+              PRICING_SYNC_SAMPLE_LIMIT,
+            ),
       duplicateSkus: [],
     }
   }
 
-  if (validItems.length === 0) {
+  if (
+    validItems.length === 0 &&
+    !options?.allowNoMatches
+  ) {
     return {
       ok: false,
       message:
@@ -3167,8 +3264,706 @@ async function normalizePricingPayload(
     validItems,
     summary,
     unmatchedSample,
+    unmatchedItems,
+    invalidRows,
+    duplicateRows,
   }
 }
+
+function normalizeSkuForDiagnostic(value: string) {
+  return value
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+}
+
+arukeresoApi.post(
+  '/pricing/reconcile',
+  async (context) => {
+    const auth = checkPricingSyncAuth(
+      context.req.header('Authorization'),
+    )
+
+    if (!auth.ok) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            auth.status === 503
+              ? 'Az árazási egyeztetés nincs konfigurálva.'
+              : 'Hiányzó vagy érvénytelen hitelesítés.',
+        },
+        auth.status,
+      )
+    }
+
+    let body: unknown
+
+    try {
+      body = await context.req.json()
+    } catch {
+      body = null
+    }
+
+    const normalized =
+      await normalizePricingPayload(body, {
+        allowNoMatches: true,
+        fullDiagnostics: true,
+      })
+
+    if (!normalized.ok) {
+      return context.json(
+        {
+          status: 'error',
+          message: normalized.message,
+          summary: {
+            payloadRows: normalized.summary.rows,
+            validRows:
+              normalized.summary.rows -
+              normalized.summary.invalidMatchedRows,
+            duplicateRows:
+              normalized.summary.duplicateSkuRows,
+            invalidRows:
+              normalized.summary.invalidMatchedRows,
+            matchedRows:
+              normalized.summary.matchedRows,
+            unmatchedRows:
+              normalized.summary.unmatchedRows,
+          },
+          invalidRows: normalized.invalidRows.map(
+            (row) => ({
+              ...row,
+              classification:
+                row.errors.includes('INVALID_SKU')
+                  ? 'G_INVALID_COCKPIT_SKU'
+                  : 'H_PAYLOAD_ROW_REJECTED',
+            }),
+          ),
+          duplicateSkus:
+            normalized.duplicateSkus.map((sku) => ({
+              sku,
+              classification:
+                'F_DUPLICATE_COCKPIT_SKU',
+            })),
+        },
+        422,
+      )
+    }
+
+    const database = requireDatabase()
+    const resolvedConnection =
+      await resolveActivePricingConnection(null)
+
+    if (!resolvedConnection.ok) {
+      return context.json(
+        {
+          status: 'error',
+          message: resolvedConnection.message,
+        },
+        409,
+      )
+    }
+
+    const [
+      hubProducts,
+      identifiers,
+      catalogConnections,
+      storedPricingRows,
+    ] = await Promise.all([
+      database
+        .select({
+          id: products.id,
+          sku: products.sku,
+          name: products.name,
+          active: products.active,
+        })
+        .from(products),
+      database
+        .select({
+          productId:
+            productIdentifiers.productId,
+          type: productIdentifiers.type,
+          value: productIdentifiers.value,
+        })
+        .from(productIdentifiers),
+      database
+        .select({ id: dataConnections.id })
+        .from(dataConnections)
+        .where(
+          and(
+            eq(
+              dataConnections.sourceType,
+              'CSV_UPLOAD',
+            ),
+            eq(
+              dataConnections.purpose,
+              'CATALOG',
+            ),
+            eq(dataConnections.isActive, true),
+          ),
+        ),
+      database
+        .select({
+          productId: pricingSourceItems.productId,
+          sku: pricingSourceItems.sourceItemKey,
+          priceIndexBps:
+            pricingSourceItems.priceIndexBps,
+          medianIndexBps:
+            pricingSourceItems.medianIndexBps,
+          averageIndexBps:
+            pricingSourceItems.averageIndexBps,
+          dataStatus: pricingSourceItems.dataStatus,
+        })
+        .from(pricingSourceItems)
+        .where(
+          and(
+            eq(
+              pricingSourceItems.connectionId,
+              resolvedConnection.connectionId,
+            ),
+            eq(
+              pricingSourceItems.marketCode,
+              PRICING_MARKET_CODE,
+            ),
+            eq(
+              pricingSourceItems.currency,
+              PRICING_CURRENCY,
+            ),
+          ),
+        ),
+    ])
+
+    if (catalogConnections.length !== 1) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            catalogConnections.length === 0
+              ? 'Nincs aktív CMS katalógusforrás.'
+              : 'Több aktív CMS katalógusforrás található; a diagnosztika nem egyértelmű.',
+        },
+        409,
+      )
+    }
+
+    const catalogConnectionIds =
+      catalogConnections.map(
+        (connection) => connection.id,
+      )
+    const catalogRows =
+      catalogConnectionIds.length > 0
+        ? await database
+            .select({
+              id: catalogSourceItems.id,
+              productId:
+                catalogSourceItems.productId,
+              sourceItemKey:
+                catalogSourceItems.sourceItemKey,
+              identifier:
+                catalogSourceItems.identifier,
+              eanCode: catalogSourceItems.eanCode,
+              name: catalogSourceItems.name,
+              matchStatus:
+                catalogSourceItems.matchStatus,
+              matchError:
+                catalogSourceItems.matchError,
+            })
+            .from(catalogSourceItems)
+            .where(
+              inArray(
+                catalogSourceItems.connectionId,
+                catalogConnectionIds,
+              ),
+            )
+        : []
+    const productById = new Map(
+      hubProducts.map((product) => [
+        product.id,
+        product,
+      ]),
+    )
+    const productsByNormalizedSku = new Map<
+      string,
+      typeof hubProducts
+    >()
+
+    for (const product of hubProducts) {
+      const key = normalizeSkuForDiagnostic(
+        product.sku,
+      )
+      const candidates =
+        productsByNormalizedSku.get(key) ?? []
+      candidates.push(product)
+      productsByNormalizedSku.set(key, candidates)
+    }
+
+    const currentCmsProductIds = new Set(
+      catalogRows.flatMap((row) =>
+        row.productId ? [row.productId] : [],
+      ),
+    )
+    const storedPricingBySku = new Map(
+      storedPricingRows.map((row) => [row.sku, row]),
+    )
+    const valueMismatches: Array<{
+      sku: string
+      fields: string[]
+      payload: Record<string, number | string | null>
+      stored: Record<string, number | string | null>
+    }> = []
+    const missingStoredMatched: string[] = []
+    const alreadyStoredPricingRows =
+      normalized.validItems.filter((item) =>
+        storedPricingBySku.has(item.sku),
+      ).length
+    const incomingMatchedSkus = new Set(
+      normalized.validItems.map((item) => item.sku),
+    )
+    // Full snapshot sync also removes stored SKUs absent
+    // from the payload, not just submitted unmatched SKUs.
+    const storedRowsPendingRemoval = storedPricingRows
+      .filter((item) => !incomingMatchedSkus.has(item.sku))
+      .map((item) => item.sku)
+
+    for (const item of normalized.validItems) {
+      const stored = storedPricingBySku.get(item.sku)
+
+      if (!stored) {
+        missingStoredMatched.push(item.sku)
+        continue
+      }
+
+      const fields = [
+        [
+          'productAssociation',
+          item.productId,
+          stored.productId,
+        ],
+        [
+          'priceIndexBps',
+          item.priceIndexBps,
+          stored.priceIndexBps,
+        ],
+        [
+          'medianIndexBps',
+          item.medianIndexBps,
+          stored.medianIndexBps,
+        ],
+        [
+          'averageIndexBps',
+          item.averageIndexBps,
+          stored.averageIndexBps,
+        ],
+        [
+          'marketStatus',
+          item.marketStatus,
+          stored.dataStatus,
+        ],
+      ].filter(([, expected, actual]) =>
+        expected !== actual,
+      )
+
+      if (fields.length > 0) {
+        valueMismatches.push({
+          sku: item.sku,
+          fields: fields.map(([field]) =>
+            String(field),
+          ),
+          payload: {
+            priceIndexBps: item.priceIndexBps,
+            medianIndexBps:
+              item.medianIndexBps,
+            averageIndexBps:
+              item.averageIndexBps,
+            marketStatus: item.marketStatus,
+          },
+          stored: {
+            priceIndexBps: stored.priceIndexBps,
+            medianIndexBps:
+              stored.medianIndexBps,
+            averageIndexBps:
+              stored.averageIndexBps,
+            marketStatus: stored.dataStatus,
+          },
+        })
+      }
+    }
+
+    const classificationCounts: Record<string, number> = {}
+    const groupCounts: Record<string, number> = {}
+    const unmatched = normalized.unmatchedItems.map(
+      (item) => {
+        const compactSku =
+          normalizeSkuForDiagnostic(item.sku)
+        const candidateProducts = new Map<
+          string,
+          {
+            productId: string
+            sku: string
+            name: string
+            active: boolean
+            matchMethods: Set<string>
+          }
+        >()
+        const addProductCandidate = (
+          productId: string,
+          method: string,
+        ) => {
+          const product = productById.get(productId)
+
+          if (!product) return
+
+          const candidate =
+            candidateProducts.get(productId) ?? {
+              productId: product.id,
+              sku: product.sku,
+              name: product.name,
+              active: product.active,
+              matchMethods: new Set<string>(),
+            }
+          candidate.matchMethods.add(method)
+          candidateProducts.set(productId, candidate)
+        }
+
+        for (const product of
+          productsByNormalizedSku.get(compactSku) ?? []) {
+          addProductCandidate(
+            product.id,
+            'NORMALIZED_SKU',
+          )
+        }
+
+        const identifierCandidates = identifiers
+          .filter(
+            (identifier) =>
+              identifier.value === item.sku ||
+              (item.ean !== null &&
+                identifier.value === item.ean),
+          )
+          .map((identifier) => {
+            addProductCandidate(
+              identifier.productId,
+              `PRODUCT_IDENTIFIER_${identifier.type}`,
+            )
+            const product = productById.get(
+              identifier.productId,
+            )
+
+            return {
+              productId: identifier.productId,
+              productSku: product?.sku ?? null,
+              productName: product?.name ?? null,
+              type: identifier.type,
+              value: identifier.value,
+            }
+          })
+        const catalogCandidates = catalogRows
+          .flatMap((row) => {
+            const methods: string[] = []
+            const candidateValues = [
+              row.sourceItemKey,
+              row.identifier,
+              row.eanCode,
+            ].filter(
+              (value): value is string =>
+                typeof value === 'string' &&
+                Boolean(value),
+            )
+
+            if (
+              candidateValues.includes(item.sku)
+            ) {
+              methods.push('CATALOG_EXACT_VALUE')
+            }
+
+            if (
+              item.ean !== null &&
+              row.eanCode === item.ean
+            ) {
+              methods.push('CATALOG_EAN')
+            }
+
+            if (
+              candidateValues.some(
+                (value) =>
+                  normalizeSkuForDiagnostic(value) ===
+                  compactSku,
+              )
+            ) {
+              methods.push('CATALOG_NORMALIZED_VALUE')
+            }
+
+            if (methods.length === 0) return []
+
+            if (row.productId) {
+              addProductCandidate(
+                row.productId,
+                'CATALOG_LINKED_PRODUCT',
+              )
+            }
+
+            const product = row.productId
+              ? productById.get(row.productId)
+              : null
+
+            return [
+              {
+                catalogSourceItemId: row.id,
+                sourceItemKey: row.sourceItemKey,
+                identifier: row.identifier,
+                normalizedSku:
+                  row.identifier
+                    ? cmsIdentifierToSku(
+                        row.identifier,
+                      )
+                    : null,
+                eanCode: row.eanCode,
+                name: row.name,
+                productId: row.productId,
+                productSku: product?.sku ?? null,
+                matchStatus: row.matchStatus,
+                matchError: row.matchError,
+                matchMethods: methods,
+              },
+            ]
+          })
+        const productCandidates = [
+          ...candidateProducts.values(),
+        ].map((candidate) => ({
+          ...candidate,
+          matchMethods: [
+            ...candidate.matchMethods,
+          ].sort(),
+        }))
+        const hasEanMatch =
+          identifierCandidates.some(
+            (candidate) => candidate.type === 'EAN',
+          ) ||
+          catalogCandidates.some((candidate) =>
+            candidate.matchMethods.includes(
+              'CATALOG_EAN',
+            ),
+          )
+        const cmsMatch =
+          catalogCandidates.length > 0 ||
+          productCandidates.some((candidate) =>
+            currentCmsProductIds.has(
+              candidate.productId,
+            ),
+          )
+        const methods = new Set(
+          productCandidates.flatMap(
+            (candidate) => candidate.matchMethods,
+          ),
+        )
+        let classification: string
+        let recommendedAction: string
+
+        if (productCandidates.length > 1) {
+          classification =
+            'I_AMBIGUOUS_PRODUCT_CANDIDATES'
+          recommendedAction =
+            'Manuális termékazonosítás szükséges; ne módosíts automatikusan.'
+        } else if (productCandidates.length === 1) {
+          if (hasEanMatch) {
+            classification = 'D_PRODUCT_IDENTIFIED_BY_EAN'
+          } else if (methods.has('NORMALIZED_SKU')) {
+            classification =
+              'C_SKU_NORMALIZATION_MISMATCH'
+          } else if (
+            [...methods].some((method) =>
+              method.startsWith(
+                'PRODUCT_IDENTIFIER_',
+              ),
+            )
+          ) {
+            classification =
+              'E_PRODUCT_IDENTIFIER_ALIAS'
+          } else {
+            classification = 'B_HUB_SKU_DIFFERS'
+          }
+          recommendedAction = cmsMatch
+            ? `A Cockpit SKU-t igazítsd a kanonikus Hub/CMS SKU-hoz: ${productCandidates[0]?.sku}.`
+            : 'A Hub-termék létezik, de nincs aktuális CMS-sor; feedhez CMS-forrás szükséges.'
+        } else if (catalogCandidates.length > 0) {
+          classification = 'A_HUB_PRODUCT_MISSING'
+          recommendedAction =
+            'A CMS-sor alapján csak ütközésmentes promotion/linking ellenőrzés után javítható.'
+        } else {
+          classification = 'I_NO_AUTHORITATIVE_MATCH'
+          recommendedAction =
+            'Nincs Hub/CMS/EAN/alias bizonyíték; manuális forrásellenőrzés szükséges.'
+        }
+
+        const group = cmsMatch
+          ? productCandidates.length > 0
+            ? 'GROUP_3_CMS_AND_HUB_MAPPING_BUG'
+            : 'GROUP_1_CMS_EXISTS_HUB_MISSING'
+          : productCandidates.length > 0
+            ? 'GROUP_2_HUB_EXISTS_CMS_MISSING'
+            : 'GROUP_4_NO_HUB_OR_CMS'
+
+        classificationCounts[classification] =
+          (classificationCounts[classification] ?? 0) + 1
+        groupCounts[group] =
+          (groupCounts[group] ?? 0) + 1
+        const catalogNormalizedSkus = [
+          ...new Set(
+            catalogCandidates.flatMap((candidate) => [
+              candidate.productSku,
+              candidate.normalizedSku,
+            ]).filter(
+              (value): value is string =>
+                typeof value === 'string',
+            ),
+          ),
+        ]
+        const supportedNormalizedSku =
+          productCandidates.length === 1
+            ? productCandidates[0]?.sku ?? null
+            : catalogNormalizedSkus.length === 1
+              ? catalogNormalizedSkus[0] ?? null
+              : null
+
+        return {
+          rowIndex: item.rowIndex,
+          sku: item.sku,
+          normalizedSku: supportedNormalizedSku,
+          name:
+            item.name ??
+            productCandidates[0]?.name ??
+            catalogCandidates[0]?.name ??
+            null,
+          ean: item.ean,
+          index: item.index,
+          medianIndex: item.medianIndex,
+          averageIndex: item.averageIndex,
+          priceIndexBps: item.priceIndexBps,
+          medianIndexBps: item.medianIndexBps,
+          averageIndexBps: item.averageIndexBps,
+          marketStatus: item.marketStatus,
+          hubMatch: false,
+          cmsMatch,
+          eanMatch: hasEanMatch,
+          classification,
+          group,
+          rootCause: classification,
+          recommendedAction,
+          productCandidates:
+            productCandidates.map((candidate) => ({
+              sku: candidate.sku,
+              name: candidate.name,
+              active: candidate.active,
+              matchMethods: candidate.matchMethods,
+            })),
+          identifierCandidates:
+            identifierCandidates.map((candidate) => ({
+              productSku: candidate.productSku,
+              productName: candidate.productName,
+              type: candidate.type,
+            })),
+          catalogCandidates:
+            catalogCandidates.map((candidate) => ({
+              normalizedSku:
+                candidate.productSku ??
+                candidate.normalizedSku,
+              name: candidate.name,
+              linkedToHub:
+                candidate.productId !== null,
+              matchStatus: candidate.matchStatus,
+              matchMethods: candidate.matchMethods,
+            })),
+          resolved: false,
+        }
+      },
+    )
+    const allValidItems = [
+      ...normalized.validItems.map((item) => ({
+        marketStatus: item.marketStatus,
+      })),
+      ...normalized.unmatchedItems,
+    ]
+    const statusCounts = {
+      hasCompetitor: allValidItems.filter(
+        (item) =>
+          item.marketStatus === 'HAS_COMPETITOR',
+      ).length,
+      noCompetitor: allValidItems.filter(
+        (item) =>
+          item.marketStatus === 'NO_COMPETITOR',
+      ).length,
+      partialMarketData: allValidItems.filter(
+        (item) =>
+          item.marketStatus ===
+          'PARTIAL_MARKET_DATA',
+        ).length,
+    }
+    for (const row of normalized.invalidRows) {
+      const classification = row.errors.includes(
+        'INVALID_SKU',
+      )
+        ? 'G_INVALID_COCKPIT_SKU'
+        : 'H_PAYLOAD_ROW_REJECTED'
+      classificationCounts[classification] =
+        (classificationCounts[classification] ?? 0) + 1
+    }
+
+    if (normalized.duplicateRows.length > 0) {
+      classificationCounts[
+        'F_DUPLICATE_COCKPIT_SKU'
+      ] = normalized.duplicateRows.length
+    }
+
+    const missingStoredPricingRows =
+      [...normalized.validItems, ...normalized.unmatchedItems]
+        .filter((item) => !storedPricingBySku.has(item.sku))
+        .length
+
+    return context.json({
+      status: 'ok',
+      readOnly: true,
+      summary: {
+        payloadRows: normalized.summary.rows,
+        validRows:
+          normalized.validItems.length +
+          normalized.unmatchedItems.length,
+        duplicateRows:
+          normalized.duplicateRows.length,
+        invalidRows:
+          normalized.invalidRows.length,
+        matchedRows: normalized.summary.matchedRows,
+        unmatchedRows:
+          normalized.summary.unmatchedRows,
+        alreadyStoredPricingRows,
+        missingStoredPricingRows,
+        valueMismatchRows: valueMismatches.length,
+        ...statusCounts,
+      },
+      classificationCounts,
+      groupCounts,
+      unmatched,
+      invalidRows: normalized.invalidRows.map(
+        (row) => ({
+          ...row,
+          classification:
+            row.errors.includes('INVALID_SKU')
+              ? 'G_INVALID_COCKPIT_SKU'
+              : 'H_PAYLOAD_ROW_REJECTED',
+        }),
+      ),
+      duplicateRows: normalized.duplicateRows.map(
+        (row) => ({
+          ...row,
+          classification:
+            'F_DUPLICATE_COCKPIT_SKU',
+        }),
+      ),
+      missingStoredMatched,
+      storedRowsPendingRemoval,
+      valueMismatches,
+    })
+  },
+)
 
 arukeresoApi.post(
   '/pricing/source/setup',
@@ -4226,23 +5021,61 @@ function createFeedFingerprint(value: string) {
 
 function toCatalogFeedOutputRow(
   item: CatalogFeedOutputItem,
+  forceDisabled = false,
 ): CatalogFeedOutputRow {
-  // V3 publishes eligible rows only and preserves the
-  // original CMS DeliveryTime. Historical V2 rows are
-  // reconstructed from their immutable run snapshots.
   return {
     ...item.source,
+    DeliveryTime:
+      forceDisabled || !item.result.included
+        ? 'NO'
+        : item.source.DeliveryTime,
     ProductNumber: item.sku,
   }
 }
 
 function createCatalogFeedCsv(
   items: CatalogFeedOutputItem[],
+  forceDisabled = false,
 ) {
   return serializeCatalogFeedCsv(
-    items
-      .filter((item) => item.result.included)
-      .map(toCatalogFeedOutputRow),
+    items.map((item) =>
+      toCatalogFeedOutputRow(item, forceDisabled),
+    ),
+  )
+}
+
+function assertCatalogFeedOutputUniqueness(
+  items: CatalogFeedOutputItem[],
+) {
+  const identifiers = new Set<string>()
+  const productNumbers = new Set<string>()
+
+  for (const item of items) {
+    if (identifiers.has(item.source.Identifier)) {
+      throw new FeedOutputError(
+        `Duplikált feed Identifier: ${item.source.Identifier}.`,
+        'DUPLICATE_FEED_IDENTIFIER',
+      )
+    }
+
+    if (productNumbers.has(item.sku)) {
+      throw new FeedOutputError(
+        `Duplikált feed ProductNumber: ${item.sku}.`,
+        'DUPLICATE_FEED_PRODUCT_NUMBER',
+      )
+    }
+
+    identifiers.add(item.source.Identifier)
+    productNumbers.add(item.sku)
+  }
+}
+
+function isCatalogFeedItemInV4(
+  item: CatalogFeedOutputItem,
+) {
+  return (
+    item.pricingRow !== null ||
+    item.inclusionMode === 'FORCE_INCLUDE'
   )
 }
 
@@ -4254,6 +5087,7 @@ function toFeedOutputSample(
     sku: item.sku,
     identifier: item.source.Identifier,
     name: item.source.Name,
+    inFeed: isCatalogFeedItemInV4(item),
     included: item.result.included,
     inclusionMode: item.inclusionMode,
     reasonCode: item.result.reasonCode,
@@ -4269,8 +5103,10 @@ function toFeedOutputSample(
     stockQuantity: item.stockQuantity,
     stockStatus: item.stockStatus,
     productNumber: item.sku,
-    outputDeliveryTime: item.result.included
-      ? item.source.DeliveryTime
+    outputDeliveryTime: isCatalogFeedItemInV4(item)
+      ? item.result.included
+        ? item.source.DeliveryTime
+        : 'NO'
       : null,
   }
 }
@@ -4350,6 +5186,8 @@ arukeresoApi.get(
           .toLowerCase() || null
       const included =
         context.req.query('included')
+      const feedState =
+        context.req.query('feedState')
       const priceKitStatus =
         context.req.query('priceKitStatus')
       const stockStatus =
@@ -4382,6 +5220,20 @@ arukeresoApi.get(
           if (
             included === 'false' &&
             item.result.included
+          ) {
+            return false
+          }
+
+          const inFeed =
+            isCatalogFeedItemInV4(item)
+
+          if (
+            (feedState === 'IN_FEED' && !inFeed) ||
+            (feedState === 'ACTIVE' &&
+              (!inFeed || !item.result.included)) ||
+            (feedState === 'DISABLED' &&
+              (!inFeed || item.result.included)) ||
+            (feedState === 'OMITTED' && inFeed)
           ) {
             return false
           }
@@ -5129,21 +5981,16 @@ function evaluateFeedEligibility(input: {
     'FEED_ELIGIBLE_PRICING_RULES'
 
   if (pricingRow === null) {
-    // No row in the current daily PriceKit snapshot
-    // means no current PriceKit data. Index rules do
-    // not apply because there is no usable pricing row.
-    if (!settings.allowMissingPricingData) {
-      return {
-        included: false,
-        decision: 'EXCLUDED',
-        reasonCode:
-          'FEED_BLOCKED_NO_CURRENT_PRICEKIT',
-        reasonDetails,
-      }
+    // V4 feed membership is PriceKit-based. Products
+    // without a current row stay outside the normal
+    // feed unless FORCE_INCLUDE handled them above.
+    return {
+      included: false,
+      decision: 'EXCLUDED',
+      reasonCode:
+        'FEED_BLOCKED_NO_CURRENT_PRICEKIT',
+      reasonDetails,
     }
-
-    successReasonCode =
-      'FEED_ELIGIBLE_NO_CURRENT_PRICEKIT'
   }
 
   if (
@@ -5282,8 +6129,10 @@ function evaluateFeedEligibility(input: {
 
 const FEED_GENERATOR_VERSION_V2 =
   'ARUKERESO_FULL_CMS_CSV_V2'
-const FEED_GENERATOR_VERSION =
+const FEED_GENERATOR_VERSION_V3 =
   'ARUKERESO_FILTERED_CMS_CSV_V3'
+const FEED_GENERATOR_VERSION =
+  'ARUKERESO_PRICEKIT_BASE_CSV_V4'
 const FEED_OUTPUT_FILE_NAME =
   'arukereso-feed.csv'
 const FEED_OUTPUT_SAMPLE_DEFAULT = 20
@@ -5464,9 +6313,9 @@ function resolveFeedGenerationSafety(
 ) {
   const stored =
     readStoredFeedSettings(settingsJson)
-  // Safety applies to active offers, never to the raw
-  // output row count. minIncludedItems is kept as a
-  // backward-compatible fallback and alias.
+  // V4 safety protects the normal output population.
+  // Rule failures only change DeliveryTime and are not
+  // source-snapshot truncation.
   const configured =
     stored['minActiveItems'] ??
     stored['minIncludedItems']
@@ -5485,12 +6334,12 @@ function resolveFeedGenerationSafety(
 }
 
 function assertFeedOutputSafety(
-  activeRows: number,
-  minActiveItems: number,
+  outputRows: number,
+  minOutputRows: number,
 ) {
-  if (activeRows < minActiveItems) {
+  if (outputRows < minOutputRows) {
     throw new FeedOutputError(
-      `A generálás leállt: ${activeRows} aktív ajánlat nem éri el a minimális ${minActiveItems} értéket.`,
+      `A generálás leállt: ${outputRows} feed-sor nem éri el a minimális ${minOutputRows} értéket.`,
       'MIN_INCLUDED_ITEMS_NOT_MET',
     )
   }
@@ -5531,7 +6380,10 @@ async function buildCatalogFeedOutput(
     overrides,
   ] = await Promise.all([
     database
-      .select({ id: dataConnections.id })
+      .select({
+        id: dataConnections.id,
+        updatedAt: dataConnections.updatedAt,
+      })
       .from(dataConnections)
       .where(
         and(
@@ -5547,7 +6399,10 @@ async function buildCatalogFeedOutput(
         ),
       ),
     database
-      .select({ id: dataConnections.id })
+      .select({
+        id: dataConnections.id,
+        updatedAt: dataConnections.updatedAt,
+      })
       .from(dataConnections)
       .where(
         and(
@@ -5559,7 +6414,10 @@ async function buildCatalogFeedOutput(
         ),
       ),
     database
-      .select({ id: dataConnections.id })
+      .select({
+        id: dataConnections.id,
+        updatedAt: dataConnections.updatedAt,
+      })
       .from(dataConnections)
       .where(
         and(
@@ -5577,6 +6435,8 @@ async function buildCatalogFeedOutput(
           feedProductOverrides.productId,
         inclusionMode:
           feedProductOverrides.inclusionMode,
+        updatedAt:
+          feedProductOverrides.updatedAt,
       })
       .from(feedProductOverrides)
       .where(
@@ -5642,6 +6502,8 @@ async function buildCatalogFeedOutput(
           catalogSourceItems.rawDataJson,
         lastImportRunId:
           catalogSourceItems.lastImportRunId,
+        matchStatus:
+          catalogSourceItems.matchStatus,
         sku: products.sku,
       })
       .from(catalogSourceItems)
@@ -5763,7 +6625,11 @@ async function buildCatalogFeedOutput(
   const items: CatalogFeedOutputItem[] = []
 
   for (const row of catalogRows) {
-    if (row.productId === null || row.sku === null) {
+    if (
+      row.matchStatus !== 'MATCHED' ||
+      row.productId === null ||
+      row.sku === null
+    ) {
       continue
     }
 
@@ -5856,12 +6722,14 @@ async function buildCatalogFeedOutput(
     matchedRows: items.length,
     unmatchedRows:
       catalogRows.length - items.length,
-    // Preview evaluates every matched row, while V3
-    // publishes eligible rows only. The legacy aliases
-    // remain for API compatibility.
+    // Preview evaluates every matched CMS row. V4
+    // membership and offer availability are separate.
+    priceKitBaseRows: 0,
+    manuallyAddedRows: 0,
     outputRows: 0,
     activeRows: 0,
     disabledRows: 0,
+    omittedRows: 0,
     includedRows: 0,
     excludedRows: 0,
     forceIncluded: 0,
@@ -5877,13 +6745,31 @@ async function buildCatalogFeedOutput(
   const reasonCounts: Record<string, number> = {}
 
   for (const item of items) {
-    if (item.result.included) {
+    const inFeed = isCatalogFeedItemInV4(item)
+
+    if (item.pricingRow !== null) {
+      summary.priceKitBaseRows += 1
+    }
+
+    if (
+      item.pricingRow === null &&
+      item.inclusionMode === 'FORCE_INCLUDE'
+    ) {
+      summary.manuallyAddedRows += 1
+    }
+
+    if (inFeed) {
       summary.outputRows += 1
-      summary.activeRows += 1
-      summary.includedRows += 1
+
+      if (item.result.included) {
+        summary.activeRows += 1
+        summary.includedRows += 1
+      } else {
+        summary.disabledRows += 1
+        summary.excludedRows += 1
+      }
     } else {
-      summary.disabledRows += 1
-      summary.excludedRows += 1
+      summary.omittedRows += 1
     }
 
     if (item.pricingRow === null) {
@@ -5940,8 +6826,8 @@ async function buildCatalogFeedOutput(
     }
   }
 
-  const publishedItems = items.filter(
-    (item) => item.result.included,
+  const outputItems = items.filter(
+    isCatalogFeedItemInV4,
   )
 
   return {
@@ -5968,13 +6854,403 @@ async function buildCatalogFeedOutput(
         pricingConnectionIds.slice().sort(),
       inventoryConnectionId:
         activeInventoryConnection?.id ?? null,
+      connectionRevisions: [
+        catalogConnection,
+        ...pricingConnections,
+        ...(activeInventoryConnection
+          ? [activeInventoryConnection]
+          : []),
+      ].map((connection) => ({
+        id: connection.id,
+        updatedAt: connection.updatedAt,
+      })),
+      overrideRevisions: overrides.map(
+        (override) => ({
+          productId: override.productId,
+          updatedAt: override.updatedAt,
+        }),
+      ),
       sourceRows: catalogRows.length,
       matchedRows: items.length,
     },
     items,
-    publishedItems,
+    outputItems,
     summary,
     reasonCounts,
+  }
+}
+
+type FeedGenerationTrigger =
+  | 'MANUAL'
+  | 'PRICING_SYNC'
+  | 'CHANNEL_ACTIVATION'
+
+async function generateCatalogFeedRun(input: {
+  database: ReturnType<typeof requireDatabase>
+  channel: FeedOutputContext['channel']
+  triggerType: FeedGenerationTrigger
+  activateChannel?: boolean
+}) {
+  const { database, channel } = input
+  const resolvedSettings =
+    resolveFeedEligibilitySettings(
+      channel.settingsJson,
+    )
+  const safety = resolveFeedGenerationSafety(
+    channel.settingsJson,
+  )
+  const channelSnapshot = {
+    id: channel.id,
+    code: channel.code,
+    targetCountry: channel.targetCountry,
+    contentLanguage: channel.contentLanguage,
+    currency: channel.currency,
+    format: channel.format,
+  }
+  const [run] = await database
+    .insert(feedRuns)
+    .values({
+      channelId: channel.id,
+      triggerType: input.triggerType,
+      status: 'RUNNING',
+      generatorVersion: FEED_GENERATOR_VERSION,
+      ruleVersion: String(
+        resolvedSettings.settings.ruleVersion,
+      ),
+      channelSnapshotJson:
+        JSON.stringify(channelSnapshot),
+      sourceSnapshotJson: JSON.stringify({
+        status: 'RESOLVING',
+      }),
+      ruleSnapshotJson: JSON.stringify({
+        feedModel: FEED_GENERATOR_VERSION,
+        settings: resolvedSettings.settings,
+        appliedDefaults:
+          resolvedSettings.appliedDefaults,
+        safety,
+      }),
+      startedAt: new Date(),
+    })
+    .returning({ id: feedRuns.id })
+
+  if (!run) {
+    throw new FeedOutputError(
+      'A feed generálási futás nem hozható létre.',
+      'FEED_RUN_CREATE_FAILED',
+    )
+  }
+
+  let output: Awaited<
+    ReturnType<typeof buildCatalogFeedOutput>
+  > | null = null
+
+  try {
+    output = await buildCatalogFeedOutput({
+      database,
+      channel,
+    })
+
+    assertFeedOutputSafety(
+      output.summary.outputRows,
+      output.safety.minIncludedItems,
+    )
+    assertCatalogFeedOutputUniqueness(
+      output.outputItems,
+    )
+
+    const csv = createCatalogFeedCsv(
+      output.outputItems,
+    )
+    const artifactFingerprint =
+      createFeedFingerprint(csv)
+    const inputFingerprint =
+      createFeedFingerprint(
+        JSON.stringify(
+          output.items.map((item) => ({
+            catalogSourceItemId:
+              item.catalogSourceItemId,
+            sourceFingerprint:
+              item.sourceFingerprint,
+            productId: item.productId,
+            pricingRow: item.pricingRow,
+            stockQuantity: item.stockQuantity,
+            inclusionMode: item.inclusionMode,
+            inFeed:
+              isCatalogFeedItemInV4(item),
+            decision: item.result.decision,
+            reasonCode: item.result.reasonCode,
+          })),
+        ),
+      )
+    const insertItemQueries = []
+
+    for (
+      let offset = 0;
+      offset < output.outputItems.length;
+      offset += 200
+    ) {
+      const chunk = output.outputItems
+        .slice(offset, offset + 200)
+        .map((item, chunkIndex) => {
+          const resolvedItem = {
+            catalogSourceItemId:
+              item.catalogSourceItemId,
+            output: toCatalogFeedOutputRow(item),
+          }
+
+          return {
+            runId: run.id,
+            productId: item.productId,
+            itemIndex: offset + chunkIndex,
+            externalItemId:
+              `catalog:${item.catalogSourceItemId}`,
+            sku: item.sku,
+            identifier: item.identifier,
+            eanCode: item.eanCode,
+            name: item.name,
+            decision: item.result.decision,
+            reasonCodesJson: JSON.stringify([
+              item.result.reasonCode,
+            ]),
+            stock: item.stockQuantity,
+            priceMinor: item.priceMinor,
+            netPriceMinor: item.netPriceMinor,
+            deliveryCostMinor:
+              item.deliveryCostMinor,
+            deliveryTimeDays:
+              item.deliveryTimeDays,
+            currency: channel.currency,
+            manualOverrideApplied:
+              item.inclusionMode !== 'INHERIT',
+            inputSnapshotJson: JSON.stringify({
+              catalogSourceItemId:
+                item.catalogSourceItemId,
+              sourceFingerprint:
+                item.sourceFingerprint,
+              pricingRow: item.pricingRow,
+              stockQuantity: item.stockQuantity,
+            }),
+            overrideSnapshotJson:
+              item.inclusionMode === 'INHERIT'
+                ? null
+                : JSON.stringify({
+                    inclusionMode:
+                      item.inclusionMode,
+                  }),
+            decisionDetailsJson:
+              JSON.stringify(
+                item.result.reasonDetails,
+              ),
+            resolvedItemJson:
+              JSON.stringify(resolvedItem),
+            payloadFingerprint:
+              createFeedFingerprint(
+                JSON.stringify(resolvedItem),
+              ),
+          }
+        })
+
+      insertItemQueries.push(
+        database
+          .insert(feedRunItems)
+          .values(chunk),
+      )
+    }
+
+    const completeRun = database
+      .update(feedRuns)
+      .set({
+        status: 'COMPLETED',
+        itemsEvaluated:
+          output.summary.matchedRows,
+        itemsIncluded:
+          output.summary.activeRows,
+        itemsExcluded:
+          output.summary.disabledRows,
+        inputFingerprint,
+        outputFingerprint: artifactFingerprint,
+        sourceSnapshotJson: JSON.stringify({
+          ...output.sourceSnapshot,
+          priceKitBaseRows:
+            output.summary.priceKitBaseRows,
+          manuallyAddedRows:
+            output.summary.manuallyAddedRows,
+          outputRows: output.summary.outputRows,
+          omittedRows: output.summary.omittedRows,
+        }),
+        ruleSnapshotJson: JSON.stringify({
+          feedModel: FEED_GENERATOR_VERSION,
+          settings: output.settings,
+          appliedDefaults:
+            output.appliedDefaults,
+          safety: output.safety,
+        }),
+        artifactFileName: FEED_OUTPUT_FILE_NAME,
+        artifactContentType:
+          'text/csv; charset=utf-8',
+        artifactFingerprint,
+        finishedAt: new Date(),
+      })
+      .where(eq(feedRuns.id, run.id))
+    const channelUpdateConditions = [
+      eq(feedChannels.id, channel.id),
+    ]
+
+    if (input.activateChannel) {
+      channelUpdateConditions.push(
+        eq(feedChannels.isActive, false),
+        eq(
+          feedChannels.updatedAt,
+          channel.updatedAt,
+        ),
+        sql<boolean>`(
+          select count(*)
+          from ${dataConnections}
+          where ${dataConnections.sourceType} = 'CSV_UPLOAD'
+            and ${dataConnections.purpose} = 'CATALOG'
+            and ${dataConnections.isActive} = true
+        ) = 1`,
+        sql<boolean>`(
+          select count(*)
+          from ${dataConnections}
+          where ${dataConnections.purpose} = 'PRICING'
+            and ${dataConnections.isActive} = true
+        ) = ${output.sourceSnapshot.pricingConnectionIds.length}`,
+        sql<boolean>`(
+          select count(*)
+          from ${dataConnections}
+          where ${dataConnections.purpose} = 'INVENTORY'
+            and ${dataConnections.isActive} = true
+        ) = ${
+          output.sourceSnapshot.inventoryConnectionId
+            ? 1
+            : 0
+        }`,
+        sql<boolean>`(
+          select count(*)
+          from ${feedProductOverrides}
+          where ${feedProductOverrides.channelId} = ${channel.id}
+        ) = ${output.sourceSnapshot.overrideRevisions.length}`,
+      )
+
+      for (const revision of output.sourceSnapshot
+        .connectionRevisions) {
+        channelUpdateConditions.push(
+          sql<boolean>`exists (
+            select 1
+            from ${dataConnections}
+            where ${dataConnections.id} = ${revision.id}
+              and ${dataConnections.updatedAt} = ${revision.updatedAt}
+          )`,
+        )
+      }
+
+      for (const revision of output.sourceSnapshot
+        .overrideRevisions) {
+        channelUpdateConditions.push(
+          sql<boolean>`exists (
+            select 1
+            from ${feedProductOverrides}
+            where ${feedProductOverrides.channelId} = ${channel.id}
+              and ${feedProductOverrides.productId} = ${revision.productId}
+              and ${feedProductOverrides.updatedAt} = ${revision.updatedAt}
+          )`,
+        )
+      }
+    }
+
+    const markChannelSuccessful = database
+      .update(feedChannels)
+      .set({
+        lastSuccessfulAt: new Date(),
+        lastError: null,
+        ...(input.activateChannel
+          ? {
+              isActive: true,
+              settingsJson: channel.settingsJson,
+            }
+          : {}),
+        updatedAt: new Date(),
+      })
+      .where(and(...channelUpdateConditions))
+      .returning({ id: feedChannels.id })
+    const batchQueries = [
+      ...insertItemQueries,
+      completeRun,
+      markChannelSuccessful,
+    ]
+
+    const batchResults = await database.batch(
+      batchQueries as [
+        (typeof batchQueries)[number],
+        ...(typeof batchQueries)[number][],
+      ],
+    )
+
+    if (input.activateChannel) {
+      const channelUpdateResult = batchResults[
+        batchResults.length - 1
+      ] as Array<{ id: string }>
+
+      if (channelUpdateResult.length === 0) {
+        throw new FeedOutputError(
+          'Az aktiválás közben a forrás vagy a beállítás megváltozott. A csatorna kikapcsolva maradt; próbáld újra.',
+          'CHANNEL_ACTIVATION_SOURCE_CHANGED',
+        )
+      }
+    }
+
+    return {
+      runId: run.id,
+      summary: output.summary,
+      reasonCounts: output.reasonCounts,
+      artifact: {
+        fileName: FEED_OUTPUT_FILE_NAME,
+        contentType: 'text/csv; charset=utf-8',
+        fingerprint: artifactFingerprint,
+        downloadPath:
+          `/arukereso/feed/runs/${run.id}/csv`,
+      },
+    }
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : 'Feed generation failed.'
+
+    await database
+      .update(feedRuns)
+      .set({
+        status: 'FAILED',
+        itemsEvaluated:
+          output?.summary.matchedRows ?? 0,
+        itemsIncluded:
+          output?.summary.activeRows ?? 0,
+        itemsExcluded:
+          output?.summary.disabledRows ?? 0,
+        sourceSnapshotJson: JSON.stringify(
+          output?.sourceSnapshot ?? {
+            status: 'LOAD_FAILED',
+          },
+        ),
+        error:
+          error instanceof FeedOutputError
+            ? `[${error.code}] ${message}`
+            : message,
+        finishedAt: new Date(),
+      })
+      .where(eq(feedRuns.id, run.id))
+
+    console.error('Feed generation failed:', error)
+    const generationError =
+      error instanceof Error
+        ? error
+        : new Error(message)
+
+    Object.assign(generationError, {
+      feedRunId: run.id,
+    })
+    throw generationError
   }
 }
 
@@ -5993,9 +7269,7 @@ arukeresoApi.post(
       body === null ||
       typeof body !== 'object' ||
       Array.isArray(body) ||
-      (body as Record<string, unknown>)[
-        'confirm'
-      ] !== true
+      (body as Record<string, unknown>)['confirm'] !== true
     ) {
       return context.json(
         {
@@ -6031,25 +7305,6 @@ arukeresoApi.post(
       })
     }
 
-    const resolvedSettings =
-      resolveFeedEligibilitySettings(
-        channel.settingsJson,
-      )
-    const safety = resolveFeedGenerationSafety(
-      channel.settingsJson,
-    )
-    const channelSnapshot = {
-      id: channel.id,
-      code: channel.code,
-      targetCountry: channel.targetCountry,
-      contentLanguage:
-        channel.contentLanguage,
-      currency: channel.currency,
-      format: channel.format,
-    }
-    // Internal callers (e.g. automatic generation
-    // after pricing sync) may label the run; external
-    // callers always get 'MANUAL'.
     const requestedTriggerType = (
       body as Record<string, unknown>
     )['triggerType']
@@ -6057,271 +7312,42 @@ arukeresoApi.post(
       requestedTriggerType === 'PRICING_SYNC'
         ? 'PRICING_SYNC'
         : 'MANUAL'
-    const [run] = await database
-      .insert(feedRuns)
-      .values({
-        channelId: channel.id,
-        triggerType,
-        status: 'RUNNING',
-        generatorVersion:
-          FEED_GENERATOR_VERSION,
-        ruleVersion: String(
-          resolvedSettings.settings.ruleVersion,
-        ),
-        channelSnapshotJson:
-          JSON.stringify(channelSnapshot),
-        sourceSnapshotJson: JSON.stringify({
-          status: 'RESOLVING',
-        }),
-        ruleSnapshotJson: JSON.stringify({
-          settings: resolvedSettings.settings,
-          appliedDefaults:
-            resolvedSettings.appliedDefaults,
-          safety,
-        }),
-        startedAt: new Date(),
-      })
-      .returning({ id: feedRuns.id })
-
-    if (!run) {
-      return context.json(
-        {
-          status: 'error',
-          message:
-            'A feed generálási futás nem hozható létre.',
-        },
-        500,
-      )
-    }
-
-    let output: Awaited<
-      ReturnType<typeof buildCatalogFeedOutput>
-    > | null = null
 
     try {
-      output = await buildCatalogFeedOutput({
-        database,
-        channel,
-      })
-
-      assertFeedOutputSafety(
-        output.summary.outputRows,
-        output.safety.minActiveItems,
-      )
-
-      const csv = createCatalogFeedCsv(
-        output.publishedItems,
-      )
-      const artifactFingerprint =
-        createFeedFingerprint(csv)
-      const inputFingerprint =
-        createFeedFingerprint(
-          JSON.stringify(
-            output.items.map((item) => ({
-              catalogSourceItemId:
-                item.catalogSourceItemId,
-              sourceFingerprint:
-                item.sourceFingerprint,
-              productId: item.productId,
-              pricingRow: item.pricingRow,
-              stockQuantity: item.stockQuantity,
-              inclusionMode:
-                item.inclusionMode,
-              decision: item.result.decision,
-              reasonCode:
-                item.result.reasonCode,
-            })),
-          ),
-        )
-      const insertItemQueries = []
-
-      for (
-        let offset = 0;
-        offset < output.publishedItems.length;
-        offset += 200
-      ) {
-        const chunk = output.publishedItems
-          .slice(offset, offset + 200)
-          .map((item, chunkIndex) => {
-            const resolvedItem = {
-              catalogSourceItemId:
-                item.catalogSourceItemId,
-              source: item.source,
-              outputDeliveryTime:
-                item.source.DeliveryTime,
-              productNumber: item.sku,
-            }
-
-            return {
-              runId: run.id,
-              productId: item.productId,
-              itemIndex: offset + chunkIndex,
-              externalItemId:
-                `catalog:${item.catalogSourceItemId}`,
-              sku: item.sku,
-              identifier: item.identifier,
-              eanCode: item.eanCode,
-              name: item.name,
-              decision: item.result.decision,
-              reasonCodesJson: JSON.stringify([
-                item.result.reasonCode,
-              ]),
-              stock: item.stockQuantity,
-              priceMinor: item.priceMinor,
-              netPriceMinor:
-                item.netPriceMinor,
-              deliveryCostMinor:
-                item.deliveryCostMinor,
-              deliveryTimeDays:
-                item.deliveryTimeDays,
-              currency: channel.currency,
-              manualOverrideApplied:
-                item.inclusionMode !== 'INHERIT',
-              inputSnapshotJson: JSON.stringify({
-                catalogSourceItemId:
-                  item.catalogSourceItemId,
-                sourceFingerprint:
-                  item.sourceFingerprint,
-                pricingRow: item.pricingRow,
-                stockQuantity:
-                  item.stockQuantity,
-              }),
-              overrideSnapshotJson:
-                item.inclusionMode === 'INHERIT'
-                  ? null
-                  : JSON.stringify({
-                      inclusionMode:
-                        item.inclusionMode,
-                    }),
-              decisionDetailsJson:
-                JSON.stringify(
-                  item.result.reasonDetails,
-                ),
-              resolvedItemJson:
-                JSON.stringify(resolvedItem),
-              payloadFingerprint:
-                createFeedFingerprint(
-                  JSON.stringify(resolvedItem),
-                ),
-            }
-          })
-
-        insertItemQueries.push(
-          database
-            .insert(feedRunItems)
-            .values(chunk),
-        )
-      }
-
-      const completeRun = database
-        .update(feedRuns)
-        .set({
-          status: 'COMPLETED',
-          itemsEvaluated:
-            output.summary.matchedRows,
-          itemsIncluded:
-            output.summary.includedRows,
-          itemsExcluded:
-            output.summary.excludedRows,
-          inputFingerprint,
-          outputFingerprint:
-            artifactFingerprint,
-          sourceSnapshotJson: JSON.stringify(
-            output.sourceSnapshot,
-          ),
-          ruleSnapshotJson: JSON.stringify({
-            settings: output.settings,
-            appliedDefaults:
-              output.appliedDefaults,
-            safety: output.safety,
-          }),
-          artifactFileName:
-            FEED_OUTPUT_FILE_NAME,
-          artifactContentType:
-            'text/csv; charset=utf-8',
-          artifactFingerprint,
-          finishedAt: new Date(),
+      const generated =
+        await generateCatalogFeedRun({
+          database,
+          channel,
+          triggerType,
         })
-        .where(eq(feedRuns.id, run.id))
-      const markChannelSuccessful = database
-        .update(feedChannels)
-        .set({
-          lastSuccessfulAt: new Date(),
-          lastError: null,
-          updatedAt: new Date(),
-        })
-        .where(eq(feedChannels.id, channel.id))
-      const batchQueries = [
-        ...insertItemQueries,
-        completeRun,
-        markChannelSuccessful,
-      ]
-
-      await database.batch(
-        batchQueries as [
-          (typeof batchQueries)[number],
-          ...(typeof batchQueries)[number][],
-        ],
-      )
 
       return context.json({
         status: 'ok',
         channel: FEED_CHANNEL_CODE,
-        runId: run.id,
-        summary: output.summary,
-        reasonCounts: output.reasonCounts,
-        artifact: {
-          fileName: FEED_OUTPUT_FILE_NAME,
-          contentType:
-            'text/csv; charset=utf-8',
-          fingerprint: artifactFingerprint,
-          downloadPath:
-            `/arukereso/feed/runs/${run.id}/csv`,
-        },
+        ...generated,
       })
     } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : 'Feed generation failed.'
-
-      await database
-        .update(feedRuns)
-        .set({
-          status: 'FAILED',
-          itemsEvaluated:
-            output?.summary.matchedRows ?? 0,
-          itemsIncluded:
-            output?.summary.includedRows ?? 0,
-          itemsExcluded:
-            output?.summary.excludedRows ?? 0,
-          sourceSnapshotJson: JSON.stringify(
-            output?.sourceSnapshot ?? {
-              status: 'LOAD_FAILED',
-            },
-          ),
-          error:
-            error instanceof FeedOutputError
-              ? `[${error.code}] ${message}`
-              : message,
-          finishedAt: new Date(),
-        })
-        .where(eq(feedRuns.id, run.id))
-
-      console.error(
-        'Feed generation failed:',
-        error,
-      )
+      const feedRunId =
+        error instanceof Error &&
+        'feedRunId' in error &&
+        typeof error.feedRunId === 'string'
+          ? error.feedRunId
+          : null
 
       return context.json(
         {
           status: 'error',
-          runId: run.id,
+          ...(feedRunId
+            ? { runId: feedRunId }
+            : {}),
           code:
             error instanceof FeedOutputError
               ? error.code
               : 'FEED_GENERATION_FAILED',
-          message,
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Feed generation failed.',
         },
         error instanceof FeedOutputError
           ? 422
@@ -6348,6 +7374,7 @@ async function buildFeedRunCsv(runId: string) {
       status: feedRuns.status,
       itemsEvaluated: feedRuns.itemsEvaluated,
       itemsIncluded: feedRuns.itemsIncluded,
+      itemsExcluded: feedRuns.itemsExcluded,
       artifactFileName:
         feedRuns.artifactFileName,
       artifactFingerprint:
@@ -6381,6 +7408,8 @@ async function buildFeedRunCsv(runId: string) {
   if (
     run.generatorVersion !==
       FEED_GENERATOR_VERSION_V2 &&
+    run.generatorVersion !==
+      FEED_GENERATOR_VERSION_V3 &&
     run.generatorVersion !== FEED_GENERATOR_VERSION
   ) {
     throw new FeedOutputError(
@@ -6403,7 +7432,10 @@ async function buildFeedRunCsv(runId: string) {
     run.generatorVersion ===
     FEED_GENERATOR_VERSION_V2
       ? run.itemsEvaluated
-      : run.itemsIncluded
+      : run.generatorVersion ===
+          FEED_GENERATOR_VERSION_V3
+        ? run.itemsIncluded
+        : run.itemsIncluded + run.itemsExcluded
 
   if (runItems.length !== expectedRunItemCount) {
     throw new FeedOutputError(
@@ -6413,7 +7445,8 @@ async function buildFeedRunCsv(runId: string) {
   }
 
   if (
-    run.generatorVersion === FEED_GENERATOR_VERSION &&
+    run.generatorVersion ===
+      FEED_GENERATOR_VERSION_V3 &&
     runItems.some(
       (item) => item.decision !== 'INCLUDED',
     )
@@ -6439,9 +7472,24 @@ async function buildFeedRunCsv(runId: string) {
     if (
       resolved === null ||
       typeof resolved !== 'object' ||
-      Array.isArray(resolved) ||
-      !('source' in resolved)
+      Array.isArray(resolved)
     ) {
+      throw new FeedOutputError(
+        `A feed futás ${index + 1}. elemének tartalma sérült.`,
+        'INVALID_RESOLVED_FEED_ITEM',
+      )
+    }
+
+    if (run.generatorVersion === FEED_GENERATOR_VERSION) {
+      const entry = resolved as { output?: unknown }
+
+      return parseCatalogFeedOutputRow(
+        entry.output,
+        `${run.id}:${index}`,
+      )
+    }
+
+    if (!('source' in resolved)) {
       throw new FeedOutputError(
         `A feed futás ${index + 1}. elemének tartalma sérült.`,
         'INVALID_RESOLVED_FEED_ITEM',
@@ -6582,39 +7630,15 @@ arukeresoApi.get(
         )
       }
 
-      const [latestRun] = await database
-        .select({
-          runId: feedRuns.id,
-          status: feedRuns.status,
-          includedRows:
-            feedRuns.itemsIncluded,
-          excludedRows:
-            feedRuns.itemsExcluded,
-          outputRows: feedRuns.itemsIncluded,
-          finishedAt: feedRuns.finishedAt,
-          artifactFingerprint:
-            feedRuns.artifactFingerprint,
-        })
-        .from(feedRuns)
-        .where(
-          and(
-            eq(
-              feedRuns.channelId,
-              channel.id,
-            ),
-            eq(feedRuns.status, 'COMPLETED'),
-            eq(
-              feedRuns.generatorVersion,
-              FEED_GENERATOR_VERSION,
-            ),
-          ),
+      const latestRun =
+        await findLatestCompletedNormalFeedRun(
+          database,
+          channel.id,
         )
-        .orderBy(desc(feedRuns.startedAt))
-        .limit(1)
 
       return context.json({
         status: 'ok',
-        latestRun: latestRun ?? null,
+        latestRun,
       })
     } catch (error) {
       return context.json(
@@ -6631,11 +7655,83 @@ arukeresoApi.get(
   },
 )
 
+async function findLatestCompletedNormalFeedRun(
+  database: ReturnType<typeof requireDatabase>,
+  channelId: string,
+) {
+  const findVersion = async (generatorVersion: string) => {
+    const [run] = await database
+      .select({
+        runId: feedRuns.id,
+        status: feedRuns.status,
+        includedRows: feedRuns.itemsIncluded,
+        excludedRows: feedRuns.itemsExcluded,
+        finishedAt: feedRuns.finishedAt,
+        artifactFingerprint:
+          feedRuns.artifactFingerprint,
+        generatorVersion:
+          feedRuns.generatorVersion,
+      })
+      .from(feedRuns)
+      .where(
+        and(
+          eq(feedRuns.channelId, channelId),
+          eq(feedRuns.status, 'COMPLETED'),
+          eq(
+            feedRuns.generatorVersion,
+            generatorVersion,
+          ),
+        ),
+      )
+      .orderBy(desc(feedRuns.startedAt))
+      .limit(1)
+
+    return run ?? null
+  }
+
+  const v4 = await findVersion(
+    FEED_GENERATOR_VERSION,
+  )
+
+  if (v4) {
+    return {
+      ...v4,
+      outputRows:
+        v4.includedRows + v4.excludedRows,
+    }
+  }
+
+  const v3 = await findVersion(
+    FEED_GENERATOR_VERSION_V3,
+  )
+
+  return v3
+    ? {
+        ...v3,
+        outputRows: v3.includedRows,
+      }
+    : null
+}
+
 async function findLatestCompletedFeedRunId(
   database: ReturnType<typeof requireDatabase>,
   channelId: string,
 ): Promise<string | null> {
-  const [latestRun] = await database
+  const latestRun =
+    await findLatestCompletedNormalFeedRun(
+      database,
+      channelId,
+    )
+
+  return latestRun?.runId ?? null
+}
+
+async function findLatestCompletedFeedRunIdByVersion(
+  database: ReturnType<typeof requireDatabase>,
+  channelId: string,
+  generatorVersion: string,
+) {
+  const [run] = await database
     .select({ id: feedRuns.id })
     .from(feedRuns)
     .where(
@@ -6644,14 +7740,155 @@ async function findLatestCompletedFeedRunId(
         eq(feedRuns.status, 'COMPLETED'),
         eq(
           feedRuns.generatorVersion,
-          FEED_GENERATOR_VERSION,
+          generatorVersion,
         ),
       ),
     )
     .orderBy(desc(feedRuns.startedAt))
     .limit(1)
 
-  return latestRun?.id ?? null
+  return run?.id ?? null
+}
+
+function parseDisabledCatalogFeedRows(csv: string) {
+  const parsed = parseSemicolonCsv(csv)
+  const headers = parsed[0]
+
+  if (
+    !headers ||
+    headers.length !== FEED_OUTPUT_HEADERS.length ||
+    headers.some(
+      (header, index) =>
+        header !== FEED_OUTPUT_HEADERS[index],
+    )
+  ) {
+    throw new FeedOutputError(
+      'A leállító feed tartalék forrásának sémája nem kompatibilis.',
+      'SHUTDOWN_FALLBACK_SCHEMA_MISMATCH',
+    )
+  }
+
+  const rows = parsed.slice(1).map((values, rowIndex) => {
+    if (values.length !== FEED_OUTPUT_HEADERS.length) {
+      throw new FeedOutputError(
+        `A leállító feed tartalék forrásának ${rowIndex + 1}. sora sérült.`,
+        'SHUTDOWN_FALLBACK_ROW_INVALID',
+      )
+    }
+
+    const row = {} as CatalogFeedOutputRow
+
+    for (
+      let index = 0;
+      index < FEED_OUTPUT_HEADERS.length;
+      index += 1
+    ) {
+      const header = FEED_OUTPUT_HEADERS[index]
+      const value = values[index]
+
+      if (!header || value === undefined) {
+        throw new FeedOutputError(
+          `A leállító feed tartalék forrásának ${rowIndex + 1}. sora sérült.`,
+          'SHUTDOWN_FALLBACK_ROW_INVALID',
+        )
+      }
+
+      row[header] = value
+    }
+
+    row.DeliveryTime = 'NO'
+    return row
+  })
+
+  return rows
+}
+
+async function buildShutdownFeedCsv(input: {
+  database: ReturnType<typeof requireDatabase>
+  channel: FeedOutputContext['channel']
+}) {
+  const currentRows: CatalogFeedOutputRow[] = []
+  let sourceError: unknown = null
+
+  try {
+    const output = await buildCatalogFeedOutput(input)
+    assertCatalogFeedOutputUniqueness(output.items)
+    currentRows.push(
+      ...output.items.map((item) =>
+        toCatalogFeedOutputRow(item, true),
+      ),
+    )
+  } catch (currentSourceError) {
+    sourceError = currentSourceError
+    console.error(
+      'Current CMS shutdown projection failed; using immutable run fallback:',
+      currentSourceError,
+    )
+  }
+
+  // Include the last normal populations even when CMS
+  // succeeds: an offer removed from CMS still needs NO.
+  {
+    const fallbackRunIds = await Promise.all(
+      [
+        FEED_GENERATOR_VERSION,
+        FEED_GENERATOR_VERSION_V3,
+        FEED_GENERATOR_VERSION_V2,
+      ].map((version) =>
+        findLatestCompletedFeedRunIdByVersion(
+          input.database,
+          input.channel.id,
+          version,
+        ),
+      ),
+    )
+    const rows = currentRows
+    const identifiers = new Set(rows.map((row) => row.Identifier))
+    const productNumbers = new Set(rows.map((row) => row.ProductNumber))
+
+    for (const runId of fallbackRunIds) {
+      if (!runId) continue
+
+      try {
+        const fallback = await buildFeedRunCsv(runId)
+
+        for (const row of parseDisabledCatalogFeedRows(
+          fallback.csv,
+        )) {
+          if (
+            identifiers.has(row.Identifier) ||
+            productNumbers.has(row.ProductNumber)
+          ) {
+            continue
+          }
+
+          identifiers.add(row.Identifier)
+          productNumbers.add(row.ProductNumber)
+          rows.push(row)
+        }
+      } catch (error) {
+        console.error(
+          `Shutdown fallback run failed: ${runId}.`,
+          error,
+        )
+      }
+    }
+
+    if (rows.length === 0) {
+      throw sourceError ?? new FeedOutputError(
+        'Nincs elérhető leállító feed-forrás.',
+        'SHUTDOWN_SOURCE_UNAVAILABLE',
+      )
+    }
+
+    rows.sort((left, right) =>
+      left.Identifier.localeCompare(
+        right.Identifier,
+      ),
+    )
+
+    return serializeCatalogFeedCsv(rows)
+  }
 }
 
 function isPublicFeedTokenValid(
@@ -6748,8 +7985,25 @@ arukeresoApi.get(
       const { database, channel } =
         await resolveFeedChannel()
 
-      if (!channel || !channel.isActive) {
+      if (!channel) {
         return notFound()
+      }
+
+      if (!channel.isActive) {
+        const csv = await buildShutdownFeedCsv({
+          database,
+          channel,
+        })
+
+        return new Response(csv, {
+          headers: {
+            'Content-Type':
+              'text/csv; charset=utf-8',
+            'Content-Disposition':
+              `inline; filename="${FEED_OUTPUT_FILE_NAME}"`,
+            'Cache-Control': 'no-store',
+          },
+        })
       }
 
       const latestRunId =
@@ -6823,6 +8077,8 @@ arukeresoApi.get(
 
       const includedFilter =
         context.req.query('included')
+      const feedStateFilter =
+        context.req.query('feedState')
 
       const reasonCodeFilter =
         context.req.query('reasonCode')
@@ -7111,6 +8367,12 @@ arukeresoApi.get(
         products: 0,
         included: 0,
         excluded: 0,
+        feedRows: 0,
+        activeOffers: 0,
+        disabledOffers: 0,
+        omittedFromFeed: 0,
+        priceKitFeedBase: 0,
+        manuallyAdded: 0,
         ruleBased: 0,
         forceIncluded: 0,
         forceExcluded: 0,
@@ -7172,11 +8434,38 @@ arukeresoApi.get(
                 : 'OUT_OF_STOCK'
           const inCurrentCmsCatalog =
             currentCmsProductIds.has(product.id)
+          const inFeed =
+            inCurrentCmsCatalog &&
+            (pricingRow !== null ||
+              inclusionMode === 'FORCE_INCLUDE')
 
           summary.products += 1
 
           if (inCurrentCmsCatalog) {
             summary.currentCmsProducts += 1
+
+            if (pricingRow !== null) {
+              summary.priceKitFeedBase += 1
+            }
+
+            if (
+              pricingRow === null &&
+              inclusionMode === 'FORCE_INCLUDE'
+            ) {
+              summary.manuallyAdded += 1
+            }
+
+            if (inFeed) {
+              summary.feedRows += 1
+
+              if (result.included) {
+                summary.activeOffers += 1
+              } else {
+                summary.disabledOffers += 1
+              }
+            } else {
+              summary.omittedFromFeed += 1
+            }
           } else {
             summary.outsideCurrentCms += 1
           }
@@ -7276,6 +8565,9 @@ arukeresoApi.get(
             sku: product.sku,
             name: product.name,
             inCurrentCmsCatalog,
+            inFeed,
+            activeInFeed:
+              inFeed && result.included,
             included: result.included,
             inclusionMode,
             hasPriceKitData:
@@ -7349,6 +8641,21 @@ arukeresoApi.get(
           if (
             includedFilter === 'false' &&
             item.included
+          ) {
+            return false
+          }
+
+          if (
+            (feedStateFilter === 'IN_FEED' &&
+              !item.inFeed) ||
+            (feedStateFilter === 'ACTIVE' &&
+              (!item.inFeed ||
+                !item.activeInFeed)) ||
+            (feedStateFilter === 'DISABLED' &&
+              (!item.inFeed ||
+                item.activeInFeed)) ||
+            (feedStateFilter === 'OMITTED' &&
+              item.inFeed)
           ) {
             return false
           }
@@ -7756,7 +9063,6 @@ arukeresoApi.patch(
         'maxAverageIndexBps',
         'useStockRule',
         'allowNoCompetitor',
-        'allowMissingPricingData',
       ] as Array<
         keyof FeedEligibilitySettings
       >
@@ -7766,10 +9072,14 @@ arukeresoApi.patch(
           (key) => next[key] !== current[key],
         )
 
-      // Legacy keys are accepted and preserved, but
-      // never affect the rule version on their own.
+      // Legacy keys are accepted and preserved for API
+      // compatibility, but V4 ignores them and they do
+      // not affect the rule version.
       const inactiveChanged = (
-        ['maxPricingAgeHours'] as const
+        [
+          'allowMissingPricingData',
+          'maxPricingAgeHours',
+        ] as const
       ).some(
         (key) =>
           updates[key] !== undefined &&
@@ -7816,14 +9126,51 @@ arukeresoApi.patch(
             : current.ruleVersion + 1
       }
 
+      const settingsChanged =
+        materialChanged || inactiveChanged
+      const nextSettingsJson = settingsChanged
+        ? JSON.stringify(next)
+        : channel.settingsJson
+
+      if (
+        activationChanged &&
+        isActive === true &&
+        !channel.isActive
+      ) {
+        const generated =
+          await generateCatalogFeedRun({
+            database,
+            channel: {
+              ...channel,
+              settingsJson: nextSettingsJson,
+            },
+            triggerType: 'CHANNEL_ACTIVATION',
+            activateChannel: true,
+          })
+        const resolved =
+          resolveFeedEligibilitySettings(
+            nextSettingsJson,
+          )
+
+        return context.json({
+          status: 'ok',
+          channel: FEED_CHANNEL_CODE,
+          isActive: true,
+          settings: resolved.settings,
+          appliedDefaults:
+            resolved.appliedDefaults,
+          updated: true,
+          activationRunId: generated.runId,
+          artifact: generated.artifact,
+        })
+      }
+
       await database
         .update(feedChannels)
         .set({
-          ...(materialChanged || inactiveChanged
+          ...(settingsChanged
             ? {
-                settingsJson: JSON.stringify(
-                  next,
-                ),
+                settingsJson: nextSettingsJson,
               }
             : {}),
           ...(activationChanged
@@ -7837,7 +9184,7 @@ arukeresoApi.patch(
 
       const resolved =
         resolveFeedEligibilitySettings(
-          JSON.stringify(next),
+          nextSettingsJson,
         )
 
       return context.json({
@@ -7859,12 +9206,18 @@ arukeresoApi.patch(
       return context.json(
         {
           status: 'error',
+          code:
+            error instanceof FeedOutputError
+              ? error.code
+              : 'FEED_SETTINGS_UPDATE_FAILED',
           message:
             error instanceof Error
               ? error.message
               : 'Feed settings failed.',
         },
-        500,
+        error instanceof FeedOutputError
+          ? 422
+          : 500,
       )
     }
   },
@@ -8147,8 +9500,10 @@ export {
   assertSnapshotSizeSafety,
   assertFeedOutputSafety,
   buildCatalogFeedOutput,
+  createFeedFingerprint,
   createCatalogFeedCsv,
   evaluateFeedEligibility,
+  isCatalogFeedItemInV4,
   parseSemicolonCsv,
   parseCatalogFeedSourceRow,
   parseCatalogFeedOutputRow,
@@ -8159,4 +9514,5 @@ export {
   serializeCatalogFeedCsv,
   FEED_ELIGIBILITY_DEFAULT_SETTINGS,
   FEED_CHANNEL_CODE,
+  FEED_GENERATOR_VERSION,
 }

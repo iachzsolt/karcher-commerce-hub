@@ -26,6 +26,8 @@ type FeedProductRow = {
   sku: string
   name: string | null
   inCurrentCmsCatalog: boolean
+  inFeed: boolean
+  activeInFeed: boolean
   hasPriceKitData: boolean
   priceKitStatus: PriceKitStatus
   priceIndexBps: number | null
@@ -62,7 +64,12 @@ type ProductFilters = {
     | 'HAS_COMPETITOR'
     | 'NO_COMPETITOR'
     | 'PARTIAL_DATA'
-  feedStatus: 'ALL' | 'INCLUDED' | 'EXCLUDED'
+  feedStatus:
+    | 'ALL'
+    | 'IN_FEED'
+    | 'ACTIVE'
+    | 'DISABLED'
+    | 'OMITTED'
   inclusionMode: 'ALL' | InclusionMode
   stockStatus: 'ALL' | StockStatus
 }
@@ -136,13 +143,15 @@ function formatFeedReason(row: FeedProductRow) {
     case 'FEED_ELIGIBLE_NO_CURRENT_PRICEKIT':
       return 'Aktív – PriceKit adat nélkül engedélyezve'
     case 'FEED_BLOCKED_NO_CURRENT_PRICEKIT':
-      return 'Letiltva – nincs PriceKit adat'
+      return 'Nincs feedben – nincs PriceKit adat'
     case 'FEED_BLOCKED_PARTIAL_MARKET_DATA':
       return 'A piaci adat hiányos'
     case 'FEED_ELIGIBLE_MANUAL_OVERRIDE':
-      return 'Feedben – manuálisan engedélyezve'
+      return 'Manuálisan hozzáadva – globális szabályok figyelmen kívül hagyva'
     case 'FEED_BLOCKED_MANUAL_OVERRIDE':
-      return 'Manuálisan kihagyva'
+      return row.inFeed
+        ? 'Manuálisan letiltva – DeliveryTime=NO'
+        : 'Nincs feedben – manuális kizárás'
     default:
       return 'A feed-döntés részlete nem elérhető'
   }
@@ -204,10 +213,8 @@ function ArukeresoProductsPage() {
 
       if (appliedFilters.feedStatus !== 'ALL') {
         params.set(
-          'included',
-          appliedFilters.feedStatus === 'INCLUDED'
-            ? 'true'
-            : 'false',
+          'feedState',
+          appliedFilters.feedStatus,
         )
       }
 
@@ -329,15 +336,12 @@ function ArukeresoProductsPage() {
 
   const kpis = [
     ['Aktuális CMS-termékek', summary.currentCmsProducts ?? 0],
-    ['Aktuális CMS-en kívül', summary.outsideCurrentCms ?? 0],
-    ['PriceKit adattal', summary.priceKitWithData ?? 0],
-    [
-      'PriceKit adat nélkül',
-      summary.priceKitWithoutData ?? 0,
-    ],
-    ['Szabály szerint aktív', summary.included ?? 0],
-    ['Szabály szerint letiltott', summary.excluded ?? 0],
-    ['Készleten', summary.inStock ?? 0],
+    ['PriceKit feed-alap', summary.priceKitFeedBase ?? 0],
+    ['Manuálisan hozzáadva', summary.manuallyAdded ?? 0],
+    ['Feedben', summary.feedRows ?? 0],
+    ['Aktív ajánlatok', summary.activeOffers ?? 0],
+    ['Letiltott ajánlatok', summary.disabledOffers ?? 0],
+    ['Nincs feedben', summary.omittedFromFeed ?? 0],
     ['Manuális felülírás', summary.manualOverride ?? 0],
   ] as const
 
@@ -349,7 +353,7 @@ function ArukeresoProductsPage() {
           <h2>Termékek</h2>
           <p className="campaigns-page-description">
             A termékek PriceKit adatai, készletállapota és
-            Árukereső feed-jogosultsága egy helyen.
+            V4 feed-tagsága, valamint ajánlatállapota egy helyen.
           </p>
         </div>
       </div>
@@ -418,7 +422,7 @@ function ArukeresoProductsPage() {
           </label>
 
           <label>
-            <span>Szabályeredmény</span>
+            <span>Feed állapot</span>
             <select
               value={filters.feedStatus}
               onChange={(event) =>
@@ -430,8 +434,10 @@ function ArukeresoProductsPage() {
               }
             >
               <option value="ALL">Mind</option>
-              <option value="INCLUDED">Aktív</option>
-              <option value="EXCLUDED">Letiltott</option>
+              <option value="IN_FEED">Feedben</option>
+              <option value="ACTIVE">Aktív</option>
+              <option value="DISABLED">Letiltott</option>
+              <option value="OMITTED">Nincs feedben</option>
             </select>
           </label>
 
@@ -453,7 +459,7 @@ function ArukeresoProductsPage() {
                 Mindig aktív
               </option>
               <option value="FORCE_EXCLUDE">
-                Mindig letiltva
+                Manuálisan letiltva
               </option>
             </select>
           </label>
@@ -575,21 +581,30 @@ function ArukeresoProductsPage() {
                     <td className="arukereso-feed-cell">
                       <span
                         className={`arukereso-feed-badge ${
-                          row.inCurrentCmsCatalog && row.included
+                          row.inCurrentCmsCatalog &&
+                          row.inFeed &&
+                          row.activeInFeed
                             ? 'is-included'
                             : 'is-excluded'
                         }`}
                       >
                         {!row.inCurrentCmsCatalog
                           ? 'Nincs az aktuális CMS-ben'
-                          : row.included
-                            ? 'Aktív a feedben'
-                            : 'Letiltva a feedben'}
+                          : !row.inFeed
+                            ? 'Nincs feedben'
+                            : row.inclusionMode === 'FORCE_EXCLUDE'
+                              ? 'Manuálisan letiltva'
+                              : row.inclusionMode === 'FORCE_INCLUDE' &&
+                                  !row.hasPriceKitData
+                                ? 'Manuálisan hozzáadva'
+                                : row.activeInFeed
+                                  ? 'Feedben · Aktív'
+                                  : 'Feedben · Letiltva'}
                       </span>
                       <small>
                         {row.inCurrentCmsCatalog
                           ? formatFeedReason(row)
-                          : 'Nem kerülhet a generált feedbe.'}
+                          : 'Nem része az aktuális CMS-katalógusnak.'}
                       </small>
                     </td>
                     <td className="arukereso-override-cell">
@@ -612,14 +627,13 @@ function ArukeresoProductsPage() {
                           Mindig aktív
                         </option>
                         <option value="FORCE_EXCLUDE">
-                          Mindig letiltva
+                          Manuálisan letiltva
                         </option>
                       </select>
                       {row.inclusionMode === 'FORCE_INCLUDE' && (
                         <small>
-                          Manuálisan aktív – minden
-                          automatikus szabály figyelmen
-                          kívül hagyva
+                          Globális szabályok figyelmen kívül
+                          hagyva; eredeti DeliveryTime
                         </small>
                       )}
                       {row.inclusionMode === 'FORCE_EXCLUDE' && (

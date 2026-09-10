@@ -177,15 +177,15 @@ function OverviewSection({
               arukeresoActive === null
                 ? 'Betöltés…'
                 : arukeresoActive
-                  ? 'Aktív'
+                  ? 'Bekötve'
                   : 'Kikapcsolva'
             }
             description={
               arukeresoActive === null
                 ? 'A feed csatorna állapotának betöltése folyamatban van.'
                 : arukeresoActive
-                  ? 'Az Árukereső feed generálása és publikus kiszolgálása aktív.'
-                  : 'A feed előnézete elérhető, a generálás és publikus kiszolgálás ki van kapcsolva.'
+                  ? 'Az Árukereső feed integráció aktív.'
+                  : 'Az Árukereső integráció leállított állapotban van.'
             }
             to="/arukereso/overview"
             active={arukeresoActive === true}
@@ -236,15 +236,15 @@ function PlatformsSection({
             arukeresoActive === null
               ? 'Betöltés…'
               : arukeresoActive
-                ? 'Aktív'
+                ? 'Bekötve'
                 : 'Kikapcsolva'
           }
           description={
             arukeresoActive === null
               ? 'A feed csatorna állapotának betöltése folyamatban van.'
               : arukeresoActive
-                ? 'Az Árukereső feed generálása és publikus kiszolgálása aktív.'
-                : 'A feed előnézete elérhető, a generálás és publikus kiszolgálás ki van kapcsolva.'
+                ? 'Az Árukereső feed integráció aktív.'
+                : 'Az Árukereső integráció leállított állapotban van.'
           }
           to="/arukereso/overview"
           active={arukeresoActive === true}
@@ -296,8 +296,11 @@ function CommerceHubPage({
           isActive?: boolean
         }
 
-        if (response.ok) {
-          setArukeresoActive(result.isActive === true)
+        if (
+          response.ok &&
+          typeof result.isActive === 'boolean'
+        ) {
+          setArukeresoActive(result.isActive)
         }
       })
       .catch(() => undefined)

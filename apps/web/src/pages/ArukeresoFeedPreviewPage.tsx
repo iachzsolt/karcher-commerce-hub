@@ -27,6 +27,7 @@ type PreviewItem = {
   sku: string
   identifier: string
   name: string
+  inFeed: boolean
   included: boolean
   inclusionMode: InclusionMode
   reasonCode: string
@@ -54,8 +55,6 @@ type FeedSettings = {
   maxAverageIndexBps: number
   useStockRule: boolean
   allowNoCompetitor: boolean
-  allowMissingPricingData: boolean
-  maxPricingAgeHours: number
 }
 
 type PreviewResponse = {
@@ -79,11 +78,17 @@ type LatestRun = {
   excludedRows: number
   outputRows: number
   finishedAt: string | null
+  generatorVersion?: string | null
 }
 
 type PreviewFilters = {
   search: string
-  feedStatus: 'ALL' | 'INCLUDED' | 'EXCLUDED'
+  feedStatus:
+    | 'ALL'
+    | 'IN_FEED'
+    | 'ACTIVE'
+    | 'DISABLED'
+    | 'OMITTED'
   priceKitStatus:
     | 'ALL'
     | 'HAS_DATA'
@@ -147,9 +152,9 @@ function ruleLabel(mode: InclusionMode) {
     case 'INHERIT':
       return 'Globális'
     case 'FORCE_INCLUDE':
-      return 'Mindig feedben'
+      return 'Mindig aktív'
     case 'FORCE_EXCLUDE':
-      return 'Mindig kihagyva'
+      return 'Manuálisan letiltva'
   }
 }
 
@@ -180,13 +185,15 @@ function reasonLabel(item: PreviewItem) {
     case 'FEED_ELIGIBLE_NO_CURRENT_PRICEKIT':
       return 'Aktív – PriceKit adat nélkül engedélyezve'
     case 'FEED_BLOCKED_NO_CURRENT_PRICEKIT':
-      return 'Letiltva – nincs PriceKit adat'
+      return 'Nincs feedben – nincs PriceKit adat'
     case 'FEED_BLOCKED_PARTIAL_MARKET_DATA':
       return 'Letiltva – a piaci adat hiányos'
     case 'FEED_ELIGIBLE_MANUAL_OVERRIDE':
-      return 'Aktív – manuálisan engedélyezve'
+      return 'Manuálisan hozzáadva – globális szabályok figyelmen kívül hagyva'
     case 'FEED_BLOCKED_MANUAL_OVERRIDE':
-      return 'Letiltva – manuálisan letiltva'
+      return item.inFeed
+        ? 'Letiltva – manuálisan letiltva'
+        : 'Nincs feedben – manuális kizárás'
     default:
       return 'A döntés részlete nem elérhető'
   }
@@ -262,10 +269,8 @@ function ArukeresoFeedPreviewPage() {
         }
         if (appliedFilters.feedStatus !== 'ALL') {
           params.set(
-            'included',
-            appliedFilters.feedStatus === 'INCLUDED'
-              ? 'true'
-              : 'false',
+            'feedState',
+            appliedFilters.feedStatus,
           )
         }
         if (appliedFilters.priceKitStatus !== 'ALL') {
@@ -303,7 +308,11 @@ function ArukeresoFeedPreviewPage() {
         setItems(result.sample ?? [])
         setSummary(result.summary ?? {})
         setSettings(result.settings ?? null)
-        setIsActive(result.isActive === true)
+        setIsActive(
+          typeof result.isActive === 'boolean'
+            ? result.isActive
+            : null,
+        )
         setMinIncludedItems(
           result.safety?.minIncludedItems ?? 1,
         )
@@ -385,6 +394,8 @@ function ArukeresoFeedPreviewPage() {
         },
       )
       const result = (await response.json()) as {
+        status?: string
+        code?: string
         runId?: string
         summary?: {
           includedRows: number
@@ -398,6 +409,13 @@ function ArukeresoFeedPreviewPage() {
         throw new Error(
           'A munkamenet lejárt. Jelentkezz be újra.',
         )
+      }
+
+      if (
+        result.status === 'skipped' &&
+        result.code === 'CHANNEL_INACTIVE'
+      ) {
+        setIsActive(false)
       }
 
       if (!response.ok || !result.runId || !result.summary) {
@@ -499,18 +517,12 @@ function ArukeresoFeedPreviewPage() {
   )
   const kpis = [
     ['Forrássorok', summary.sourceRows ?? 0],
-    ['Párosított sorok', summary.matchedRows ?? 0],
-    ['Jogosult sorok', summary.includedRows ?? 0],
-    ['Kizárt sorok', summary.excludedRows ?? 0],
-    ['Generált CSV-sorok', summary.outputRows ?? 0],
-    ['Nem párosított CMS-sorok', summary.unmatchedRows ?? 0],
-    ['Manuálisan engedélyezve', summary.forceIncluded ?? 0],
-    ['Manuálisan letiltva', summary.forceExcluded ?? 0],
-    ['PriceKit adat', summary.priceKitWithData ?? 0],
-    ['PriceKit adat nélkül', summary.priceKitWithoutData ?? 0],
-    ['Készlet miatt blokkolva', summary.blockedByStock ?? 0],
-    ['Index miatt blokkolva', summary.blockedByIndex ?? 0],
-    ['Hiányzó aktív metrika', summary.missingEnabledMetric ?? 0],
+    ['PriceKit feed-alap', summary.priceKitBaseRows ?? 0],
+    ['Manuálisan hozzáadva', summary.manuallyAddedRows ?? 0],
+    ['Feedben', summary.outputRows ?? 0],
+    ['Aktív ajánlatok', summary.activeRows ?? 0],
+    ['Letiltott ajánlatok', summary.disabledRows ?? 0],
+    ['Nincs feedben', summary.omittedRows ?? 0],
   ] as const
 
   return (
@@ -520,9 +532,10 @@ function ArukeresoFeedPreviewPage() {
           <p className="section-label">ÁRUKERESŐ FEED</p>
           <h2>Feed előnézet</h2>
           <p className="campaigns-page-description">
-            Az előnézet minden párosított sort megmutat; a
-            kizárt sorok diagnosztikai célból láthatók, de a
-            generált CSV-be csak a jogosult sorok kerülnek.
+            Az előnézet minden aktuális, párosított CMS-sort
+            megmutat. A PriceKit-lefedettség adja a V4 feed
+            alapját; a szabályok az ajánlat DeliveryTime
+            értékét vezérlik.
           </p>
           <small className="arukereso-preview-readonly-note">
             Az előnézet nem hoz létre új feed-verziót.
@@ -568,11 +581,11 @@ function ArukeresoFeedPreviewPage() {
       {isActive === false && !loading && (
         <div className="arukereso-preview-inactive-banner">
           <div>
-            <strong>A feed csatorna ki van kapcsolva.</strong>
+            <strong>Az Árukereső integráció ki van kapcsolva.</strong>
             <span>
-              A diagnosztikai előnézet továbbra is használható,
-              de generálás és publikus feed-kiszolgálás nem
-              történik.
+              Az előnézet a normál feed várható állapotát
+              mutatja. A publikus URL jelenleg leállító feedet
+              szolgál ki, amelyben minden DeliveryTime=NO.
             </span>
           </div>
           <Link to="/arukereso/settings">
@@ -585,7 +598,8 @@ function ArukeresoFeedPreviewPage() {
         <div className="arukereso-preview-safety-warning">
           <strong>A feed jelenleg nem generálható.</strong>
           <span>
-            Túl kevés aktív ajánlat van a szabályok alapján.
+            Túl kevés sor tartozik a normál V4 feed
+            populációjába.
             Minimum:{' '}
             {minIncludedItems}, jelenleg:{' '}
             {summary.outputRows ?? 0}.
@@ -666,14 +680,6 @@ function ArukeresoFeedPreviewPage() {
               </strong>
             </div>
             <div>
-              <span>PriceKit adat nélkül</span>
-              <strong>
-                {settings.allowMissingPricingData
-                  ? 'Engedélyezett'
-                  : 'Nem engedélyezett'}
-              </strong>
-            </div>
-            <div>
               <span>Competitor nélkül</span>
               <strong>
                 {settings.allowNoCompetitor
@@ -695,8 +701,10 @@ function ArukeresoFeedPreviewPage() {
             </span>
             <strong>
               {(generatedRun ?? latestRun)?.outputRows} CSV-sor ·{' '}
-              {(generatedRun ?? latestRun)?.excludedRows}{' '}
-              kihagyva
+              {(generatedRun ?? latestRun)?.generatorVersion ===
+                'ARUKERESO_FILTERED_CMS_CSV_V3'
+                ? 'legacy V3'
+                : `${(generatedRun ?? latestRun)?.excludedRows} DeliveryTime=NO`}
             </strong>
             <small>
               {formatDate(
@@ -748,7 +756,7 @@ function ArukeresoFeedPreviewPage() {
             />
           </label>
           <label>
-            <span>Jogosultság</span>
+            <span>Feed állapot</span>
             <select
               value={filters.feedStatus}
               onChange={(event) =>
@@ -760,8 +768,10 @@ function ArukeresoFeedPreviewPage() {
               }
             >
               <option value="ALL">Mind</option>
-              <option value="INCLUDED">Jogosult</option>
-              <option value="EXCLUDED">Kizárt</option>
+              <option value="IN_FEED">Feedben</option>
+              <option value="ACTIVE">Aktív</option>
+              <option value="DISABLED">Letiltott</option>
+              <option value="OMITTED">Nincs feedben</option>
             </select>
           </label>
           <label>
@@ -924,19 +934,21 @@ function ArukeresoFeedPreviewPage() {
                     <td>
                       <span
                         className={`arukereso-feed-badge ${
-                          item.included
+                          item.inFeed && item.included
                             ? 'is-included'
                             : 'is-excluded'
                         }`}
                       >
-                        {item.included
-                          ? 'Jogosult'
-                          : 'Kizárt'}
+                        {!item.inFeed
+                          ? 'Nincs feedben'
+                          : item.included
+                            ? 'Feedben · Aktív'
+                            : 'Feedben · Letiltva'}
                       </span>
                       <small className="arukereso-preview-delivery">
-                        {item.included
-                          ? `DeliveryTime: ${item.outputDeliveryTime ?? '–'}`
-                          : 'Nem kerül a generált CSV-be'}
+                        {!item.inFeed
+                          ? 'Nincs generált CSV-sor'
+                          : `DeliveryTime: ${item.outputDeliveryTime ?? '–'}`}
                       </small>
                     </td>
                     <td className="arukereso-preview-reason">
@@ -1017,8 +1029,12 @@ function ArukeresoFeedPreviewPage() {
                 Generált CSV-sor
               </span>
               <span>
-                <strong>{summary.excludedRows ?? 0}</strong>
-                Kihagyott sor
+                <strong>{summary.activeRows ?? 0}</strong>
+                Aktív ajánlat
+              </span>
+              <span>
+                <strong>{summary.disabledRows ?? 0}</strong>
+                DeliveryTime=NO
               </span>
             </div>
             <div className="arukereso-preview-dialog-actions">

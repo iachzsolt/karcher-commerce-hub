@@ -33,8 +33,8 @@ function ArukeresoOverview({
         {isActive === null
           ? 'Állapot betöltése…'
           : isActive
-            ? 'Aktív feed csatorna'
-            : 'Feed csatorna kikapcsolva'}
+            ? 'Bekötve'
+            : 'Kikapcsolva'}
       </div>
 
       <h3>{title}</h3>
@@ -65,8 +65,11 @@ function ArukeresoPage() {
           isActive?: boolean
         }
 
-        if (response.ok) {
-          setIsActive(result.isActive === true)
+        if (
+          response.ok &&
+          typeof result.isActive === 'boolean'
+        ) {
+          setIsActive(result.isActive)
         }
       })
       .catch(() => undefined)

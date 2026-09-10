@@ -7806,7 +7806,7 @@ input:checked + span::after {
 
 .arukereso-product-kpis {
   display: grid;
-  grid-template-columns: repeat(7, minmax(100px, 1fr));
+  grid-template-columns: repeat(4, minmax(100px, 1fr));
   gap: 10px;
   margin-bottom: 16px;
 }
@@ -8110,7 +8110,7 @@ input:checked + span::after {
 
 .arukereso-preview-kpis {
   display: grid;
-  grid-template-columns: repeat(5, minmax(110px, 1fr));
+  grid-template-columns: repeat(4, minmax(110px, 1fr));
   gap: 9px;
   margin-bottom: 16px;
 }
@@ -8144,7 +8144,7 @@ input:checked + span::after {
 
 .arukereso-preview-rules-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 .arukereso-preview-rules-grid > div {
@@ -8155,11 +8155,11 @@ input:checked + span::after {
   border-bottom: 1px solid #ededed;
 }
 
-.arukereso-preview-rules-grid > div:nth-child(4n) {
+.arukereso-preview-rules-grid > div:last-child {
   border-right: 0;
 }
 
-.arukereso-preview-rules-grid > div:nth-last-child(-n + 3) {
+.arukereso-preview-rules-grid > div {
   border-bottom: 0;
 }
 
@@ -8319,7 +8319,7 @@ input:checked + span::after {
 
 .arukereso-preview-dialog-summary {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   margin: 18px 0;
 }
@@ -8379,9 +8379,13 @@ input:checked + span::after {
   }
 
   .arukereso-preview-rules-grid > div,
-  .arukereso-preview-rules-grid > div:nth-child(4n) {
+  .arukereso-preview-rules-grid > div:last-child {
     border-right: 0;
     border-bottom: 1px solid #ededed;
+  }
+
+  .arukereso-preview-rules-grid > div:nth-child(odd) {
+    border-right: 1px solid #ededed;
   }
 
   .arukereso-preview-rules-grid > div:last-child {
@@ -8406,6 +8410,14 @@ input:checked + span::after {
 
   .arukereso-preview-dialog-actions {
     flex-direction: column-reverse;
+  }
+
+  .arukereso-preview-dialog-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .arukereso-preview-rules-grid > div:nth-child(odd) {
+    border-right: 0;
   }
 
   .arukereso-preview-dialog-actions button {
