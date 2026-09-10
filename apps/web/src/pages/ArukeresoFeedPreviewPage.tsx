@@ -119,13 +119,13 @@ function formatPercent(value: number | null) {
 function priceKitLabel(status: PriceKitStatus) {
   switch (status) {
     case 'HAS_DATA':
-      return 'Van mai PriceKit adat'
+      return 'Van PriceKit adat'
     case 'NO_DATA':
-      return 'Nincs mai PriceKit adat'
+      return 'Nincs PriceKit adat'
     case 'NO_COMPETITOR':
-      return 'Nincs competitor'
+      return 'Nincs competitor adat'
     case 'PARTIAL_DATA':
-      return 'Részleges piaci adat'
+      return 'Részleges pricing adat'
   }
 }
 
@@ -173,9 +173,11 @@ function reasonLabel(item: PreviewItem) {
     case 'FEED_ELIGIBLE_NO_COMPETITOR':
       return 'Aktív – competitor nélkül engedélyezve'
     case 'FEED_BLOCKED_NO_COMPETITOR':
-      return 'Letiltva – nincs competitor'
+      return 'Letiltva – nincs competitor adat'
+    case 'FEED_ELIGIBLE_NO_CURRENT_PRICEKIT':
+      return 'Aktív – PriceKit adat nélkül engedélyezve'
     case 'FEED_BLOCKED_NO_CURRENT_PRICEKIT':
-      return 'Letiltva – nincs mai PriceKit adat'
+      return 'Letiltva – nincs PriceKit adat'
     case 'FEED_BLOCKED_PARTIAL_MARKET_DATA':
       return 'Letiltva – a piaci adat hiányos'
     case 'FEED_ELIGIBLE_MANUAL_OVERRIDE':
@@ -491,9 +493,10 @@ function ArukeresoFeedPreviewPage() {
     ['Forrássorok', summary.sourceRows ?? 0],
     ['Aktív ajánlatok', summary.activeRows ?? 0],
     ['Letiltott ajánlatok', summary.disabledRows ?? 0],
+    ['Nem párosított CMS-sorok', summary.unmatchedRows ?? 0],
     ['Manuálisan engedélyezve', summary.forceIncluded ?? 0],
     ['Manuálisan letiltva', summary.forceExcluded ?? 0],
-    ['PriceKit mai adat', summary.priceKitWithData ?? 0],
+    ['PriceKit adat', summary.priceKitWithData ?? 0],
     ['PriceKit adat nélkül', summary.priceKitWithoutData ?? 0],
     ['Készlet miatt blokkolva', summary.blockedByStock ?? 0],
     ['Index miatt blokkolva', summary.blockedByIndex ?? 0],
@@ -621,9 +624,11 @@ function ArukeresoFeedPreviewPage() {
               </strong>
             </div>
             <div>
-              <span>PriceKit lefedettség</span>
+              <span>PriceKit adat nélkül</span>
               <strong>
-                Csak mai PriceKit adat
+                {settings.allowMissingPricingData
+                  ? 'Engedélyezett'
+                  : 'Nem engedélyezett'}
               </strong>
             </div>
             <div>
@@ -731,16 +736,16 @@ function ArukeresoFeedPreviewPage() {
             >
               <option value="ALL">Mind</option>
               <option value="HAS_DATA">
-                Van mai adat
+                Van PriceKit adat
               </option>
               <option value="NO_DATA">
-                Nincs mai adat
+                Nincs PriceKit adat
               </option>
               <option value="NO_COMPETITOR">
-                Nincs competitor
+                Nincs competitor adat
               </option>
               <option value="PARTIAL_DATA">
-                Részleges adat
+                Részleges pricing adat
               </option>
             </select>
           </label>
@@ -782,10 +787,10 @@ function ArukeresoFeedPreviewPage() {
               <option value="INDEX">Árindex</option>
               <option value="STOCK">Készlet</option>
               <option value="NO_PRICEKIT">
-                Nincs mai PriceKit adat
+                Nincs PriceKit adat
               </option>
               <option value="NO_COMPETITOR">
-                Nincs competitor
+                Nincs competitor adat
               </option>
               <option value="MANUAL">
                 Manuális döntés

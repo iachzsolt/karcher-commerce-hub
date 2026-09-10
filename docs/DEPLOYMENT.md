@@ -74,12 +74,18 @@ COMMERCE_HUB_DATA_CONNECTION_SCHEDULES_ENABLED=false
 COMMERCE_HUB_CATALOG_SYNC_ENABLED=false
 COMMERCE_HUB_PRICE_SCHEDULES_ENABLED=false
 COMMERCE_HUB_CAMPAIGN_AUTOMATION_ENABLED=false
+COMMERCE_HUB_ARUKERESO_PRICING_SYNC_TOKEN=replace-with-random-secret
+ARUKERESO_PUBLIC_FEED_TOKEN=replace-with-url-safe-random-token
+ARUKERESO_AUTO_GENERATE_ENABLED=true
+ARUKERESO_SNAPSHOT_MIN_RATIO=0.60
 ```
 
 Multiple origins and email addresses are comma-separated. Email matching is
 case-insensitive. Production startup fails when the Google client ID is
-missing or both email lists are empty. Only `/health` and the Allegro OAuth
-callback remain public.
+missing or both email lists are empty. `/health` and the Allegro OAuth callback
+are public. The direct API routes `/arukereso/pricing/sync` and
+`/arukereso/feed/public/<TOKEN>.csv` use their own tokens and must not be
+exposed through a broader authentication bypass.
 
 Authenticated users are read-only by default. Only addresses listed in
 `COMMERCE_HUB_ADMIN_EMAILS` can call non-GET API routes. For the first pilot,

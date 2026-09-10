@@ -25,6 +25,7 @@ type FeedProductRow = {
   productId: string
   sku: string
   name: string | null
+  inCurrentCmsCatalog: boolean
   hasPriceKitData: boolean
   priceKitStatus: PriceKitStatus
   priceIndexBps: number | null
@@ -97,13 +98,13 @@ function formatStock(row: FeedProductRow) {
 function getPriceKitLabel(status: PriceKitStatus) {
   switch (status) {
     case 'HAS_DATA':
-      return 'Van mai adat'
+      return 'Van PriceKit adat'
     case 'NO_DATA':
-      return 'Nincs mai adat'
+      return 'Nincs PriceKit adat'
     case 'NO_COMPETITOR':
-      return 'Nincs competitor'
+      return 'Nincs competitor adat'
     case 'PARTIAL_DATA':
-      return 'Részleges adat'
+      return 'Részleges pricing adat'
   }
 }
 
@@ -128,11 +129,13 @@ function formatFeedReason(row: FeedProductRow) {
     case 'FEED_BLOCKED_MISSING_STOCK':
       return 'Nincs készletadat'
     case 'FEED_ELIGIBLE_NO_COMPETITOR':
-      return 'Competitor nélkül engedélyezve'
+      return 'Aktív – competitor nélkül engedélyezve'
     case 'FEED_BLOCKED_NO_COMPETITOR':
-      return 'Nincs competitor'
+      return 'Letiltva – nincs competitor adat'
+    case 'FEED_ELIGIBLE_NO_CURRENT_PRICEKIT':
+      return 'Aktív – PriceKit adat nélkül engedélyezve'
     case 'FEED_BLOCKED_NO_CURRENT_PRICEKIT':
-      return 'Kihagyva – nincs mai PriceKit adat'
+      return 'Letiltva – nincs PriceKit adat'
     case 'FEED_BLOCKED_PARTIAL_MARKET_DATA':
       return 'A piaci adat hiányos'
     case 'FEED_ELIGIBLE_MANUAL_OVERRIDE':
@@ -324,14 +327,15 @@ function ArukeresoProductsPage() {
   )
 
   const kpis = [
-    ['Összes termék', summary.products ?? 0],
+    ['Aktuális CMS-termékek', summary.currentCmsProducts ?? 0],
+    ['Aktuális CMS-en kívül', summary.outsideCurrentCms ?? 0],
     ['PriceKit adattal', summary.priceKitWithData ?? 0],
     [
       'PriceKit adat nélkül',
       summary.priceKitWithoutData ?? 0,
     ],
-    ['Feedben', summary.included ?? 0],
-    ['Kihagyva', summary.excluded ?? 0],
+    ['Szabály szerint aktív', summary.included ?? 0],
+    ['Szabály szerint letiltott', summary.excluded ?? 0],
     ['Készleten', summary.inStock ?? 0],
     ['Manuális felülírás', summary.manualOverride ?? 0],
   ] as const
@@ -391,22 +395,22 @@ function ArukeresoProductsPage() {
             >
               <option value="ALL">Mind</option>
               <option value="HAS_DATA">
-                Van mai adat
+                Van PriceKit adat
               </option>
               <option value="NO_DATA">
-                Nincs mai adat
+                Nincs PriceKit adat
               </option>
               <option value="NO_COMPETITOR">
-                Nincs competitor
+                Nincs competitor adat
               </option>
               <option value="PARTIAL_DATA">
-                Részleges adat
+                Részleges pricing adat
               </option>
             </select>
           </label>
 
           <label>
-            <span>Feed státusz</span>
+            <span>Szabályeredmény</span>
             <select
               value={filters.feedStatus}
               onChange={(event) =>
@@ -418,8 +422,8 @@ function ArukeresoProductsPage() {
               }
             >
               <option value="ALL">Mind</option>
-              <option value="INCLUDED">Feedben</option>
-              <option value="EXCLUDED">Kihagyva</option>
+              <option value="INCLUDED">Aktív</option>
+              <option value="EXCLUDED">Letiltott</option>
             </select>
           </label>
 
@@ -438,10 +442,10 @@ function ArukeresoProductsPage() {
               <option value="ALL">Mind</option>
               <option value="INHERIT">Globális</option>
               <option value="FORCE_INCLUDE">
-                Mindig feedben
+                Mindig aktív
               </option>
               <option value="FORCE_EXCLUDE">
-                Mindig kihagyva
+                Mindig letiltva
               </option>
             </select>
           </label>
@@ -563,14 +567,22 @@ function ArukeresoProductsPage() {
                     <td className="arukereso-feed-cell">
                       <span
                         className={`arukereso-feed-badge ${
-                          row.included
+                          row.inCurrentCmsCatalog && row.included
                             ? 'is-included'
                             : 'is-excluded'
                         }`}
                       >
-                        {row.included ? 'Feedben' : 'Kihagyva'}
+                        {!row.inCurrentCmsCatalog
+                          ? 'Nincs az aktuális CMS-ben'
+                          : row.included
+                            ? 'Aktív a feedben'
+                            : 'Letiltva a feedben'}
                       </span>
-                      <small>{formatFeedReason(row)}</small>
+                      <small>
+                        {row.inCurrentCmsCatalog
+                          ? formatFeedReason(row)
+                          : 'Nem kerülhet a generált feedbe.'}
+                      </small>
                     </td>
                     <td className="arukereso-override-cell">
                       <select
@@ -589,10 +601,10 @@ function ArukeresoProductsPage() {
                           Globális szabály
                         </option>
                         <option value="FORCE_INCLUDE">
-                          Mindig feedben
+                          Mindig aktív
                         </option>
                         <option value="FORCE_EXCLUDE">
-                          Mindig kihagyva
+                          Mindig letiltva
                         </option>
                       </select>
                       {row.inclusionMode === 'FORCE_INCLUDE' && (

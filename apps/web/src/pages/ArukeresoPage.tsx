@@ -12,7 +12,7 @@ import ArukeresoSettingsPage from './ArukeresoSettingsPage'
 
 import '../CommerceHub.css'
 
-function ArukeresoPlaceholder({
+function ArukeresoOverview({
   title,
 }: {
   title: string
@@ -21,15 +21,15 @@ function ArukeresoPlaceholder({
     <section className="module-placeholder">
       <div className="module-placeholder-status">
         <span className="platform-status-dot" />
-        Nincs bekötve
+        Aktív integráció
       </div>
 
       <h3>{title}</h3>
 
       <p>
-        Az Árukereső integráció helye már
-        elő van készítve, de az adatkapcsolat
-        még nincs beállítva.
+        Az Árukereső katalógus, termékszabályok,
+        feed-előnézet és feed-generálás a fenti
+        menüpontokból kezelhető.
       </p>
     </section>
   )
@@ -94,7 +94,7 @@ function ArukeresoPage() {
           <Route
             path="overview"
             element={
-              <ArukeresoPlaceholder
+              <ArukeresoOverview
                 title="Áttekintés"
               />
             }

@@ -286,7 +286,11 @@ function ArukeresoCatalogPage() {
   }
 
   useEffect(() => {
-    void loadPromotion()
+    const timeoutId = window.setTimeout(() => {
+      void loadPromotion()
+    }, 0)
+
+    return () => window.clearTimeout(timeoutId)
   }, [])
 
   const currentFileKey = selectedFile

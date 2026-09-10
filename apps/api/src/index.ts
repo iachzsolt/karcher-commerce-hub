@@ -40,7 +40,10 @@ import {
   dataConnectionsApi,
   processDueDataConnectionSchedules,
 } from './data-connections.js'
-import { arukeresoApi } from './arukereso.js'
+import {
+  arukeresoApi,
+  assertArukeresoConfiguration,
+} from './arukereso.js'
 import {
   allegroAuth,
   finishOfferAllegroCampaign,
@@ -9071,6 +9074,7 @@ function isAllegroSessionRestoreEnabled() {
 export function initializeCommerceHubRuntime() {
   runtimeInitialization ??= (async () => {
     assertAccessConfiguration()
+    assertArukeresoConfiguration()
 
     if (!isAllegroSessionRestoreEnabled()) {
       console.log(

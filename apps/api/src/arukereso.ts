@@ -71,6 +71,134 @@ const EXPECTED_CATALOG_HEADERS = [
 const PREVIEW_LIMIT = 50
 
 const INVALID_ROWS_LIMIT = 100
+const SNAPSHOT_MIN_RATIO_ENV =
+  'ARUKERESO_SNAPSHOT_MIN_RATIO'
+const SNAPSHOT_MIN_RATIO_DEFAULT = 0.6
+const SNAPSHOT_GUARD_MIN_PREVIOUS_ROWS = 100
+
+class SnapshotSizeRejectedError extends Error {
+  readonly code = 'SNAPSHOT_BELOW_MIN_RATIO'
+
+  constructor(
+    readonly source: 'CATALOG' | 'PRICING',
+    readonly previousRows: number,
+    readonly incomingRows: number,
+    readonly minRatio: number,
+  ) {
+    const ratio = incomingRows / previousRows
+
+    super(
+      `A(z) ${source} snapshot túl kicsi: előző ${previousRows}, beérkező ${incomingRows}, arány ${ratio.toFixed(3)}, minimum ${minRatio.toFixed(3)}. A jelenlegi snapshot változatlan maradt.`,
+    )
+    this.name = 'SnapshotSizeRejectedError'
+  }
+}
+
+class SnapshotSafetyConfigurationError extends Error {
+  readonly code =
+    'INVALID_SNAPSHOT_SAFETY_CONFIGURATION'
+
+  constructor() {
+    super(
+      `${SNAPSHOT_MIN_RATIO_ENV} must be greater than 0 and at most 1.`,
+    )
+    this.name = 'SnapshotSafetyConfigurationError'
+  }
+}
+
+function getSnapshotMinRatio() {
+  const configured =
+    process.env[SNAPSHOT_MIN_RATIO_ENV]?.trim()
+
+  if (!configured) {
+    return SNAPSHOT_MIN_RATIO_DEFAULT
+  }
+
+  const ratio = Number(configured)
+
+  if (
+    !Number.isFinite(ratio) ||
+    ratio <= 0 ||
+    ratio > 1
+  ) {
+    throw new SnapshotSafetyConfigurationError()
+  }
+
+  return ratio
+}
+
+function assertSnapshotSizeSafety(input: {
+  source: 'CATALOG' | 'PRICING'
+  previousRows: number
+  incomingRows: number
+}) {
+  const minRatio = getSnapshotMinRatio()
+
+  if (
+    input.previousRows >=
+      SNAPSHOT_GUARD_MIN_PREVIOUS_ROWS &&
+    input.incomingRows / input.previousRows <
+      minRatio
+  ) {
+    console.warn('Arukereso snapshot rejected:', {
+      source: input.source,
+      previousRows: input.previousRows,
+      incomingRows: input.incomingRows,
+      minRatio,
+    })
+
+    throw new SnapshotSizeRejectedError(
+      input.source,
+      input.previousRows,
+      input.incomingRows,
+      minRatio,
+    )
+  }
+}
+
+function snapshotSafetyErrorBody(
+  error:
+    | SnapshotSizeRejectedError
+    | SnapshotSafetyConfigurationError,
+) {
+  if (error instanceof SnapshotSizeRejectedError) {
+    return {
+      status: 'error' as const,
+      code: error.code,
+      message: error.message,
+      snapshot: {
+        source: error.source,
+        previousRows: error.previousRows,
+        incomingRows: error.incomingRows,
+        ratio:
+          error.incomingRows / error.previousRows,
+        minRatio: error.minRatio,
+      },
+    }
+  }
+
+  return {
+    status: 'error' as const,
+    code: error.code,
+    message:
+      'Az Árukereső snapshot biztonsági beállítása érvénytelen.',
+  }
+}
+
+function isSnapshotSafetyError(
+  error: unknown,
+): error is
+  | SnapshotSizeRejectedError
+  | SnapshotSafetyConfigurationError {
+  return (
+    error instanceof SnapshotSizeRejectedError ||
+    error instanceof SnapshotSafetyConfigurationError
+  )
+}
+
+function assertArukeresoConfiguration() {
+  getSnapshotMinRatio()
+}
 
 type CatalogHeader =
   (typeof EXPECTED_CATALOG_HEADERS)[number]
@@ -1041,6 +1169,34 @@ arukeresoApi.post(
           (item) => item.errors.length === 0,
         )
 
+      // A catalog import is a full current snapshot.
+      // Reject partial validity so a malformed row
+      // cannot be mistaken for a removed product and
+      // delete its previously valid current record.
+      if (analysis.summary.invalidRows > 0) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'A katalógus import hibás sorokat tartalmaz; a jelenlegi snapshot változatlan maradt.',
+            summary: analysis.summary,
+            invalidRows: analysis.allItems
+              .filter(
+                (item) => item.errors.length > 0,
+              )
+              .slice(0, INVALID_ROWS_LIMIT)
+              .map((item) => ({
+                rowNumber: item.rowNumber,
+                identifier: item.identifier,
+                eanCode: item.eanCode,
+                name: item.name,
+                errors: item.errors,
+              })),
+          },
+          422,
+        )
+      }
+
       if (validItems.length === 0) {
         return context.json(
           {
@@ -1183,6 +1339,12 @@ arukeresoApi.post(
             connectionId,
           ),
         )
+
+      assertSnapshotSizeSafety({
+        source: 'CATALOG',
+        previousRows: existingItems.length,
+        incomingRows: sourceItems.length,
+      })
 
       const currentKeySet =
         new Set(sourceItemKeys)
@@ -1453,6 +1615,15 @@ arukeresoApi.post(
               : {}),
           },
           400,
+        )
+      }
+
+      if (isSnapshotSafetyError(error)) {
+        return context.json(
+          snapshotSafetyErrorBody(error),
+          error instanceof SnapshotSizeRejectedError
+            ? 409
+            : 503,
         )
       }
 
@@ -2248,6 +2419,12 @@ async function applyPricingSnapshot(args: {
         ),
       ),
     )
+
+  assertSnapshotSizeSafety({
+    source: 'PRICING',
+    previousRows: existingItems.length,
+    incomingRows: sourceItems.length,
+  })
 
   const existingFingerprintByKey =
     new Map(
@@ -3280,6 +3457,15 @@ arukeresoApi.post(
             items: normalizedItems,
           })
       } catch (error) {
+        if (isSnapshotSafetyError(error)) {
+          return context.json(
+            snapshotSafetyErrorBody(error),
+            error instanceof SnapshotSizeRejectedError
+              ? 409
+              : 503,
+          )
+        }
+
         const message =
           error instanceof Error
             ? error.message
@@ -3438,6 +3624,15 @@ arukeresoApi.post(
           items: normalized.validItems,
         })
     } catch (error) {
+      if (isSnapshotSafetyError(error)) {
+        return context.json(
+          snapshotSafetyErrorBody(error),
+          error instanceof SnapshotSizeRejectedError
+            ? 409
+            : 503,
+        )
+      }
+
       const message =
         error instanceof Error
           ? error.message
@@ -4079,6 +4274,7 @@ function matchesFeedReasonCategory(
       'FEED_BLOCKED_MISSING_STOCK',
     ],
     NO_PRICEKIT: [
+      'FEED_ELIGIBLE_NO_CURRENT_PRICEKIT',
       'FEED_BLOCKED_NO_CURRENT_PRICEKIT',
     ],
     NO_COMPETITOR: [
@@ -4573,15 +4769,8 @@ type FeedEligibilitySettings = {
   maxAverageIndexBps: number
   useStockRule: boolean
   allowNoCompetitor: boolean
-  /**
-   * Legacy, no longer used by eligibility. The daily
-   * PriceKit snapshot membership decides currency:
-   * an existing pricing row is current, a missing row
-   * means no current PriceKit data. Parsed only for
-   * backward compatibility; never delete stored values.
-   */
   allowMissingPricingData: boolean
-  /** Legacy, ignored by eligibility. See above. */
+  /** Legacy, ignored by eligibility. */
   maxPricingAgeHours: number
   ruleVersion: number
 }
@@ -4739,6 +4928,7 @@ type FeedEligibilityReasonCode =
   | 'FEED_BLOCKED_NO_COMPETITOR'
   | 'FEED_ELIGIBLE_MANUAL_OVERRIDE'
   | 'FEED_BLOCKED_MANUAL_OVERRIDE'
+  | 'FEED_ELIGIBLE_NO_CURRENT_PRICEKIT'
   | 'FEED_BLOCKED_NO_CURRENT_PRICEKIT'
   | 'FEED_BLOCKED_PARTIAL_MARKET_DATA'
 
@@ -4915,15 +5105,20 @@ function evaluateFeedEligibility(input: {
 
   if (pricingRow === null) {
     // No row in the current daily PriceKit snapshot
-    // means no current PriceKit data. Only an explicit
-    // FORCE_INCLUDE can still include such a product.
-    return {
-      included: false,
-      decision: 'EXCLUDED',
-      reasonCode:
-        'FEED_BLOCKED_NO_CURRENT_PRICEKIT',
-      reasonDetails,
+    // means no current PriceKit data. Index rules do
+    // not apply because there is no usable pricing row.
+    if (!settings.allowMissingPricingData) {
+      return {
+        included: false,
+        decision: 'EXCLUDED',
+        reasonCode:
+          'FEED_BLOCKED_NO_CURRENT_PRICEKIT',
+        reasonDetails,
+      }
     }
+
+    successReasonCode =
+      'FEED_ELIGIBLE_NO_CURRENT_PRICEKIT'
   }
 
   if (
@@ -6610,6 +6805,7 @@ arukeresoApi.get(
 
       const [
         hubProducts,
+        catalogConnections,
         pricingConnections,
         inventoryConnections,
         overrides,
@@ -6625,6 +6821,24 @@ arukeresoApi.get(
             .where(
               eq(products.active, true),
             ),
+
+          database
+            .select({ id: dataConnections.id })
+            .from(dataConnections)
+            .where(
+              and(
+                eq(
+                  dataConnections.sourceType,
+                  'CSV_UPLOAD',
+                ),
+                eq(
+                  dataConnections.purpose,
+                  'CATALOG',
+                ),
+                eq(dataConnections.isActive, true),
+              ),
+            )
+            .limit(2),
 
           database
             .select({
@@ -6687,8 +6901,16 @@ arukeresoApi.get(
 
       const activeInventoryConnection =
         inventoryConnections[0] ?? null
+      const activeCatalogConnection =
+        catalogConnections.length === 1
+          ? catalogConnections[0]
+          : null
 
-      const [pricingRows, inventoryRows] =
+      const [
+        pricingRows,
+        inventoryRows,
+        catalogProductRows,
+      ] =
         await Promise.all([
           pricingConnectionIds.length > 0
             ? database
@@ -6736,6 +6958,20 @@ arukeresoApi.get(
                   eq(
                     inventorySourceItems.connectionId,
                     activeInventoryConnection.id,
+                  ),
+                )
+            : [],
+          activeCatalogConnection
+            ? database
+                .select({
+                  productId:
+                    catalogSourceItems.productId,
+                })
+                .from(catalogSourceItems)
+                .where(
+                  eq(
+                    catalogSourceItems.connectionId,
+                    activeCatalogConnection.id,
                   ),
                 )
             : [],
@@ -6803,6 +7039,11 @@ arukeresoApi.get(
           item.stock,
         ]),
       )
+      const currentCmsProductIds = new Set(
+        catalogProductRows.flatMap((item) =>
+          item.productId ? [item.productId] : [],
+        ),
+      )
 
       const now = new Date()
 
@@ -6826,6 +7067,8 @@ arukeresoApi.get(
         priceKitWithoutData: 0,
         inStock: 0,
         manualOverride: 0,
+        currentCmsProducts: 0,
+        outsideCurrentCms: 0,
       }
 
       const reasonCounts: Record<
@@ -6867,8 +7110,16 @@ arukeresoApi.get(
               : result.reasonDetails.stockAvailable
                 ? 'IN_STOCK'
                 : 'OUT_OF_STOCK'
+          const inCurrentCmsCatalog =
+            currentCmsProductIds.has(product.id)
 
           summary.products += 1
+
+          if (inCurrentCmsCatalog) {
+            summary.currentCmsProducts += 1
+          } else {
+            summary.outsideCurrentCms += 1
+          }
 
           if (result.included) {
             summary.included += 1
@@ -6964,6 +7215,7 @@ arukeresoApi.get(
             productId: product.id,
             sku: product.sku,
             name: product.name,
+            inCurrentCmsCatalog,
             included: result.included,
             inclusionMode,
             hasPriceKitData:
@@ -7412,8 +7664,8 @@ arukeresoApi.patch(
       }
 
       // Only active rules affect eligibility and the
-      // rule version. Legacy keys (allowMissingPricingData,
-      // maxPricingAgeHours) are preserved but ignored.
+      // rule version. maxPricingAgeHours remains a
+      // preserved legacy key.
       const activeKeys = [
         'useMinIndex',
         'maxMinIndexBps',
@@ -7423,6 +7675,7 @@ arukeresoApi.patch(
         'maxAverageIndexBps',
         'useStockRule',
         'allowNoCompetitor',
+        'allowMissingPricingData',
       ] as Array<
         keyof FeedEligibilitySettings
       >
@@ -7435,10 +7688,7 @@ arukeresoApi.patch(
       // Legacy keys are accepted and preserved, but
       // never affect the rule version on their own.
       const inactiveChanged = (
-        [
-          'allowMissingPricingData',
-          'maxPricingAgeHours',
-        ] as const
+        ['maxPricingAgeHours'] as const
       ).some(
         (key) =>
           updates[key] !== undefined &&
@@ -7794,6 +8044,8 @@ arukeresoApi.delete(
 
 export {
   arukeresoApi,
+  assertArukeresoConfiguration,
+  assertSnapshotSizeSafety,
   assertFeedOutputSafety,
   buildCatalogFeedOutput,
   createCatalogFeedCsv,

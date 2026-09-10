@@ -23,6 +23,7 @@ type SettingsDraft = {
   useAverageIndex: boolean
   maxAverageIndexPercent: string
   useStockRule: boolean
+  allowMissingPricingData: boolean
   allowNoCompetitor: boolean
 }
 
@@ -34,6 +35,7 @@ const INITIAL_DRAFT: SettingsDraft = {
   useAverageIndex: false,
   maxAverageIndexPercent: '110',
   useStockRule: false,
+  allowMissingPricingData: false,
   allowNoCompetitor: false,
 }
 
@@ -79,6 +81,8 @@ function toDraft(settings: FeedSettings): SettingsDraft {
       settings.maxAverageIndexBps / 100,
     ),
     useStockRule: settings.useStockRule,
+    allowMissingPricingData:
+      settings.allowMissingPricingData,
     allowNoCompetitor:
       settings.allowNoCompetitor,
   }
@@ -215,6 +219,8 @@ function ArukeresoSettingsPage() {
                 Number(draft.maxAverageIndexPercent) * 100,
               ),
             useStockRule: draft.useStockRule,
+            allowMissingPricingData:
+              draft.allowMissingPricingData,
             allowNoCompetitor:
               draft.allowNoCompetitor,
           }),
@@ -394,6 +400,31 @@ function ArukeresoSettingsPage() {
                 <label className="schedule-switch">
                   <input
                     type="checkbox"
+                    checked={draft.allowMissingPricingData}
+                    disabled={saving}
+                    onChange={(event) =>
+                      updateDraft(
+                        'allowMissingPricingData',
+                        event.target.checked,
+                      )
+                    }
+                  />
+                  <span aria-hidden="true" />
+                  <strong>
+                    PriceKit adat nélküli termékek engedélyezése
+                  </strong>
+                </label>
+                <p>
+                  Bekapcsolva azok a termékek is
+                  megjelenhetnek, amelyekhez nincs aktuális
+                  PriceKit/Cockpit adat.
+                </p>
+              </div>
+
+              <div className="arukereso-settings-toggle-row">
+                <label className="schedule-switch">
+                  <input
+                    type="checkbox"
                     checked={draft.allowNoCompetitor}
                     disabled={saving}
                     onChange={(event) =>
@@ -409,19 +440,17 @@ function ArukeresoSettingsPage() {
                   </strong>
                 </label>
                 <p>
-                  Engedélyezd, ha versenytárs ár nélkül is
-                  szeretnéd megjeleníteni a terméket.
+                  Bekapcsolva a PriceKitben szereplő, de
+                  versenytársi ár nélküli termékek is
+                  megjelenhetnek.
                 </p>
               </div>
 
             </div>
 
             <div className="allegro-settings-info">
-              Alapértelmezés szerint csak a mai
-              PriceKit/Cockpit adatokban szereplő termékek
-              kerülhetnek a feedbe. PriceKit adat nélküli
-              terméket egyedileg a Termékek oldalon lehet
-              engedélyezni.
+              A PriceKit-lefedettség, competitor-adatok és
+              készlet kezelése külön szabályozható.
             </div>
           </article>
 
