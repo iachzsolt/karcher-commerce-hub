@@ -7303,8 +7303,14 @@ arukeresoApi.get(
 
           if (
             priceKitStatusFilter &&
-            item.priceKitStatus !==
-              priceKitStatusFilter
+            (!item.inCurrentCmsCatalog ||
+              (priceKitStatusFilter === 'HAS_DATA'
+                ? item.priceKitStatus === 'NO_DATA'
+                : priceKitStatusFilter ===
+                    'HAS_COMPETITOR'
+                  ? item.priceKitStatus !== 'HAS_DATA'
+                  : item.priceKitStatus !==
+                    priceKitStatusFilter))
           ) {
             return false
           }
