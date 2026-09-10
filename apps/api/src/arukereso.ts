@@ -4369,8 +4369,13 @@ arukeresoApi.get(
 
           if (
             priceKitStatus &&
-            item.result.reasonDetails
-              .priceKitStatus !== priceKitStatus
+            (priceKitStatus === 'HAS_DATA'
+              ? item.pricingRow === null
+              : priceKitStatus === 'HAS_COMPETITOR'
+                ? item.result.reasonDetails
+                    .priceKitStatus !== 'HAS_DATA'
+                : item.result.reasonDetails
+                    .priceKitStatus !== priceKitStatus)
           ) {
             return false
           }

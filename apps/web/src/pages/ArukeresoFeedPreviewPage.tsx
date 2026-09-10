@@ -86,6 +86,7 @@ type PreviewFilters = {
     | 'ALL'
     | 'HAS_DATA'
     | 'NO_DATA'
+    | 'HAS_COMPETITOR'
     | 'NO_COMPETITOR'
     | 'PARTIAL_DATA'
   stockStatus: 'ALL' | StockStatus
@@ -119,7 +120,7 @@ function formatPercent(value: number | null) {
 function priceKitLabel(status: PriceKitStatus) {
   switch (status) {
     case 'HAS_DATA':
-      return 'Van PriceKit adat'
+      return 'Van competitor adat'
     case 'NO_DATA':
       return 'Nincs PriceKit adat'
     case 'NO_COMPETITOR':
@@ -735,18 +736,25 @@ function ArukeresoFeedPreviewPage() {
               }
             >
               <option value="ALL">Mind</option>
-              <option value="HAS_DATA">
-                Van PriceKit adat
-              </option>
-              <option value="NO_DATA">
-                Nincs PriceKit adat
-              </option>
-              <option value="NO_COMPETITOR">
-                Nincs competitor adat
-              </option>
-              <option value="PARTIAL_DATA">
-                Részleges pricing adat
-              </option>
+              <optgroup label="PriceKit lefedettség">
+                <option value="HAS_DATA">
+                  Van PriceKit adat
+                </option>
+                <option value="NO_DATA">
+                  Nincs PriceKit adat
+                </option>
+              </optgroup>
+              <optgroup label="Competitor állapot">
+                <option value="HAS_COMPETITOR">
+                  Van competitor adat
+                </option>
+                <option value="NO_COMPETITOR">
+                  Nincs competitor adat
+                </option>
+                <option value="PARTIAL_DATA">
+                  Részleges pricing adat
+                </option>
+              </optgroup>
             </select>
           </label>
           <label>
