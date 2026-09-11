@@ -179,6 +179,100 @@ function getStatusClass(
     .replaceAll('_', '-')
 }
 
+function getPurposeLabel(
+  purpose: string,
+) {
+  switch (purpose) {
+    case 'INVENTORY':
+      return 'Készletforrás'
+
+    case 'PRICING':
+      return 'Árforrás'
+
+    case 'CATALOG':
+      return 'Katalógusforrás'
+
+    default:
+      return 'Adatforrás'
+  }
+}
+
+function getSourceLabel(
+  sourceType: string,
+) {
+  switch (sourceType) {
+    case 'GOOGLE_SHEETS':
+      return 'Google Sheets'
+
+    case 'CSV_UPLOAD':
+      return 'CSV feltöltés'
+
+    default:
+      return sourceType
+  }
+}
+
+type PurposeGroup =
+  | 'INVENTORY'
+  | 'PRICING'
+  | 'CATALOG'
+  | 'OTHER'
+
+function getPurposeGroup(
+  purpose: string,
+): PurposeGroup {
+  switch (purpose) {
+    case 'INVENTORY':
+    case 'PRICING':
+    case 'CATALOG':
+      return purpose
+
+    default:
+      return 'OTHER'
+  }
+}
+
+const PURPOSE_SECTIONS: Array<{
+  group: PurposeGroup
+  title: string
+  description: string
+  emptyLabel: string
+  canCreate: boolean
+}> = [
+  {
+    group: 'INVENTORY',
+    title: 'Készlet',
+    description:
+      'Készletadatok forrásai és szinkronizációja.',
+    emptyLabel: 'Nincs készletforrás kapcsolat.',
+    canCreate: true,
+  },
+  {
+    group: 'PRICING',
+    title: 'Árazás',
+    description:
+      'Ár- és promóciós adatok forrásai.',
+    emptyLabel: 'Nincs árforrás kapcsolat.',
+    canCreate: false,
+  },
+  {
+    group: 'CATALOG',
+    title: 'Katalógus',
+    description:
+      'Termék- és katalógusadatok forrásai.',
+    emptyLabel: 'Nincs katalógusforrás kapcsolat.',
+    canCreate: false,
+  },
+  {
+    group: 'OTHER',
+    title: 'Egyéb',
+    description:
+      'Nem besorolt adatkapcsolatok.',
+    emptyLabel: '',
+    canCreate: false,
+  },
+]
+
 function DataConnectionsSettings() {
   const [
     connections,
@@ -365,7 +459,11 @@ function DataConnectionsSettings() {
     }
 
   useEffect(() => {
-    void loadConnections()
+    const timeoutId = window.setTimeout(() => {
+      void loadConnections()
+    }, 0)
+
+    return () => window.clearTimeout(timeoutId)
   }, [])
 
   const handleTest =
@@ -781,25 +879,10 @@ function DataConnectionsSettings() {
           <h3>Adatkapcsolatok</h3>
 
           <p>
-            Külső készletforrások
+            Külső adatforrások
             csatlakoztatása és kezelése.
           </p>
         </div>
-
-        <button
-          className="hub-primary-button"
-          type="button"
-          onClick={() =>
-            setShowCreate(
-              (current) =>
-                !current,
-            )
-          }
-        >
-          {showCreate
-            ? 'Bezárás'
-            : '+ Új adatkapcsolat'}
-        </button>
       </div>
 
       {message && (
@@ -1230,297 +1313,365 @@ function DataConnectionsSettings() {
           </p>
         </div>
       ) : (
-        <div className="data-connection-list">
-          {connections.map(
-            ({
-              connection,
-              config,
-            }) => {
-              const metric =
-                metrics[
-                  connection.id
-                ] ?? {
-                  itemCount: 0,
-                  normalizedCount: 0,
-                }
+        <>
+          {PURPOSE_SECTIONS.filter(
+            (section) =>
+              section.group !== 'OTHER' ||
+              connections.some(
+                (row) =>
+                  getPurposeGroup(
+                    row.connection.purpose,
+                  ) === 'OTHER',
+              ),
+          ).map((section) => {
+            const rows = connections.filter(
+              (row) =>
+                getPurposeGroup(
+                  row.connection.purpose,
+                ) === section.group,
+            )
 
-              const testing =
-                busy?.connectionId ===
-                  connection.id &&
-                busy.action ===
-                  'test'
-
-              const importing =
-                busy?.connectionId ===
-                  connection.id &&
-                busy.action ===
-                  'import'
-
-              return (
-                <article
-                  className={`data-connection-card${connection.isActive ? ' data-connection-card-active' : ''}`}
-                  key={
-                    connection.id
-                  }
-                >
-                  <div className="data-connection-card-top">
-                    <div className="data-connection-identity">
-                      <div className="connection-source-mark connection-source-mark-google-sheets">
-                        GS
-                      </div>
-
-                      <div>
-                        <div className="connection-card-title-line">
-                          <h4>
-                            {
-                              connection.name
-                            }
-                          </h4>
-
-                          <span
-                            className={`connection-status status-${getStatusClass(
-                              connection.status,
-                            )}`}
-                          >
-                            <span />
-
-                            {getStatusLabel(
-                              connection.status,
-                            )}
-                          </span>
-
-                          {connection.isActive && (
-                            <span className="active-source-badge">
-                              Aktív készletforrás
-                            </span>
-                          )}
-                        </div>
-
-                        <p>
-                          Google Sheets ·
-                          Készletforrás
-                        </p>
-                      </div>
-                    </div>
-
-                    {config
-                      ?.spreadsheetUrl && (
-                      <a
-                        className="connection-source-link"
-                        href={
-                          config.spreadsheetUrl
-                        }
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        Forrás megnyitása ↗
-                      </a>
-                    )}
+            return (
+              <div
+                className="data-connection-purpose"
+                key={section.group}
+              >
+                <div className="data-connection-purpose-heading">
+                  <div>
+                    <h4>
+                      {section.title}
+                    </h4>
+                    <p>
+                      {section.description}
+                    </p>
                   </div>
 
-                  <div className="connection-visual-flow">
-                    <div className="connection-flow-node">
-                      <span className="connection-flow-node-icon connection-flow-node-icon-google-sheets">
-                        GS
-                      </span>
-
-                      <div>
-                        <strong>
-                          Google Sheets
-                        </strong>
-
-                        <small>
-                          {config
-                            ?.sheetName ??
-                            'Nincs munkalap'}
-                        </small>
-                      </div>
-                    </div>
-
-                    <div className="connection-flow-line">
-                      <span />
-                      <b>›</b>
-                    </div>
-
-                    <div className="connection-flow-node connection-flow-node-hub">
-                      <span className="connection-flow-node-icon">
-                        CH
-                      </span>
-
-                      <div>
-                        <strong>
-                          Commerce Hub
-                        </strong>
-
-                        <small>
-                          SKU + készlet
-                        </small>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="connection-metrics-grid">
-                    <div>
-                      <span>
-                        Importált tételek
-                      </span>
-
-                      <strong>
-                        {
-                          metric.itemCount
-                        }
-                      </strong>
-                    </div>
-
-                    <div>
-                      <span>
-                        0-ra normalizálva
-                      </span>
-
-                      <strong>
-                        {
-                          metric.normalizedCount
-                        }
-                      </strong>
-                    </div>
-
-                    <div>
-                      <span>
-                        Utolsó sikeres beolvasás
-                      </span>
-
-                      <strong className="connection-date-value">
-                        {formatDate(
-                          connection
-                            .lastSuccessfulAt,
-                        )}
-                      </strong>
-                    </div>
-                  </div>
-
-                  {config && (
-                    <div className="connection-config-grid">
-                      <div>
-                        <span>
-                          Munkalap
-                        </span>
-
-                        <strong>
-                          {
-                            config.sheetName
-                          }
-                        </strong>
-                      </div>
-
-                      <div>
-                        <span>
-                          Cikkszám
-                        </span>
-
-                        <strong>
-                          {
-                            config.skuSourceField
-                          }
-                        </strong>
-                      </div>
-
-                      <div>
-                        <span>
-                          Készlet
-                        </span>
-
-                        <strong>
-                          {
-                            config.stockSourceField
-                          }
-                        </strong>
-                      </div>
-                    </div>
-                  )}
-
-                  {connection.lastError && (
-                    <div className="connection-inline-error">
-                      {
-                        connection.lastError
-                      }
-                    </div>
-                  )}
-
-                  <DataConnectionSchedulePanel
-                    connectionId={
-                      connection.id
-                    }
-                    isActive={
-                      connection.isActive
-                    }
-                  />
-
-                  <div className="connection-card-actions">
-                    {!connection.isActive && (
-                      <button
-                        className="hub-secondary-button"
-                        type="button"
-                        disabled={
-                          busy !== null ||
-                          (
-                            connection.status !== 'READY' &&
-                            connection.status !== 'ACTIVE'
-                          )
-                        }
-                        onClick={() =>
-                          void handleActivate(
-                            connection.id,
-                          )
-                        }
-                      >
-                        {busy?.connectionId ===
-                          connection.id &&
-                        busy.action ===
-                          'activate'
-                          ? 'Beállítás…'
-                          : 'Aktív készletforrásként'}
-                      </button>
-                    )}
-
-                    <button
-                      className="hub-secondary-button"
-                      type="button"
-                      disabled={
-                        busy !== null
-                      }
-                      onClick={() =>
-                        void handleTest(
-                          connection.id,
-                        )
-                      }
-                    >
-                      {testing
-                        ? 'Tesztelés…'
-                        : 'Kapcsolat tesztelése'}
-                    </button>
-
+                  {section.canCreate && (
                     <button
                       className="hub-primary-button"
                       type="button"
-                      disabled={
-                        busy !== null
-                      }
                       onClick={() =>
-                        void handleImport(
-                          connection.id,
+                        setShowCreate(
+                          (current) =>
+                            !current,
                         )
                       }
                     >
-                      {importing
-                        ? 'Beolvasás…'
-                        : 'Adatok beolvasása most'}
+                      {showCreate
+                        ? 'Bezárás'
+                        : '+ Készletforrás hozzáadása'}
                     </button>
+                  )}
+                </div>
+
+                {rows.length === 0 ? (
+                  <p className="hub-muted-line">
+                    {section.emptyLabel}
+                  </p>
+                ) : (
+                  <div className="data-connection-list">
+                    {rows.map(
+                      ({
+                        connection,
+                        config,
+                      }) => {
+                        const metric =
+                          metrics[
+                            connection.id
+                          ] ?? {
+                            itemCount: 0,
+                            normalizedCount: 0,
+                          }
+
+                        const testing =
+                          busy?.connectionId ===
+                            connection.id &&
+                          busy.action ===
+                            'test'
+
+                        const importing =
+                          busy?.connectionId ===
+                            connection.id &&
+                          busy.action ===
+                            'import'
+
+                        return (
+                          <article
+                            className={`data-connection-card${connection.isActive ? ' data-connection-card-active' : ''}`}
+                            key={
+                              connection.id
+                            }
+                          >
+                            <div className="data-connection-card-top">
+                              <div className="data-connection-identity">
+                                <div className="connection-source-mark connection-source-mark-google-sheets">
+                                  GS
+                                </div>
+
+                                <div>
+                                  <div className="connection-card-title-line">
+                                    <h4>
+                                      {
+                                        connection.name
+                                      }
+                                    </h4>
+
+                                    <span
+                                      className={`connection-status status-${getStatusClass(
+                                        connection.status,
+                                      )}`}
+                                    >
+                                      <span />
+
+                                      {getStatusLabel(
+                                        connection.status,
+                                      )}
+                                    </span>
+
+                                    {connection.isActive && (
+                                      <span className="active-source-badge">
+                                        {`Aktív ${getPurposeLabel(
+                                          connection.purpose,
+                                        ).toLowerCase()}`}
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <p>
+                                    {getSourceLabel(
+                                      connection.sourceType,
+                                    )}{' '}
+                                    ·{' '}
+                                    {getPurposeLabel(
+                                      connection.purpose,
+                                    )}
+                                  </p>
+                                </div>
+                              </div>
+
+                              {config
+                                ?.spreadsheetUrl && (
+                                <a
+                                  className="connection-source-link"
+                                  href={
+                                    config.spreadsheetUrl
+                                  }
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  Forrás megnyitása ↗
+                                </a>
+                              )}
+                            </div>
+
+                            <div className="connection-visual-flow">
+                              <div className="connection-flow-node">
+                                <span className="connection-flow-node-icon connection-flow-node-icon-google-sheets">
+                                  GS
+                                </span>
+
+                                <div>
+                                  <strong>
+                                    Google Sheets
+                                  </strong>
+
+                                  <small>
+                                    {config
+                                      ?.sheetName ??
+                                      'Nincs munkalap'}
+                                  </small>
+                                </div>
+                              </div>
+
+                              <div className="connection-flow-line">
+                                <span />
+                                <b>›</b>
+                              </div>
+
+                              <div className="connection-flow-node connection-flow-node-hub">
+                                <span className="connection-flow-node-icon">
+                                  CH
+                                </span>
+
+                                <div>
+                                  <strong>
+                                    Commerce Hub
+                                  </strong>
+
+                                  <small>
+                                    SKU + készlet
+                                  </small>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="connection-metrics-grid">
+                              <div>
+                                <span>
+                                  Importált tételek
+                                </span>
+
+                                <strong>
+                                  {
+                                    metric.itemCount
+                                  }
+                                </strong>
+                              </div>
+
+                              <div>
+                                <span>
+                                  0-ra normalizálva
+                                </span>
+
+                                <strong>
+                                  {
+                                    metric.normalizedCount
+                                  }
+                                </strong>
+                              </div>
+
+                              <div>
+                                <span>
+                                  Utolsó sikeres beolvasás
+                                </span>
+
+                                <strong className="connection-date-value">
+                                  {formatDate(
+                                    connection
+                                      .lastSuccessfulAt,
+                                  )}
+                                </strong>
+                              </div>
+                            </div>
+
+                            {config && (
+                              <div className="connection-config-grid">
+                                <div>
+                                  <span>
+                                    Munkalap
+                                  </span>
+
+                                  <strong>
+                                    {
+                                      config.sheetName
+                                    }
+                                  </strong>
+                                </div>
+
+                                <div>
+                                  <span>
+                                    Cikkszám
+                                  </span>
+
+                                  <strong>
+                                    {
+                                      config.skuSourceField
+                                    }
+                                  </strong>
+                                </div>
+
+                                <div>
+                                  <span>
+                                    Készlet
+                                  </span>
+
+                                  <strong>
+                                    {
+                                      config.stockSourceField
+                                    }
+                                  </strong>
+                                </div>
+                              </div>
+                            )}
+
+                            {connection.lastError && (
+                              <div className="connection-inline-error">
+                                {
+                                  connection.lastError
+                                }
+                              </div>
+                            )}
+
+                            <DataConnectionSchedulePanel
+                              connectionId={
+                                connection.id
+                              }
+                              isActive={
+                                connection.isActive
+                              }
+                            />
+
+                            <div className="connection-card-actions">
+                              {!connection.isActive && (
+                                <button
+                                  className="hub-secondary-button"
+                                  type="button"
+                                  disabled={
+                                    busy !== null ||
+                                    (
+                                      connection.status !== 'READY' &&
+                                      connection.status !== 'ACTIVE'
+                                    )
+                                  }
+                                  onClick={() =>
+                                    void handleActivate(
+                                      connection.id,
+                                    )
+                                  }
+                                >
+                                  {busy?.connectionId ===
+                                    connection.id &&
+                                  busy.action ===
+                                    'activate'
+                                    ? 'Beállítás…'
+                                    : 'Aktív készletforrásként'}
+                                </button>
+                              )}
+
+                              <button
+                                className="hub-secondary-button"
+                                type="button"
+                                disabled={
+                                  busy !== null
+                                }
+                                onClick={() =>
+                                  void handleTest(
+                                    connection.id,
+                                  )
+                                }
+                              >
+                                {testing
+                                  ? 'Tesztelés…'
+                                  : 'Kapcsolat tesztelése'}
+                              </button>
+
+                              <button
+                                className="hub-primary-button"
+                                type="button"
+                                disabled={
+                                  busy !== null
+                                }
+                                onClick={() =>
+                                  void handleImport(
+                                    connection.id,
+                                  )
+                                }
+                              >
+                                {importing
+                                  ? 'Beolvasás…'
+                                  : 'Adatok beolvasása most'}
+                              </button>
+                            </div>
+                          </article>
+                        )
+                      },
+                    )}
                   </div>
-                </article>
-              )
-            },
-          )}
-        </div>
+                )}
+              </div>
+            )
+          })}
+        </>
       )}
     </section>
   )

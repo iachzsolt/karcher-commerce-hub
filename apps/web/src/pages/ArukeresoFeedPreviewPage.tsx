@@ -588,7 +588,7 @@ function ArukeresoFeedPreviewPage() {
               szolgál ki, amelyben minden DeliveryTime=NO.
             </span>
           </div>
-          <Link to="/arukereso/settings">
+          <Link to="/settings">
             Aktiválási beállítások
           </Link>
         </div>

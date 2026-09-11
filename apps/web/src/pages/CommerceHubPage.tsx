@@ -1,4 +1,5 @@
 import DataConnectionsSettings from '../components/DataConnectionsSettings'
+import PlatformMasterSwitches from '../components/PlatformMasterSwitches'
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 
@@ -272,6 +273,8 @@ function SettingsSection() {
           </p>
         </div>
       </section>
+
+      <PlatformMasterSwitches />
 
       <DataConnectionsSettings />
     </>
