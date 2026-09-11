@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { API_BASE_URL } from '../config/api'
 import {
   aggregateListingStories,
+  attachRelatedDayEvents,
   summarizeRefreshRun,
   summarizeStories,
   type ListingStory,
@@ -100,6 +101,7 @@ type HistoryDayItem =
       occurredAt: string
       groupId: string
       events: AllegroHistoryEvent[]
+      relatedEvents: AllegroHistoryEvent[]
     }
   | {
       kind: 'catalog-sync'
@@ -139,12 +141,31 @@ function groupDayEvents(
       new Date(left.occurredAt).getTime(),
   )
 
+  const syncGroupInputs = [...syncGroups.entries()].map(
+    ([groupId, groupEvents]) => ({
+      groupId,
+      occurredAt: groupEvents[0].occurredAt,
+      listingIds: [
+        ...new Set(
+          groupEvents.map(
+            (event) => event.listingId,
+          ),
+        ),
+      ],
+    }),
+  )
+  const { attachments, leftover } =
+    attachRelatedDayEvents(
+      syncGroupInputs,
+      regularEvents,
+    )
+
   return [
-    ...(regularEvents.length > 0
+    ...(leftover.length > 0
       ? [{
           kind: 'event-group' as const,
-          occurredAt: regularEvents[0].occurredAt,
-          events: regularEvents,
+          occurredAt: leftover[0].occurredAt,
+          events: leftover,
         }]
       : []),
     ...[...syncGroups.entries()].map(
@@ -153,6 +174,8 @@ function groupDayEvents(
         occurredAt: events[0].occurredAt,
         groupId,
         events,
+        relatedEvents:
+          attachments.get(groupId) ?? [],
       }),
     ),
     ...catalogSyncRuns.map((run): HistoryDayItem => ({
@@ -651,8 +674,10 @@ function ListingStoryRow({
 
 function SyncHistoryGroup({
   events,
+  relatedEvents,
 }: {
   events: AllegroHistoryEvent[]
+  relatedEvents: AllegroHistoryEvent[]
 }) {
   const [search, setSearch] = useState('')
   const [appliedSearch, setAppliedSearch] =
@@ -835,6 +860,22 @@ function SyncHistoryGroup({
             ))
           )}
         </div>
+
+        {relatedEvents.length > 0 && (
+          <div className="allegro-history-related">
+            <span className="allegro-settings-eyebrow">
+              KAPCSOLÓDÓ TÁVOLI VÁLTOZÁSOK
+            </span>
+            <div className="allegro-history-events">
+              {relatedEvents.map((event) => (
+                <HistoryEventRow
+                  event={event}
+                  key={event.id}
+                />
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </details>
   )
@@ -1376,6 +1417,9 @@ function AllegroHistoryPage() {
                   return (
                     <SyncHistoryGroup
                       events={item.events}
+                      relatedEvents={
+                        item.relatedEvents
+                      }
                       key={item.groupId}
                     />
                   )

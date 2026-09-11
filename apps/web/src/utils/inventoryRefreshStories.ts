@@ -351,6 +351,112 @@ export function summarizeStories(
   return summary
 }
 
+export type DayEventInput = {
+  id: string
+  listingId: string
+  occurredAt: string
+  eventType: string
+  source: string
+}
+
+/*
+ * Only remote-state/reconciliation events belong to the
+ * inventory automation story. Verified writers:
+ * - SYNC: allegro-inventory-sync (INVENTORY_AUTOMATION)
+ * - STOCK/STATUS: remote reconciliation (ALLEGRO_SYNC)
+ * PRICE, CAMPAIGN, MANUAL and anything else always stay
+ * in the general history row, even on listing overlap.
+ */
+const ATTACHABLE_EVENT_TYPES = new Set([
+  'SYNC',
+  'STOCK',
+  'STATUS',
+])
+
+const AUTOMATION_EVENT_SOURCES = new Set([
+  'INVENTORY_AUTOMATION',
+  'ALLEGRO_SYNC',
+])
+
+function isAttachableEvent(
+  event: DayEventInput,
+): boolean {
+  return (
+    ATTACHABLE_EVENT_TYPES.has(event.eventType) &&
+    AUTOMATION_EVENT_SOURCES.has(event.source)
+  )
+}
+
+export type DaySyncGroupInput = {
+  groupId: string
+  occurredAt: string
+  listingIds: string[]
+}
+
+/*
+ * Attaches day-level non-SYNC events to the sync group
+ * that already covers the same listing, newest group
+ * first. Every input event lands in exactly one place:
+ * either one owning group or the leftover list, so the
+ * UI can render related changes inside the automation
+ * detail without duplicating or losing records.
+ */
+export function attachRelatedDayEvents<
+  TGroup extends DaySyncGroupInput,
+  TEvent extends DayEventInput,
+>(
+  groups: TGroup[],
+  events: TEvent[],
+): {
+  attachments: Map<string, TEvent[]>
+  leftover: TEvent[]
+} {
+  const orderedGroups = [...groups].sort(
+    (left, right) =>
+      right.occurredAt.localeCompare(
+        left.occurredAt,
+      ),
+  )
+  const listingOwners = new Map<string, string>()
+
+  for (const group of orderedGroups) {
+    for (const listingId of group.listingIds) {
+      if (!listingOwners.has(listingId)) {
+        listingOwners.set(listingId, group.groupId)
+      }
+    }
+  }
+
+  const attachments = new Map<string, TEvent[]>()
+  const leftover: TEvent[] = []
+
+  for (const event of events) {
+    const owner = listingOwners.get(
+      event.listingId,
+    )
+
+    if (!owner || !isAttachableEvent(event)) {
+      leftover.push(event)
+      continue
+    }
+
+    const attached =
+      attachments.get(owner) ?? []
+    attached.push(event)
+    attachments.set(owner, attached)
+  }
+
+  for (const attached of attachments.values()) {
+    attached.sort((left, right) =>
+      right.occurredAt.localeCompare(
+        left.occurredAt,
+      ),
+    )
+  }
+
+  return { attachments, leftover }
+}
+
 export type RefreshOverall =
   | 'success'
   | 'partial'

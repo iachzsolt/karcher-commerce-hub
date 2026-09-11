@@ -2235,6 +2235,16 @@ textarea {
   padding: 0 12px 12px;
 }
 
+.allegro-history-related {
+  display: grid;
+  gap: 10px;
+}
+
+.allegro-history-related .allegro-history-events {
+  margin: 0 -20px -14px;
+  border-top: 1px solid #eef1f4;
+}
+
 .allegro-history-empty,
 .allegro-history-limit-note {
   padding: 34px 20px;

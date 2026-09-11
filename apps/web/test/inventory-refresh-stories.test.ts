@@ -5,6 +5,7 @@ import {
 import assert from 'node:assert/strict'
 import {
   aggregateListingStories,
+  attachRelatedDayEvents,
   summarizeRefreshRun,
   summarizeStories,
   type StoryEventInput,
@@ -317,6 +318,204 @@ void describe(
             importStatus: null,
           }),
           { overall: 'failed', helper: null },
+        )
+      },
+    )
+  },
+)
+
+void describe(
+  'attachRelatedDayEvents',
+  () => {
+    const groups = [
+      {
+        groupId: 'group-new',
+        occurredAt: '2026-09-10T12:00:00.000Z',
+        listingIds: ['listing-1', 'listing-2'],
+      },
+      {
+        groupId: 'group-old',
+        occurredAt: '2026-09-10T09:00:00.000Z',
+        listingIds: ['listing-2', 'listing-3'],
+      },
+    ]
+
+    function dayEvent(
+      id: string,
+      listingId: string,
+      eventType = 'STOCK',
+      source = 'ALLEGRO_SYNC',
+    ) {
+      return {
+        id,
+        listingId,
+        occurredAt: '2026-09-10T10:00:00.000Z',
+        eventType,
+        source,
+      }
+    }
+
+    void it(
+      'attaches overlapping listings to the newest owning group',
+      () => {
+        const { attachments, leftover } =
+          attachRelatedDayEvents(groups, [
+            dayEvent('event-1', 'listing-1'),
+            dayEvent('event-2', 'listing-2'),
+          ])
+
+        assert.deepEqual(
+          attachments
+            .get('group-new')
+            ?.map((event) => event.id),
+          ['event-1', 'event-2'],
+        )
+        assert.deepEqual(
+          attachments.get('group-old'),
+          undefined,
+        )
+        assert.deepEqual(leftover, [])
+      },
+    )
+
+    void it(
+      'keeps non-overlapping events as leftover',
+      () => {
+        const { attachments, leftover } =
+          attachRelatedDayEvents(groups, [
+            dayEvent('event-1', 'listing-1'),
+            dayEvent('event-9', 'listing-9'),
+          ])
+
+        assert.deepEqual(
+          attachments
+            .get('group-new')
+            ?.map((event) => event.id),
+          ['event-1'],
+        )
+        assert.deepEqual(
+          leftover.map((event) => event.id),
+          ['event-9'],
+        )
+      },
+    )
+
+    void it(
+      'leaves everything leftover without groups',
+      () => {
+        const { attachments, leftover } =
+          attachRelatedDayEvents([], [
+            dayEvent('event-1', 'listing-1'),
+          ])
+
+        assert.equal(attachments.size, 0)
+        assert.deepEqual(
+          leftover.map((event) => event.id),
+          ['event-1'],
+        )
+      },
+    )
+
+    void it(
+      'attaches STATUS same listing',
+      () => {
+        const { attachments, leftover } =
+          attachRelatedDayEvents(groups, [
+            dayEvent(
+              'event-1',
+              'listing-1',
+              'STATUS',
+              'ALLEGRO_SYNC',
+            ),
+          ])
+
+        assert.deepEqual(
+          attachments
+            .get('group-new')
+            ?.map((event) => event.id),
+          ['event-1'],
+        )
+        assert.deepEqual(leftover, [])
+      },
+    )
+
+    void it(
+      'does not attach PRICE same listing',
+      () => {
+        const { attachments, leftover } =
+          attachRelatedDayEvents(groups, [
+            dayEvent(
+              'event-1',
+              'listing-1',
+              'PRICE',
+              'ALLEGRO_SYNC',
+            ),
+          ])
+
+        assert.equal(attachments.size, 0)
+        assert.deepEqual(
+          leftover.map((event) => event.id),
+          ['event-1'],
+        )
+      },
+    )
+
+    void it(
+      'does not attach manual or campaign events on overlap',
+      () => {
+        const { attachments, leftover } =
+          attachRelatedDayEvents(groups, [
+            dayEvent(
+              'event-1',
+              'listing-1',
+              'STOCK',
+              'MANUAL',
+            ),
+            dayEvent(
+              'event-2',
+              'listing-1',
+              'CAMPAIGN',
+              'ALLEGRO_CAMPAIGN',
+            ),
+            dayEvent(
+              'event-3',
+              'listing-2',
+              'STATUS',
+              'ALLEGRO_CAMPAIGN_SYNC',
+            ),
+          ])
+
+        assert.equal(attachments.size, 0)
+        assert.deepEqual(
+          leftover.map((event) => event.id),
+          ['event-1', 'event-2', 'event-3'],
+        )
+      },
+    )
+
+    void it(
+      'never attaches one event twice',
+      () => {
+        const events = [
+          dayEvent('event-1', 'listing-1'),
+          dayEvent('event-2', 'listing-2'),
+          dayEvent('event-3', 'listing-9'),
+        ]
+        const { attachments, leftover } =
+          attachRelatedDayEvents(groups, events)
+        const attached = [...attachments.values()].flat()
+
+        assert.equal(
+          attached.length + leftover.length,
+          events.length,
+        )
+        assert.equal(
+          new Set(
+            [...attached, ...leftover].map(
+              (event) => event.id,
+            ),
+          ).size,
+          events.length,
         )
       },
     )
