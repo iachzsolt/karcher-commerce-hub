@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useState,
 } from 'react'
 import { Link } from 'react-router-dom'
@@ -79,6 +80,20 @@ type LatestRun = {
   outputRows: number
   finishedAt: string | null
   generatorVersion?: string | null
+}
+
+type FeedAccessDay = {
+  day: string
+  requestCount: number
+  lastRequestedAt: string | null
+  lastServedRunId: string | null
+  lastUserAgent: string | null
+  likelyArukereso: boolean
+}
+
+type FeedAccessStatus = {
+  today: FeedAccessDay | null
+  recentDays: FeedAccessDay[]
 }
 
 type PreviewFilters = {
@@ -238,6 +253,8 @@ function ArukeresoFeedPreviewPage() {
     useState(false)
   const [generatedRun, setGeneratedRun] =
     useState<LatestRun | null>(null)
+  const [accessStatus, setAccessStatus] =
+    useState<FeedAccessStatus | null>(null)
 
   function updateFilter<K extends keyof PreviewFilters>(
     key: K,
@@ -353,16 +370,60 @@ function ArukeresoFeedPreviewPage() {
     return null
   }, [])
 
+  const accessWeekCount = useMemo(() => {
+    if (!accessStatus) {
+      return 0
+    }
+
+    const cutoff = new Date()
+    cutoff.setUTCDate(cutoff.getUTCDate() - 6)
+    const weekCutoff = cutoff
+      .toISOString()
+      .slice(0, 10)
+
+    return accessStatus.recentDays
+      .filter((day) => day.day >= weekCutoff)
+      .reduce(
+        (sum, day) => sum + day.requestCount,
+        0,
+      )
+  }, [accessStatus])
+
+  const loadAccessStatus = useCallback(async () => {
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/arukereso/feed/access-status`,
+      )
+      const result = (await response.json()) as {
+        today?: FeedAccessDay | null
+        recentDays?: FeedAccessDay[]
+      }
+
+      if (
+        response.ok &&
+        Array.isArray(result.recentDays)
+      ) {
+        setAccessStatus({
+          today: result.today ?? null,
+          recentDays: result.recentDays,
+        })
+      }
+    } catch {
+      setAccessStatus(null)
+    }
+  }, [])
+
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
       void Promise.all([
         loadPreview(),
         loadLatestRun(),
+        loadAccessStatus(),
       ])
     }, 0)
 
     return () => window.clearTimeout(timeoutId)
-  }, [loadLatestRun, loadPreview])
+  }, [loadLatestRun, loadPreview, loadAccessStatus])
 
   function applyFilters() {
     setAppliedFilters({
@@ -736,6 +797,83 @@ function ArukeresoFeedPreviewPage() {
           </button>
         </article>
       )}
+
+      {accessStatus &&
+        (() => {
+          const today = accessStatus.today
+          const runLabel = today?.lastServedRunId
+            ? `${today.lastServedRunId.slice(0, 8)}…`
+            : today
+              ? 'Leállító feed'
+              : '–'
+          const clientLabel = !today
+            ? '–'
+            : today.likelyArukereso
+              ? 'Valószínűleg Árukereső'
+              : 'Ismeretlen'
+
+          return (
+            <article className="arukereso-access-status">
+              <div>
+                <span className="section-label">
+                  FEED LEKÉRÉSEK
+                </span>
+                {today || accessWeekCount > 0 ? (
+                  <>
+                    <div className="arukereso-access-metrics">
+                      <div>
+                        <span>Utolsó lekérés</span>
+                        <strong>
+                          {formatDate(
+                            today?.lastRequestedAt ??
+                              null,
+                          )}
+                        </strong>
+                      </div>
+                      <div>
+                        <span>Mai lekérések</span>
+                        <strong>
+                          {today?.requestCount ?? 0}
+                        </strong>
+                      </div>
+                      <div>
+                        <span>
+                          Utolsó kiszolgált feed
+                        </span>
+                        <strong>
+                          {runLabel}
+                        </strong>
+                      </div>
+                      <div>
+                        <span>Kliens</span>
+                        <strong>
+                          {clientLabel}
+                        </strong>
+                      </div>
+                    </div>
+                    <small>
+                      Utóbbi 7 nap:{' '}
+                      {accessWeekCount} lekérés
+                    </small>
+                    {today?.lastUserAgent && (
+                      <details className="arukereso-access-details">
+                        <summary>Részletek</summary>
+                        <p>
+                          {today.lastUserAgent}
+                        </p>
+                      </details>
+                    )}
+                  </>
+                ) : (
+                  <small>
+                    Még nincs rögzített
+                    nyilvános lekérés.
+                  </small>
+                )}
+              </div>
+            </article>
+          )
+        })()}
 
       <div className="campaign-offers-panel arukereso-preview-filter-panel">
         <div className="arukereso-preview-filters">

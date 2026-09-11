@@ -3,6 +3,7 @@ import {
   createDatabase,
   dataConnectionRuns,
   dataConnections,
+  feedAccessDaily,
   feedChannels,
   feedProductOverrides,
   feedRunItems,
@@ -8778,6 +8779,152 @@ arukeresoApi.get(
     ),
 )
 
+const FEED_ACCESS_USER_AGENT_MAX_LENGTH = 255
+const FEED_ACCESS_RECENT_DAYS_LIMIT = 14
+
+// UTC calendar day (YYYY-MM-DD) for daily aggregates.
+function resolveFeedAccessDay(now: Date): string {
+  return now.toISOString().slice(0, 10)
+}
+
+function truncateFeedAccessUserAgent(
+  userAgent: string | null | undefined,
+): string | null {
+  if (!userAgent) {
+    return null
+  }
+
+  const trimmed = userAgent.trim()
+
+  if (trimmed === '') {
+    return null
+  }
+
+  return trimmed.length >
+    FEED_ACCESS_USER_AGENT_MAX_LENGTH
+    ? trimmed.slice(
+        0,
+        FEED_ACCESS_USER_AGENT_MAX_LENGTH,
+      )
+    : trimmed
+}
+
+// Conservative derivation only: true when the UA
+// explicitly names Árukereső (diacritics normalized,
+// since Hungarian text may spell it with Á). Anything
+// else stays neutral — absence of the token proves
+// nothing.
+function isLikelyArukeresoRequest(
+  userAgent: string | null,
+): boolean {
+  if (
+    typeof userAgent !== 'string' ||
+    userAgent.length === 0
+  ) {
+    return false
+  }
+
+  const normalized = userAgent
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+
+  return /arukereso/i.test(normalized)
+}
+
+type FeedAccessDayRow = {
+  day: string
+  requestCount: number
+  lastRequestedAt: Date | string | null
+  lastServedRunId: string | null
+  lastUserAgent: string | null
+}
+
+function toFeedAccessStatusView(
+  rows: FeedAccessDayRow[],
+  todayDay: string,
+  recentLimit: number = FEED_ACCESS_RECENT_DAYS_LIMIT,
+) {
+  const toEntry = (row: FeedAccessDayRow) => ({
+    day: row.day,
+    requestCount: row.requestCount,
+    lastRequestedAt:
+      row.lastRequestedAt instanceof Date
+        ? row.lastRequestedAt.toISOString()
+        : row.lastRequestedAt,
+    lastServedRunId: row.lastServedRunId,
+    lastUserAgent: row.lastUserAgent,
+    likelyArukereso: isLikelyArukeresoRequest(
+      row.lastUserAgent,
+    ),
+  })
+  const sorted = [...rows].sort((left, right) =>
+    left.day < right.day
+      ? 1
+      : left.day > right.day
+        ? -1
+        : 0,
+  )
+  const recentDays = sorted
+    .slice(0, Math.max(0, recentLimit))
+    .map(toEntry)
+  const today =
+    sorted.find((row) => row.day === todayDay) ??
+    null
+
+  return {
+    today: today ? toEntry(today) : null,
+    recentDays,
+  }
+}
+
+// Best-effort access tracking. Never throws: feed
+// delivery must not depend on it.
+async function recordFeedAccessServe(input: {
+  database: ReturnType<typeof requireDatabase>
+  channelId: string
+  runId: string | null
+  userAgent: string | null | undefined
+  now?: Date
+}): Promise<void> {
+  try {
+    const now = input.now ?? new Date()
+    const userAgent =
+      truncateFeedAccessUserAgent(
+        input.userAgent,
+      )
+
+    await input.database
+      .insert(feedAccessDaily)
+      .values({
+        channelId: input.channelId,
+        day: resolveFeedAccessDay(now),
+        requestCount: 1,
+        lastRequestedAt: now,
+        lastServedRunId: input.runId,
+        lastUserAgent: userAgent,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [
+          feedAccessDaily.channelId,
+          feedAccessDaily.day,
+        ],
+        set: {
+          requestCount: sql`${feedAccessDaily.requestCount} + 1`,
+          lastRequestedAt: now,
+          lastServedRunId: input.runId,
+          lastUserAgent: userAgent,
+          updatedAt: now,
+        },
+      })
+  } catch (error) {
+    console.error(
+      'Feed access tracking failed; serving feed anyway:',
+      error,
+    )
+  }
+}
+
 // Dedicated public Árukereső feed. Served directly by
 // the API deployment (same pattern as the Cockpit
 // pricing sync); it does not pass through the
@@ -8827,6 +8974,19 @@ arukeresoApi.get(
           channel,
         })
 
+        // Only successful GET deliveries are counted;
+        // tracking can never fail the response.
+        if (context.req.method === 'GET') {
+          await recordFeedAccessServe({
+            database,
+            channelId: channel.id,
+            runId: null,
+            userAgent: context.req.header(
+              'User-Agent',
+            ),
+          })
+        }
+
         return new Response(csv, {
           headers: {
             'Content-Type':
@@ -8851,6 +9011,17 @@ arukeresoApi.get(
       const { csv, fileName } =
         await buildFeedRunCsv(latestRunId)
 
+      if (context.req.method === 'GET') {
+        await recordFeedAccessServe({
+          database,
+          channelId: channel.id,
+          runId: latestRunId,
+          userAgent: context.req.header(
+            'User-Agent',
+          ),
+        })
+      }
+
       return new Response(csv, {
         headers: {
           'Content-Type':
@@ -8862,6 +9033,74 @@ arukeresoApi.get(
       })
     } catch {
       return notFound()
+    }
+  },
+)
+
+arukeresoApi.get(
+  '/feed/access-status',
+  async (context) => {
+    try {
+      const { database, channel } =
+        await resolveFeedChannel()
+
+      if (!channel) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'Az Árukereső feed csatorna nincs konfigurálva.',
+          },
+          409,
+        )
+      }
+
+      const rows = await database
+        .select({
+          day: feedAccessDaily.day,
+          requestCount:
+            feedAccessDaily.requestCount,
+          lastRequestedAt:
+            feedAccessDaily.lastRequestedAt,
+          lastServedRunId:
+            feedAccessDaily.lastServedRunId,
+          lastUserAgent:
+            feedAccessDaily.lastUserAgent,
+        })
+        .from(feedAccessDaily)
+        .where(
+          eq(
+            feedAccessDaily.channelId,
+            channel.id,
+          ),
+        )
+        .orderBy(desc(feedAccessDaily.day))
+        .limit(FEED_ACCESS_RECENT_DAYS_LIMIT)
+
+      return context.json({
+        status: 'ok',
+        channel: FEED_CHANNEL_CODE,
+        ...toFeedAccessStatusView(
+          rows,
+          resolveFeedAccessDay(new Date()),
+        ),
+      })
+    } catch (error) {
+      console.error(
+        'Feed access status failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Feed access status failed.',
+        },
+        500,
+      )
     }
   },
 )
@@ -10353,4 +10592,11 @@ export {
   derivePricingItemFeedState,
   selectPrunableFeedRunIds,
   FEED_RUN_ITEMS_RETAINED_RUNS,
+  resolveFeedAccessDay,
+  truncateFeedAccessUserAgent,
+  isLikelyArukeresoRequest,
+  toFeedAccessStatusView,
+  recordFeedAccessServe,
+  FEED_ACCESS_USER_AGENT_MAX_LENGTH,
+  FEED_ACCESS_RECENT_DAYS_LIMIT,
 }

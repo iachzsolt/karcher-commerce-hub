@@ -1,5 +1,6 @@
 import {
   boolean,
+  date,
   index,
   integer,
   pgEnum,
@@ -1973,5 +1974,54 @@ export const feedRunItems = pgTable(
       table.runId,
       table.decision,
     ),
+  ],
+)
+
+/* ============================================================
+   FEED ACCESS TRACKING
+   Tiny daily aggregates of successful public feed requests.
+   No raw IPs, no per-request rows, no request bodies.
+   ============================================================ */
+
+export const feedAccessDaily = pgTable(
+  'feed_access_daily',
+  {
+    id: uuid('id')
+      .defaultRandom()
+      .primaryKey(),
+
+    channelId: uuid('channel_id')
+      .notNull()
+      .references(() => feedChannels.id),
+
+    day: date('day', { mode: 'string' }).notNull(),
+
+    requestCount: integer('request_count')
+      .notNull()
+      .default(0),
+
+    lastRequestedAt: timestamp(
+      'last_requested_at',
+      {
+        withTimezone: true,
+      },
+    ),
+
+    lastServedRunId: uuid(
+      'last_served_run_id',
+    ).references(() => feedRuns.id),
+
+    lastUserAgent: text('last_user_agent'),
+
+    updatedAt: timestamp('updated_at', {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex(
+      'feed_access_daily_channel_day_unique',
+    ).on(table.channelId, table.day),
   ],
 )
