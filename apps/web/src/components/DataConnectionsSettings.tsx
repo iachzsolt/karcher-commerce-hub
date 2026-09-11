@@ -273,6 +273,44 @@ const PURPOSE_SECTIONS: Array<{
   },
 ]
 
+function getConnectionHealth(
+  connection: DataConnection,
+): 'active' | 'partial' | 'error' {
+  if (connection.status === 'ERROR') {
+    return 'error'
+  }
+
+  if (
+    connection.isActive &&
+    (connection.status === 'READY' ||
+      connection.status === 'ACTIVE')
+  ) {
+    return 'active'
+  }
+
+  return 'partial'
+}
+
+type PricingStatusResponse = {
+  pricingConnectionIds?: string[]
+  totalRows?: number
+  currentRows?: number
+  latestObservedAt?: string | null
+  dataStatusCounts?: {
+    hasCompetitor?: number
+    noCompetitor?: number
+    partialMarketData?: number
+  }
+  coverage?: {
+    candidateProducts?: number
+    withCurrentPricing?: number
+    missingCurrentPricing?: number
+    percent?: number
+  } | null
+  pricingStatus?: 'HAS_DATA' | 'NO_DATA'
+  message?: string
+}
+
 function DataConnectionsSettings() {
   const [
     connections,
@@ -458,9 +496,69 @@ function DataConnectionsSettings() {
       }
     }
 
+  const [
+    pricingStatus,
+    setPricingStatus,
+  ] = useState<PricingStatusResponse | null>(
+    null,
+  )
+
+  const [
+    pricingStatusLoading,
+    setPricingStatusLoading,
+  ] = useState(true)
+
+  const [
+    pricingStatusError,
+    setPricingStatusError,
+  ] = useState<string | null>(null)
+
+  async function loadPricingStatus() {
+    setPricingStatusLoading(true)
+    setPricingStatusError(null)
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/arukereso/pricing/status`,
+      )
+      const result =
+        (await response.json()) as PricingStatusResponse
+
+      if (
+        !response.ok ||
+        typeof result.totalRows !== 'number' ||
+        typeof result.currentRows !== 'number'
+      ) {
+        throw new Error(
+          result.message ??
+            'A pricing diagnosztika nem tölthető be.',
+        )
+      }
+
+      setPricingStatus(result)
+    } catch (loadError) {
+      setPricingStatusError(
+        loadError instanceof Error
+          ? loadError.message
+          : 'A pricing diagnosztika nem tölthető be.',
+      )
+      setPricingStatus(null)
+    } finally {
+      setPricingStatusLoading(false)
+    }
+  }
+
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
       void loadConnections()
+    }, 0)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [])
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      void loadPricingStatus()
     }, 0)
 
     return () => window.clearTimeout(timeoutId)
@@ -871,6 +969,245 @@ function DataConnectionsSettings() {
         setWizardBusy(false)
       }
     }
+
+  const renderPriceKitOverview = (
+    rows: ConnectionRow[],
+  ) => {
+    const coverage =
+      pricingStatus?.coverage ?? null
+    const counts =
+      pricingStatus?.dataStatusCounts ?? null
+
+    return (
+      <div className="pricekit-panel">
+        <div className="pricekit-panel-heading">
+          <span className="allegro-settings-eyebrow">
+            PRICING COCKPIT ÁTTEKINTÉS
+          </span>
+        </div>
+
+        {rows.map(({ connection }) => {
+          const health =
+            getConnectionHealth(connection)
+
+          return (
+            <div
+              className="pricekit-source"
+              key={connection.id}
+            >
+              <div className="pricekit-source-top">
+                <div>
+                  <span className="pricekit-block-label">
+                    Pricing Cockpit kapcsolat
+                  </span>
+                  <strong>
+                    {connection.name}
+                  </strong>
+                  <small>
+                    {getSourceLabel(
+                      connection.sourceType,
+                    )}
+                  </small>
+                </div>
+
+                <span
+                  className={
+                    health === 'active'
+                      ? 'platform-status platform-status-active'
+                      : health === 'error'
+                        ? 'connection-status status-error'
+                        : 'platform-status platform-status-disconnected'
+                  }
+                >
+                  <span
+                    className={
+                      health === 'error'
+                        ? undefined
+                        : 'platform-status-dot'
+                    }
+                  />
+                  {health === 'active'
+                    ? 'Aktív'
+                    : health === 'error'
+                      ? 'Hiba'
+                      : 'Inaktív'}
+                </span>
+              </div>
+
+              <div className="connection-metrics-grid">
+                <div>
+                  <span>
+                    Kapcsolat állapota
+                  </span>
+
+                  <strong>
+                    {getStatusLabel(
+                      connection.status,
+                    )}
+                  </strong>
+                </div>
+
+                <div>
+                  <span>
+                    Utolsó frissítés
+                  </span>
+
+                  <strong className="connection-date-value">
+                    {connection.lastSuccessfulAt
+                      ? formatDate(
+                          connection.lastSuccessfulAt,
+                        )
+                      : 'Nincs adat'}
+                  </strong>
+                </div>
+              </div>
+            </div>
+          )
+        })}
+
+        <div className="pricekit-source">
+          <div className="pricekit-source-top">
+            <div>
+              <span className="pricekit-block-label">
+                Pricing Cockpit adatállapot
+              </span>
+
+              {pricingStatusLoading ? (
+                <strong>
+                  Betöltés…
+                </strong>
+              ) : pricingStatus ? (
+                <strong className="pricekit-neutral">
+                  {pricingStatus.pricingStatus ===
+                  'HAS_DATA'
+                    ? 'Van adat'
+                    : 'Nincs adat'}
+                </strong>
+              ) : (
+                <strong className="pricekit-neutral">
+                  Nincs adat
+                </strong>
+              )}
+            </div>
+          </div>
+
+          {pricingStatusError ? (
+            <p className="hub-muted-line">
+              A pricing diagnosztika nem
+              érhető el.
+            </p>
+          ) : pricingStatus ? (
+            <div className="connection-metrics-grid">
+              <div>
+                <span>
+                  Legutóbbi pricing adat
+                </span>
+
+                <strong className="connection-date-value">
+                  {pricingStatus.latestObservedAt
+                    ? formatDate(
+                        pricingStatus.latestObservedAt,
+                      )
+                    : 'Nincs adat'}
+                </strong>
+              </div>
+
+              <div>
+                <span>
+                  Összes pricing sor
+                </span>
+
+                <strong>
+                  {pricingStatus.totalRows}
+                </strong>
+              </div>
+
+              <div>
+                <span>
+                  Aktuális pricing adatok
+                </span>
+
+                <strong>
+                  {pricingStatus.currentRows}
+                </strong>
+              </div>
+
+              {counts && (
+                <div>
+                  <span>
+                    Piaci adatállapot
+                  </span>
+
+                  <strong>
+                    {counts.hasCompetitor} van ·{' '}
+                    {counts.noCompetitor} nincs ·{' '}
+                    {counts.partialMarketData}{' '}
+                    részleges
+                  </strong>
+                </div>
+              )}
+            </div>
+          ) : null}
+
+          {coverage && (
+            <div className="pricekit-coverage">
+              <span>
+                Lefedettség a katalógushoz
+                képest
+              </span>
+
+              <strong>
+                {coverage.withCurrentPricing} /{' '}
+                {coverage.candidateProducts}{' '}
+                termék ·{' '}
+                {String(
+                  coverage.percent ?? 0,
+                ).replace('.', ',')}
+                %
+              </strong>
+
+              <small>
+                A Pricing Cockpit jelenleg a
+                katalógus kiválasztott
+                termékkörét fedi le.
+              </small>
+            </div>
+          )}
+
+        </div>
+
+        <div className="pricekit-fields">
+          <span>
+            Észlelt ármezők
+          </span>
+
+          <div>
+            {[
+              'Piaci index',
+              'Mediánindex',
+              'Átlagindex',
+              'Piaci adatállapot',
+            ].map((field) => (
+              <span
+                className="pricekit-chip"
+                key={field}
+              >
+                {field}
+              </span>
+            ))}
+          </div>
+
+          <small>
+            A Pricing Cockpit piaci
+            árpozíció-indexeket szállít;
+            abszolút aktuális- vagy akciós
+            ármező nem része a jelenlegi
+            adatfolyamnak.
+          </small>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <section className="hub-section data-connections-section">
@@ -1363,6 +1700,11 @@ function DataConnectionsSettings() {
                     </button>
                   )}
                 </div>
+
+                {section.group ===
+                  'PRICING' &&
+                  rows.length > 0 &&
+                  renderPriceKitOverview(rows)}
 
                 {rows.length === 0 ? (
                   <p className="hub-muted-line">

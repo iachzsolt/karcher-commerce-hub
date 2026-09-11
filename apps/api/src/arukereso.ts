@@ -4613,6 +4613,309 @@ arukeresoApi.post(
   },
 )
 
+// Pricing data state is intentionally conservative:
+// coverage percent is informational only because no
+// authoritative target assortment exists against
+// which completeness could be judged.
+type PricingDiagnosticsStatus =
+  | 'HAS_DATA'
+  | 'NO_DATA'
+
+type PricingDiagnosticsRow = {
+  productId: string | null
+  dataStatus: string | null
+  observedAt: Date | null
+}
+
+type PricingCoverage = {
+  candidateProducts: number
+  withCurrentPricing: number
+  missingCurrentPricing: number
+  percent: number
+}
+
+function computePricingDiagnostics(input: {
+  rows: PricingDiagnosticsRow[]
+  // Distinct candidate product IDs from the single
+  // active catalog connection, or null when no
+  // unambiguous catalog source exists. This mirrors
+  // the V4 feed candidate universe without
+  // duplicating eligibility rules.
+  candidateProductIds: string[] | null
+}): {
+  totalRows: number
+  currentRows: number
+  latestObservedAt: string | null
+  dataStatusCounts: {
+    hasCompetitor: number
+    noCompetitor: number
+    partialMarketData: number
+  }
+  coverage: PricingCoverage | null
+  pricingStatus: PricingDiagnosticsStatus
+} {
+  // Freshness rule reused from the feed logic:
+  // pricing rows are replaced snapshot-style and an
+  // existing row is current data regardless of
+  // observedAt (see resolvePriceKitStatus). There is
+  // no age threshold, so stale rows cannot be
+  // derived from existing data.
+  const currentRows = input.rows.filter(
+    (row) => row.productId !== null,
+  )
+
+  let latestObservedAt: string | null = null
+
+  for (const row of currentRows) {
+    if (row.observedAt instanceof Date) {
+      const iso = row.observedAt.toISOString()
+
+      if (
+        latestObservedAt === null ||
+        iso > latestObservedAt
+      ) {
+        latestObservedAt = iso
+      }
+    }
+  }
+
+  const dataStatusCounts = {
+    hasCompetitor: 0,
+    noCompetitor: 0,
+    partialMarketData: 0,
+  }
+
+  for (const row of currentRows) {
+    if (row.dataStatus === 'HAS_COMPETITOR') {
+      dataStatusCounts.hasCompetitor += 1
+    } else if (
+      row.dataStatus === 'NO_COMPETITOR'
+    ) {
+      dataStatusCounts.noCompetitor += 1
+    } else {
+      dataStatusCounts.partialMarketData += 1
+    }
+  }
+
+  let coverage: PricingCoverage | null = null
+
+  if (input.candidateProductIds !== null) {
+    const pricedProductIds = new Set(
+      currentRows.flatMap((row) =>
+        row.productId === null
+          ? []
+          : [row.productId],
+      ),
+    )
+    const withCurrentPricing =
+      input.candidateProductIds.filter((id) =>
+        pricedProductIds.has(id),
+      ).length
+    const missingCurrentPricing =
+      input.candidateProductIds.length -
+      withCurrentPricing
+
+    coverage = {
+      candidateProducts:
+        input.candidateProductIds.length,
+      withCurrentPricing,
+      missingCurrentPricing,
+      percent:
+        input.candidateProductIds.length === 0
+          ? 0
+          : Math.round(
+              (withCurrentPricing /
+                input.candidateProductIds.length) *
+                1000,
+            ) / 10,
+    }
+  }
+
+  // Coverage stays a neutral informational metric:
+  // low percent is expected while Pricing Cockpit
+  // manages a selected subset of the catalog.
+  const pricingStatus: PricingDiagnosticsStatus =
+    currentRows.length === 0
+      ? 'NO_DATA'
+      : 'HAS_DATA'
+
+  return {
+    totalRows: input.rows.length,
+    currentRows: currentRows.length,
+    latestObservedAt,
+    dataStatusCounts,
+    coverage,
+    pricingStatus,
+  }
+}
+
+arukeresoApi.get(
+  '/pricing/status',
+  async (context) => {
+    try {
+      const database = requireDatabase()
+
+      // Same connection filters as the V4 feed output:
+      // every active PRICING connection, HU/HUF rows.
+      const [pricingConnections, catalogConnections] =
+        await Promise.all([
+          database
+            .select({
+              id: dataConnections.id,
+            })
+            .from(dataConnections)
+            .where(
+              and(
+                eq(
+                  dataConnections.purpose,
+                  'PRICING',
+                ),
+                eq(
+                  dataConnections.isActive,
+                  true,
+                ),
+              ),
+            ),
+          database
+            .select({
+              id: dataConnections.id,
+            })
+            .from(dataConnections)
+            .where(
+              and(
+                eq(
+                  dataConnections.sourceType,
+                  'CSV_UPLOAD',
+                ),
+                eq(
+                  dataConnections.purpose,
+                  'CATALOG',
+                ),
+                eq(
+                  dataConnections.isActive,
+                  true,
+                ),
+              ),
+            ),
+        ])
+
+      const pricingConnectionIds =
+        pricingConnections.map(
+          (connection) => connection.id,
+        )
+
+      const pricingRows =
+        pricingConnectionIds.length > 0
+          ? await database
+              .select({
+                productId:
+                  pricingSourceItems.productId,
+                dataStatus:
+                  pricingSourceItems.dataStatus,
+                observedAt:
+                  pricingSourceItems.observedAt,
+              })
+              .from(pricingSourceItems)
+              .where(
+                and(
+                  inArray(
+                    pricingSourceItems.connectionId,
+                    pricingConnectionIds,
+                  ),
+                  eq(
+                    pricingSourceItems.marketCode,
+                    'HU',
+                  ),
+                  eq(
+                    pricingSourceItems.currency,
+                    'HUF',
+                  ),
+                ),
+              )
+          : []
+
+      // Coverage reuses the V4 candidate universe:
+      // matched catalog rows of the single active
+      // catalog connection. Any other catalog state
+      // yields no coverage rather than a guess.
+      let candidateProductIds:
+        | string[]
+        | null = null
+
+      if (
+        catalogConnections.length === 1 &&
+        catalogConnections[0]
+      ) {
+        const catalogRows = await database
+          .select({
+            productId:
+              catalogSourceItems.productId,
+            sku: products.sku,
+          })
+          .from(catalogSourceItems)
+          .leftJoin(
+            products,
+            eq(
+              products.id,
+              catalogSourceItems.productId,
+            ),
+          )
+          .where(
+            and(
+              eq(
+                catalogSourceItems.connectionId,
+                catalogConnections[0].id,
+              ),
+              eq(
+                catalogSourceItems.matchStatus,
+                'MATCHED',
+              ),
+            ),
+          )
+
+        candidateProductIds = [
+          ...new Set(
+            catalogRows.flatMap((row) =>
+              row.productId === null ||
+              row.sku === null
+                ? []
+                : [row.productId],
+            ),
+          ),
+        ]
+      }
+
+      const diagnostics =
+        computePricingDiagnostics({
+          rows: pricingRows,
+          candidateProductIds,
+        })
+
+      return context.json({
+        status: 'ok',
+        pricingConnectionIds,
+        ...diagnostics,
+      })
+    } catch (error) {
+      console.error(
+        'Pricing status failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Pricing status failed.',
+        },
+        500,
+      )
+    }
+  },
+)
+
 const PROMOTION_PREVIEW_LIMIT_DEFAULT = 100
 const PROMOTION_PREVIEW_LIMIT_MAX = 500
 
@@ -9515,4 +9818,5 @@ export {
   FEED_ELIGIBILITY_DEFAULT_SETTINGS,
   FEED_CHANNEL_CODE,
   FEED_GENERATOR_VERSION,
+  computePricingDiagnostics,
 }
