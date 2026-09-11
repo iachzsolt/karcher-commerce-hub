@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { API_BASE_URL } from '../config/api'
+import {
+  aggregateListingStories,
+  summarizeRefreshRun,
+  summarizeStories,
+  type ListingStory,
+  type StoryEventInput,
+} from '../utils/inventoryRefreshStories'
 const DAY_MS = 24 * 60 * 60 * 1000
 
 type AllegroHistoryEvent = {
@@ -80,59 +87,6 @@ type SyncMetadata = {
   remoteStock?: number | null
   fromStock?: number | null
   toStock?: number | null
-}
-
-function summarizeSyncEvents(events: AllegroHistoryEvent[]) {
-  let stockIncreased = 0
-  let stockDecreased = 0
-  let unchanged = 0
-  let activated = 0
-  let inactivated = 0
-  let skipped = 0
-  let pending = 0
-  let failed = 0
-
-  for (const event of events) {
-    const metadata = getSyncMetadata(event)
-    const action = event.oldValue ?? ''
-    const status = event.newValue ?? ''
-
-    if (
-      status === 'SUCCESS' &&
-      metadata?.fromStock !== null &&
-      metadata?.fromStock !== undefined &&
-      metadata?.toStock !== null &&
-      metadata?.toStock !== undefined
-    ) {
-      if (metadata.toStock > metadata.fromStock) stockIncreased++
-      if (metadata.toStock < metadata.fromStock) stockDecreased++
-    }
-
-    if (status === 'NO_CHANGE' || status === 'ALREADY_AUTO_PAUSED') unchanged++
-    if (
-      status === 'SUCCESS' &&
-      (action.includes('ACTIVATE') || action.includes('REACTIVATION'))
-    ) activated++
-    if (
-      status === 'SUCCESS' &&
-      (action === 'END' || action === 'ADOPT_AUTO_PAUSE')
-    ) inactivated++
-    if (action === 'SKIP') skipped++
-    if (status === 'PENDING' || status === 'REACTIVATION_IN_PROGRESS') pending++
-    if (status === 'FAILED') failed++
-  }
-
-  return {
-    total: events.length,
-    stockIncreased,
-    stockDecreased,
-    unchanged,
-    activated,
-    inactivated,
-    skipped,
-    pending,
-    failed,
-  }
 }
 
 type HistoryDayItem =
@@ -503,38 +457,279 @@ function HistoryRunSummary({
   )
 }
 
-function SyncHistoryGroup({ events }: { events: AllegroHistoryEvent[] }) {
-  const summary = summarizeSyncEvents(events)
-  const changeCount = events.filter((event) => {
-    const action = event.oldValue ?? ''
+type StoryFilter =
+  | 'CHANGED'
+  | 'ALL'
+  | 'ACTIVATED'
+  | 'AUTO_PAUSED'
+  | 'STOCK_CHANGED'
+  | 'SKIPPED'
+  | 'FAILED'
 
-    return (
-      event.newValue === 'SUCCESS' &&
-      action !== 'NONE' &&
-      action !== 'SKIP'
-    )
-  }).length
+const STORY_FILTER_LABELS: Record<StoryFilter, string> = {
+  CHANGED: 'Módosult',
+  ALL: 'Összes',
+  ACTIVATED: 'Aktivált',
+  AUTO_PAUSED: 'Lekapcsolt',
+  STOCK_CHANGED: 'Készletváltozás',
+  SKIPPED: 'Kihagyott',
+  FAILED: 'Hibás',
+}
+
+function toStoryInput(
+  event: AllegroHistoryEvent,
+): StoryEventInput {
+  const metadata = getSyncMetadata(event)
+
+  return {
+    id: event.id,
+    listingId: event.listingId,
+    offerId: event.offerId,
+    sku: event.sku,
+    listingName: event.listingName,
+    action: event.oldValue ?? '',
+    status: event.newValue ?? '',
+    occurredAt: event.occurredAt,
+    metadata: metadata
+      ? {
+          historyGroupId:
+            metadata.historyGroupId ?? null,
+          publicationStatus:
+            metadata.publicationStatus ?? null,
+          targetStock:
+            metadata.targetStock ?? null,
+          remoteStock:
+            metadata.remoteStock ?? null,
+          fromStock:
+            metadata.fromStock ?? null,
+          toStock: metadata.toStock ?? null,
+        }
+      : null,
+  }
+}
+
+function storyMatchesFilter(
+  story: ListingStory,
+  filter: StoryFilter,
+): boolean {
+  switch (filter) {
+    case 'ALL':
+      return true
+    case 'ACTIVATED':
+      return story.businessResult === 'ACTIVATED'
+    case 'AUTO_PAUSED':
+      return story.businessResult === 'AUTO_PAUSED'
+    case 'STOCK_CHANGED':
+      return story.stockChanged
+    case 'SKIPPED':
+      return (
+        story.businessResult === 'SKIPPED' ||
+        story.businessResult === 'MANUAL_SKIPPED'
+      )
+    case 'FAILED':
+      return story.businessResult === 'FAILED'
+    case 'CHANGED':
+      return story.businessResult !== 'NO_ACTION'
+  }
+}
+
+function storyMatchesSearch(
+  story: ListingStory,
+  query: string,
+): boolean {
+  const needle = query.trim().toLowerCase()
+
+  if (needle === '') return true
+
+  return (
+    story.sku.toLowerCase().includes(needle) ||
+    story.listingName
+      .toLowerCase()
+      .includes(needle)
+  )
+}
+
+function ListingStoryRow({
+  story,
+  eventById,
+  expanded,
+  onToggle,
+}: {
+  story: ListingStory
+  eventById: Map<string, AllegroHistoryEvent>
+  expanded: boolean
+  onToggle: () => void
+}) {
+  const statusClass =
+    story.status === 'success'
+      ? 'is-success'
+      : story.status === 'failed'
+        ? 'is-failed'
+        : story.status === 'pending'
+          ? 'is-pending'
+          : ''
+
+  return (
+    <article className="allegro-history-story">
+      <button
+        type="button"
+        className="allegro-history-story-main"
+        aria-expanded={expanded}
+        onClick={onToggle}
+      >
+        <span className="allegro-history-story-identity">
+          <strong>{story.sku}</strong>
+          <span>{story.listingName}</span>
+          <small>
+            {story.eventCount} esemény
+          </small>
+        </span>
+        <span className="allegro-history-story-stock">
+          {story.stockFrom !== null &&
+          story.stockTo !== null
+            ? `${story.stockFrom} → ${story.stockTo}`
+            : '–'}
+        </span>
+        <span className="allegro-history-story-result">
+          {story.resultLabel}
+        </span>
+        <span
+          className={`allegro-history-run-status ${statusClass}`}
+        >
+          {story.statusLabel}
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="allegro-history-story-details">
+          <dl className="allegro-history-story-meta">
+            <div>
+              <dt>Ajánlat</dt>
+              <dd>{story.offerId || '–'}</dd>
+            </div>
+            <div>
+              <dt>Listing</dt>
+              <dd>{story.listingId}</dd>
+            </div>
+            <div>
+              <dt>Csoport</dt>
+              <dd>
+                {story.events[0]?.metadata
+                  ?.historyGroupId ?? '–'}
+              </dd>
+            </div>
+          </dl>
+
+          {story.events.map((input) => {
+            const event = eventById.get(input.id)
+
+            return event ? (
+              <HistoryEventRow
+                event={event}
+                key={event.id}
+              />
+            ) : null
+          })}
+
+          <details className="allegro-history-tech">
+            <summary>Nyers metaadatok</summary>
+            <pre>
+              {JSON.stringify(
+                story.events.map(
+                  (input) => input.metadata,
+                ),
+                null,
+                2,
+              )}
+            </pre>
+          </details>
+        </div>
+      )}
+    </article>
+  )
+}
+
+function SyncHistoryGroup({
+  events,
+}: {
+  events: AllegroHistoryEvent[]
+}) {
+  const [search, setSearch] = useState('')
+  const [appliedSearch, setAppliedSearch] =
+    useState('')
+  const [filter, setFilter] =
+    useState<StoryFilter>('CHANGED')
+  const [expanded, setExpanded] = useState<
+    Set<string>
+  >(new Set())
+
+  const stories = useMemo(
+    () =>
+      aggregateListingStories(
+        events.map(toStoryInput),
+      ),
+    [events],
+  )
+  const eventById = useMemo(
+    () =>
+      new Map(
+        events.map((event) => [
+          event.id,
+          event,
+        ]),
+      ),
+    [events],
+  )
+  const summary = useMemo(
+    () => summarizeStories(stories),
+    [stories],
+  )
+  const visibleStories = stories.filter(
+    (story) =>
+      storyMatchesFilter(story, filter) &&
+      storyMatchesSearch(story, appliedSearch),
+  )
+
+  function toggleStory(listingId: string) {
+    setExpanded((current) => {
+      const next = new Set(current)
+
+      if (next.has(listingId)) {
+        next.delete(listingId)
+      } else {
+        next.add(listingId)
+      }
+
+      return next
+    })
+  }
+
+  function applySearch() {
+    setAppliedSearch(search.trim())
+  }
+
   const tone: HistoryRunTone =
     summary.failed > 0
-      ? 'failed'
+      ? summary.failed < summary.affected
+        ? 'pending'
+        : 'failed'
       : summary.pending > 0
         ? 'pending'
-        : 'neutral'
+        : 'success'
   const status =
     summary.failed > 0
-      ? 'Hibás tétel'
+      ? summary.failed < summary.affected
+        ? 'Részben sikeres'
+        : 'Sikertelen'
       : summary.pending > 0
-        ? 'Függő tétel'
-        : 'Rögzítve'
+        ? 'Függőben'
+        : 'Sikeres'
   const metrics = [
-    ['Vizsgált ajánlat', summary.total, 'total'],
-    ['Készlet nőtt', summary.stockIncreased, 'positive'],
-    ['Készlet csökkent', summary.stockDecreased, 'negative'],
-    ['Nem változott', summary.unchanged, 'neutral'],
+    ['Érintett ajánlat', summary.affected, 'total'],
+    ['Készlet változott', summary.stockChanged, 'neutral'],
     ['Aktiválva', summary.activated, 'positive'],
-    ['Inaktiválva', summary.inactivated, 'negative'],
+    ['Lekapcsolva', summary.autoPaused, 'warning'],
     ['Kihagyva', summary.skipped, 'warning'],
-    ['Függőben', summary.pending, 'warning'],
     ['Sikertelen', summary.failed, 'negative'],
   ] as const
 
@@ -545,25 +740,100 @@ function SyncHistoryGroup({ events }: { events: AllegroHistoryEvent[] }) {
         subtitle={formatTime(events[0].occurredAt)}
         status={status}
         tone={tone}
-        changeLabel={`${changeCount} változás`}
+        changeLabel={`${summary.affected} érintett ajánlat`}
       />
       <div className="allegro-history-run-details">
         <div className="allegro-history-sync-metrics">
-          {metrics.map(([label, value, tone]) =>
-            value > 0 || tone === 'total' ? (
+          {metrics.map(([label, value, metricTone]) =>
+            value > 0 ||
+            metricTone === 'total' ? (
               <span
-                className={`allegro-history-sync-metric is-${tone}`}
+                className={`allegro-history-sync-metric is-${metricTone}`}
                 key={label}
               >
                 {label}: <strong>{value}</strong>
               </span>
             ) : null,
           )}
+          {summary.pending > 0 && (
+            <span className="allegro-history-sync-metric is-warning">
+              Függőben:{' '}
+              <strong>{summary.pending}</strong>
+            </span>
+          )}
+          {summary.noAction > 0 && (
+            <span className="allegro-history-sync-metric is-neutral">
+              Nincs teendő:{' '}
+              <strong>{summary.noAction}</strong>
+            </span>
+          )}
         </div>
-        <div className="allegro-history-events">
-          {events.map((event) => (
-            <HistoryEventRow event={event} key={event.id} />
-          ))}
+
+        <div className="allegro-history-story-filters">
+          <input
+            type="search"
+            value={search}
+            placeholder="SKU vagy termék keresése…"
+            onChange={(event) =>
+              setSearch(event.target.value)
+            }
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                applySearch()
+              }
+            }}
+          />
+          <select
+            value={filter}
+            onChange={(event) =>
+              setFilter(
+                event.target.value as StoryFilter,
+              )
+            }
+            aria-label="Eredményszűrő"
+          >
+            {(
+              Object.keys(
+                STORY_FILTER_LABELS,
+              ) as StoryFilter[]
+            ).map((option) => (
+              <option
+                key={option}
+                value={option}
+              >
+                {STORY_FILTER_LABELS[option]}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={applySearch}
+          >
+            Szűrés
+          </button>
+        </div>
+
+        <div className="allegro-history-stories">
+          {visibleStories.length === 0 ? (
+            <p className="allegro-history-run-note">
+              Nincs a szűrőknek megfelelő ajánlat.
+            </p>
+          ) : (
+            visibleStories.map((story) => (
+              <ListingStoryRow
+                key={story.listingId}
+                story={story}
+                eventById={eventById}
+                expanded={expanded.has(
+                  story.listingId,
+                )}
+                onToggle={() =>
+                  toggleStory(story.listingId)
+                }
+              />
+            ))
+          )}
         </div>
       </div>
     </details>
@@ -660,63 +930,117 @@ function InventoryRefreshHistoryGroup({
   const isStale =
     run.status === 'RUNNING' &&
     now - new Date(run.startedAt).getTime() > 2 * 60 * 60 * 1000
+  // The overall state below derives ONLY from this run's own
+  // persisted fields. The backend already folds the Allegro
+  // automation outcome into run.status (FAILED on automation
+  // failure), so no cross-referencing with sync groups by
+  // day or timestamp is used — a run is never matched to a
+  // sync result it does not own. No persisted run→sync link
+  // exists (historyGroupId lives only in SYNC event
+  // metadata), hence source import and Allegro sync stay
+  // separate truthful blocks.
+  const overall = summarizeRefreshRun({
+    status: run.status,
+    importStatus: run.importStatus,
+  })
   const tone: HistoryRunTone =
-    run.status === 'COMPLETED'
-      ? 'success'
-      : run.status === 'FAILED' || isStale
-        ? 'failed'
-        : run.status === 'SUCCESS' || run.status === 'IMPORT_ONLY'
-          ? 'neutral'
-          : 'pending'
-  const status =
-    run.status === 'COMPLETED'
+    isStale || overall.overall === 'failed'
+      ? 'failed'
+      : overall.overall === 'success'
+        ? 'success'
+        : overall.overall === 'partial' ||
+            overall.overall === 'running'
+          ? 'pending'
+          : 'neutral'
+  const status = isStale
+    ? 'Megszakadt'
+    : overall.overall === 'success'
       ? 'Sikeres'
-      : run.status === 'FAILED'
-        ? 'Sikertelen'
-        : run.status === 'IMPORT_ONLY'
-          ? 'Csak beolvasás'
-          : run.status === 'SUCCESS'
-            ? 'Nem ellenőrizhető'
-            : isStale
-              ? 'Megszakadt'
+      : overall.overall === 'partial'
+        ? 'Részben sikeres'
+        : overall.overall === 'failed'
+          ? 'Sikertelen'
+          : overall.overall === 'import-only'
+            ? 'Csak beolvasás'
+            : overall.overall === 'legacy'
+              ? 'Nem ellenőrizhető'
               : 'Folyamatban'
-  const metrics = [
-    ['Importált sor', run.rowsImported],
-    ['Forrásváltozás', run.changedItemCount],
-  ] as const
+  const allegroSyncNote =
+    overall.overall === 'success'
+      ? 'Az Allegro szinkron sikeres.'
+      : overall.overall === 'partial'
+        ? 'Az Allegro szinkron részben sikerült.'
+        : overall.overall === 'failed' &&
+            (run.importStatus === 'SUCCESS' ||
+              run.importStatus === 'NO_CHANGE')
+          ? 'Az Allegro szinkron nem futott le.'
+          : null
 
   return (
     <details className="allegro-history-run">
       <HistoryRunSummary
-        title={
-          run.triggerType === 'SCHEDULED'
-            ? 'Ütemezett készletfutás'
-            : 'Készletforrás-frissítés'
-        }
+        title="Készletfrissítés"
         subtitle={`${formatTime(run.startedAt)} · ${run.triggerType === 'SCHEDULED' ? 'automatikus' : 'kézi'}`}
         status={status}
         tone={tone}
         changeLabel={`${run.changedItemCount} változás`}
       />
       <div className="allegro-history-run-details">
-        <div className="allegro-history-sync-metrics">
-          {metrics.map(([label, value]) => (
-            <span className="allegro-history-sync-metric" key={label}>
-              {label}: <strong>{value}</strong>
-            </span>
-          ))}
-          {run.importStatus && (
-            <span className="allegro-history-sync-metric">
-              Import: <strong>{run.importStatus}</strong>
-            </span>
-          )}
-          <span className="allegro-history-sync-metric">
-            Befejezés:{' '}
-            <strong>{run.finishedAt ? formatTime(run.finishedAt) : 'nincs rögzítve'}</strong>
+        {overall.helper && (
+          <p className="allegro-history-run-note allegro-history-run-lead">
+            {overall.helper}
+          </p>
+        )}
+
+        <div className="allegro-history-stage">
+          <span className="allegro-settings-eyebrow">
+            FORRÁSIMPORT
           </span>
+          <div className="allegro-history-sync-metrics">
+            <span className="allegro-history-sync-metric">
+              Importált sor:{' '}
+              <strong>{run.rowsImported}</strong>
+            </span>
+            <span className="allegro-history-sync-metric">
+              Forrásváltozás:{' '}
+              <strong>{run.changedItemCount}</strong>
+            </span>
+            {run.importStatus && (
+              <span className="allegro-history-sync-metric">
+                Import:{' '}
+                <strong>{run.importStatus}</strong>
+              </span>
+            )}
+            <span className="allegro-history-sync-metric">
+              Befejezés:{' '}
+              <strong>{run.finishedAt ? formatTime(run.finishedAt) : 'nincs rögzítve'}</strong>
+            </span>
+          </div>
         </div>
+
+        <div className="allegro-history-stage">
+          <span className="allegro-settings-eyebrow">
+            ALLEGRO SZINKRON
+          </span>
+          {allegroSyncNote ? (
+            <p className="allegro-history-run-note">
+              {allegroSyncNote}
+            </p>
+          ) : (
+            <p className="allegro-history-run-note">
+              Az Allegro szinkron ebben a futásban
+              nem volt értelmezhető.
+            </p>
+          )}
+        </div>
+
         {run.error && (
-          <p className="allegro-history-run-error">{run.error}</p>
+          <details className="allegro-history-tech">
+            <summary>Technikai részletek</summary>
+            <p className="allegro-history-run-note">
+              {run.error}
+            </p>
+          </details>
         )}
       </div>
     </details>
