@@ -4589,6 +4589,64 @@ textarea {
   line-height: 1.5;
 }
 
+.pricekit-items-search {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pricekit-items-search input {
+  flex: 1 1 220px;
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 12px;
+  border: 1px solid #d2d2d2;
+  border-radius: 7px;
+  background: #fff;
+  font: inherit;
+  font-size: 12px;
+}
+
+.pricekit-items-table {
+  min-width: 880px;
+}
+
+.pricekit-items-table td {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.pricekit-items-table td:nth-child(2) {
+  white-space: normal;
+}
+
+.pricekit-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  padding-top: 12px;
+}
+
+.pricekit-pager > span {
+  color: #777777;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.pricekit-pager > div {
+  display: flex;
+  gap: 8px;
+}
+
+.pricekit-note {
+  display: block;
+  color: #777777;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .pricekit-block-label {
   display: block;
   margin-bottom: 5px;

@@ -4916,6 +4916,379 @@ arukeresoApi.get(
   },
 )
 
+const PRICING_ITEMS_DEFAULT_LIMIT = 20
+const PRICING_ITEMS_MAX_LIMIT = 100
+
+type PricingItemRow = {
+  productId: string | null
+  sku: string | null
+  productName: string | null
+  priceIndexBps: number | null
+  medianIndexBps: number | null
+  averageIndexBps: number | null
+  dataStatus: string | null
+  observedAt: Date | null
+}
+
+type PricingItemFeedState =
+  | 'IN_FEED'
+  | 'NOT_IN_FEED'
+  | 'UNKNOWN'
+
+// Collapses duplicate pricing rows for one product to
+// the latest observation, mirroring the V4 feed
+// pricing lookup. Rows without a product link are
+// skipped, same as in feed generation.
+function collapsePricingItemRows(
+  rows: PricingItemRow[],
+): PricingItemRow[] {
+  const byProduct = new Map<string, PricingItemRow>()
+
+  for (const row of rows) {
+    if (row.productId === null) {
+      continue
+    }
+
+    const current = byProduct.get(row.productId)
+
+    if (
+      !current ||
+      (row.observedAt instanceof Date &&
+        (!(
+          current.observedAt instanceof Date
+        ) ||
+          row.observedAt.getTime() >
+            current.observedAt.getTime()))
+    ) {
+      byProduct.set(row.productId, row)
+    }
+  }
+
+  return [...byProduct.values()]
+}
+
+function applyPricingItemSearch(
+  items: PricingItemRow[],
+  query: string,
+): PricingItemRow[] {
+  const needle = query.trim().toLowerCase()
+
+  if (needle === '') {
+    return items
+  }
+
+  return items.filter(
+    (item) =>
+      (item.sku ?? '')
+        .toLowerCase()
+        .includes(needle) ||
+      (item.productName ?? '')
+        .toLowerCase()
+        .includes(needle),
+  )
+}
+
+// V4 membership for a pricing-backed row, mirroring
+// isCatalogFeedItemInV4 without re-running feed
+// eligibility: pricing rows only reach the V4 CSV
+// through a matched catalog product. Activity
+// (original DeliveryTime vs NO) is decided by the
+// live feed rules and is intentionally not derived
+// here.
+function derivePricingItemFeedState(input: {
+  catalogMatched: boolean | null
+}): PricingItemFeedState {
+  if (input.catalogMatched === null) {
+    return 'UNKNOWN'
+  }
+
+  return input.catalogMatched
+    ? 'IN_FEED'
+    : 'NOT_IN_FEED'
+}
+
+arukeresoApi.get(
+  '/pricing/items',
+  async (context) => {
+    try {
+      const requestedLimit = Number(
+        context.req.query('limit') ??
+          PRICING_ITEMS_DEFAULT_LIMIT,
+      )
+      const limit = Number.isFinite(
+        requestedLimit,
+      )
+        ? Math.min(
+            Math.max(
+              Math.trunc(requestedLimit),
+              0,
+            ),
+            PRICING_ITEMS_MAX_LIMIT,
+          )
+        : PRICING_ITEMS_DEFAULT_LIMIT
+      const requestedOffset = Number(
+        context.req.query('offset') ?? 0,
+      )
+      const offset = Number.isFinite(
+        requestedOffset,
+      )
+        ? Math.max(
+            Math.trunc(requestedOffset),
+            0,
+          )
+        : 0
+      const search =
+        context.req.query('search')?.trim() ?? ''
+
+      const database = requireDatabase()
+      const { channel } =
+        await resolveFeedChannel()
+
+      const [pricingConnections, catalogConnections] =
+        await Promise.all([
+          database
+            .select({
+              id: dataConnections.id,
+            })
+            .from(dataConnections)
+            .where(
+              and(
+                eq(
+                  dataConnections.purpose,
+                  'PRICING',
+                ),
+                eq(
+                  dataConnections.isActive,
+                  true,
+                ),
+              ),
+            ),
+          database
+            .select({
+              id: dataConnections.id,
+            })
+            .from(dataConnections)
+            .where(
+              and(
+                eq(
+                  dataConnections.sourceType,
+                  'CSV_UPLOAD',
+                ),
+                eq(
+                  dataConnections.purpose,
+                  'CATALOG',
+                ),
+                eq(
+                  dataConnections.isActive,
+                  true,
+                ),
+              ),
+            ),
+        ])
+
+      const pricingConnectionIds =
+        pricingConnections.map(
+          (connection) => connection.id,
+        )
+
+      const [pricingRows, overrides] =
+        await Promise.all([
+          pricingConnectionIds.length > 0
+            ? database
+                .select({
+                  productId:
+                    pricingSourceItems.productId,
+                  sku: products.sku,
+                  productName: products.name,
+                  priceIndexBps:
+                    pricingSourceItems.priceIndexBps,
+                  medianIndexBps:
+                    pricingSourceItems.medianIndexBps,
+                  averageIndexBps:
+                    pricingSourceItems.averageIndexBps,
+                  dataStatus:
+                    pricingSourceItems.dataStatus,
+                  observedAt:
+                    pricingSourceItems.observedAt,
+                })
+                .from(pricingSourceItems)
+                .leftJoin(
+                  products,
+                  eq(
+                    products.id,
+                    pricingSourceItems.productId,
+                  ),
+                )
+                .where(
+                  and(
+                    inArray(
+                      pricingSourceItems.connectionId,
+                      pricingConnectionIds,
+                    ),
+                    eq(
+                      pricingSourceItems.marketCode,
+                      'HU',
+                    ),
+                    eq(
+                      pricingSourceItems.currency,
+                      'HUF',
+                    ),
+                  ),
+                )
+            : [],
+          channel
+            ? database
+                .select({
+                  productId:
+                    feedProductOverrides.productId,
+                  inclusionMode:
+                    feedProductOverrides.inclusionMode,
+                })
+                .from(feedProductOverrides)
+                .where(
+                  eq(
+                    feedProductOverrides.channelId,
+                    channel.id,
+                  ),
+                )
+            : [],
+        ])
+
+      let candidateProductIds:
+        | string[]
+        | null = null
+
+      if (catalogConnections.length === 1) {
+        const [catalogConnection] =
+          catalogConnections
+
+        if (catalogConnection) {
+          const catalogRows = await database
+            .select({
+              productId:
+                catalogSourceItems.productId,
+              sku: products.sku,
+            })
+            .from(catalogSourceItems)
+            .leftJoin(
+              products,
+              eq(
+                products.id,
+                catalogSourceItems.productId,
+              ),
+            )
+            .where(
+              and(
+                eq(
+                  catalogSourceItems.connectionId,
+                  catalogConnection.id,
+                ),
+                eq(
+                  catalogSourceItems.matchStatus,
+                  'MATCHED',
+                ),
+              ),
+            )
+
+          candidateProductIds = [
+            ...new Set(
+              catalogRows.flatMap((row) =>
+                row.productId === null ||
+                row.sku === null
+                  ? []
+                  : [row.productId],
+              ),
+            ),
+          ]
+        }
+      }
+
+      const candidateSet =
+        candidateProductIds === null
+          ? null
+          : new Set(candidateProductIds)
+      const overrideByProduct = new Map(
+        overrides.map((row) => [
+          row.productId,
+          row.inclusionMode,
+        ]),
+      )
+
+      const items = applyPricingItemSearch(
+        collapsePricingItemRows(pricingRows),
+        search,
+      )
+        .sort((left, right) =>
+          (left.sku ?? '').localeCompare(
+            right.sku ?? '',
+            'hu',
+          ),
+        )
+        .map((item) => {
+          const catalogMatched =
+            candidateSet === null ||
+            item.productId === null
+              ? null
+              : candidateSet.has(item.productId)
+
+          return {
+            productId: item.productId,
+            sku: item.sku,
+            productName: item.productName,
+            priceIndexBps: item.priceIndexBps,
+            medianIndexBps:
+              item.medianIndexBps,
+            averageIndexBps:
+              item.averageIndexBps,
+            dataStatus: item.dataStatus,
+            observedAt:
+              item.observedAt instanceof Date
+                ? item.observedAt.toISOString()
+                : null,
+            catalogMatched,
+            inclusionMode:
+              item.productId === null
+                ? null
+                : (overrideByProduct.get(
+                    item.productId,
+                  ) ?? 'INHERIT'),
+            arukeresoFeedState:
+              derivePricingItemFeedState({
+                catalogMatched,
+              }),
+          }
+        })
+
+      return context.json({
+        status: 'ok',
+        items: items.slice(
+          offset,
+          offset + limit,
+        ),
+        total: items.length,
+        limit,
+        offset,
+      })
+    } catch (error) {
+      console.error(
+        'Pricing items failed:',
+        error,
+      )
+
+      return context.json(
+        {
+          status: 'error',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Pricing items failed.',
+        },
+        500,
+      )
+    }
+  },
+)
+
 const PROMOTION_PREVIEW_LIMIT_DEFAULT = 100
 const PROMOTION_PREVIEW_LIMIT_MAX = 500
 
@@ -9819,4 +10192,7 @@ export {
   FEED_CHANNEL_CODE,
   FEED_GENERATOR_VERSION,
   computePricingDiagnostics,
+  collapsePricingItemRows,
+  applyPricingItemSearch,
+  derivePricingItemFeedState,
 }

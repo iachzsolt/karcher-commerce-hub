@@ -1,5 +1,6 @@
 import DataConnectionSchedulePanel from './DataConnectionSchedulePanel'
 import {
+  useCallback,
   useEffect,
   useState,
 } from 'react'
@@ -512,6 +513,349 @@ function DataConnectionsSettings() {
     pricingStatusError,
     setPricingStatusError,
   ] = useState<string | null>(null)
+
+  function formatIndexBps(
+    value: number | null,
+  ) {
+    if (value === null) {
+      return '–'
+    }
+
+    return `${String(
+      Math.round(value) / 100,
+    ).replace('.', ',')}%`
+  }
+
+  function pricingDataStatusLabel(
+    status: string | null,
+  ) {
+    switch (status) {
+      case 'HAS_COMPETITOR':
+        return 'Van versenytársi adat'
+      case 'NO_COMPETITOR':
+        return 'Nincs versenytársi adat'
+      case 'PARTIAL_MARKET_DATA':
+        return 'Részleges piaci adat'
+      default:
+        return 'Ismeretlen adatállapot'
+    }
+  }
+
+  type PricingItem = {
+    productId: string | null
+    sku: string | null
+    productName: string | null
+    priceIndexBps: number | null
+    medianIndexBps: number | null
+    averageIndexBps: number | null
+    dataStatus: string | null
+    observedAt: string | null
+    catalogMatched: boolean | null
+    inclusionMode: string | null
+    arukeresoFeedState:
+      | 'IN_FEED'
+      | 'NOT_IN_FEED'
+      | 'UNKNOWN'
+  }
+
+  const PRICING_ITEMS_PAGE_SIZE = 20
+
+  const [
+    itemSearch,
+    setItemSearch,
+  ] = useState('')
+  const [
+    appliedItemSearch,
+    setAppliedItemSearch,
+  ] = useState('')
+  const [itemPage, setItemPage] = useState(0)
+  const [pricingItems, setPricingItems] =
+    useState<PricingItem[]>([])
+  const [pricingItemsTotal, setPricingItemsTotal] =
+    useState(0)
+  const [
+    pricingItemsLoading,
+    setPricingItemsLoading,
+  ] = useState(true)
+  const [
+    pricingItemsError,
+    setPricingItemsError,
+  ] = useState<string | null>(null)
+
+  const loadPricingItems = useCallback(
+    async (page: number, query: string) => {
+    setPricingItemsLoading(true)
+    setPricingItemsError(null)
+
+    try {
+      const params = new URLSearchParams({
+        limit: String(PRICING_ITEMS_PAGE_SIZE),
+        offset: String(
+          page * PRICING_ITEMS_PAGE_SIZE,
+        ),
+      })
+
+      if (query.trim() !== '') {
+        params.set('search', query.trim())
+      }
+
+      const response = await fetch(
+        `${API_BASE_URL}/arukereso/pricing/items?${params.toString()}`,
+      )
+      const result = (await response.json()) as {
+        items?: PricingItem[]
+        total?: number
+        message?: string
+      }
+
+      if (
+        !response.ok ||
+        !Array.isArray(result.items) ||
+        typeof result.total !== 'number'
+      ) {
+        throw new Error(
+          result.message ??
+            'A Pricing Cockpit termékek nem tölthetők be.',
+        )
+      }
+
+      setPricingItems(result.items)
+      setPricingItemsTotal(result.total)
+    } catch (loadError) {
+      setPricingItemsError(
+        loadError instanceof Error
+          ? loadError.message
+          : 'A Pricing Cockpit termékek nem tölthetők be.',
+      )
+      setPricingItems([])
+      setPricingItemsTotal(0)
+    } finally {
+      setPricingItemsLoading(false)
+    }
+    },
+    [],
+  )
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      void loadPricingItems(0, '')
+    }, 0)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [loadPricingItems])
+
+  function applyItemSearch() {
+    const query = itemSearch.trim()
+    setAppliedItemSearch(query)
+    setItemPage(0)
+    void loadPricingItems(0, query)
+  }
+
+  function changeItemPage(nextPage: number) {
+    setItemPage(nextPage)
+    void loadPricingItems(
+      nextPage,
+      appliedItemSearch,
+    )
+  }
+
+  function renderPricingItems() {
+    const pageCount = Math.max(
+      1,
+      Math.ceil(
+        pricingItemsTotal /
+          PRICING_ITEMS_PAGE_SIZE,
+      ),
+    )
+
+    return (
+      <div className="pricekit-panel">
+        <div className="pricekit-panel-heading">
+          <span className="allegro-settings-eyebrow">
+            PRICING COCKPIT TERMÉKEK
+          </span>
+        </div>
+
+        <div className="pricekit-items-search">
+          <input
+            type="search"
+            value={itemSearch}
+            placeholder="SKU vagy terméknév keresése…"
+            onChange={(event) =>
+              setItemSearch(event.target.value)
+            }
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                applyItemSearch()
+              }
+            }}
+          />
+          <button
+            type="button"
+            className="hub-primary-button"
+            disabled={pricingItemsLoading}
+            onClick={applyItemSearch}
+          >
+            Keresés
+          </button>
+        </div>
+
+        {pricingItemsError ? (
+          <p className="hub-muted-line">
+            {pricingItemsError}
+          </p>
+        ) : pricingItemsLoading &&
+          pricingItems.length === 0 ? (
+          <p className="hub-muted-line">
+            Termékek betöltése…
+          </p>
+        ) : pricingItems.length === 0 ? (
+          <p className="hub-muted-line">
+            Nincs ilyen SKU a Pricing Cockpit
+            aktuális adatai között.
+          </p>
+        ) : (
+          <>
+            <div className="campaign-offers-table-wrapper">
+              <table className="campaign-offers-table pricekit-items-table">
+                <thead>
+                  <tr>
+                    <th>SKU</th>
+                    <th>Termék</th>
+                    <th>Piaci index</th>
+                    <th>Mediánindex</th>
+                    <th>Átlagindex</th>
+                    <th>Piaci adatállapot</th>
+                    <th>Katalógus</th>
+                    <th>Árukereső</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pricingItems.map((item) => (
+                    <tr key={item.productId ?? item.sku ?? ''}>
+                      <td>
+                        <strong>
+                          {item.sku ?? '–'}
+                        </strong>
+                      </td>
+                      <td>
+                        {item.productName ?? '–'}
+                      </td>
+                      <td>
+                        {formatIndexBps(
+                          item.priceIndexBps,
+                        )}
+                      </td>
+                      <td>
+                        {formatIndexBps(
+                          item.medianIndexBps,
+                        )}
+                      </td>
+                      <td>
+                        {formatIndexBps(
+                          item.averageIndexBps,
+                        )}
+                      </td>
+                      <td>
+                        {pricingDataStatusLabel(
+                          item.dataStatus,
+                        )}
+                      </td>
+                      <td>
+                        {item.catalogMatched ===
+                        null ? (
+                          '–'
+                        ) : (
+                          <span
+                            className={`arukereso-feed-badge ${
+                              item.catalogMatched
+                                ? 'is-included'
+                                : 'is-excluded'
+                            }`}
+                          >
+                            {item.catalogMatched
+                              ? 'Egyező'
+                              : 'Nincs egyezés'}
+                          </span>
+                        )}
+                      </td>
+                      <td>
+                        {item.arukeresoFeedState ===
+                        'UNKNOWN' ? (
+                          '–'
+                        ) : (
+                          <span
+                            className={`arukereso-feed-badge ${
+                              item.arukeresoFeedState ===
+                              'IN_FEED'
+                                ? 'is-included'
+                                : 'is-excluded'
+                            }`}
+                          >
+                            {item.arukeresoFeedState ===
+                            'IN_FEED'
+                              ? 'Feedben'
+                              : 'Nincs feedben'}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="pricekit-pager">
+              <span>
+                {pricingItemsTotal === 0
+                  ? '0 találat'
+                  : `${itemPage * PRICING_ITEMS_PAGE_SIZE + 1}–${Math.min(
+                      (itemPage + 1) *
+                        PRICING_ITEMS_PAGE_SIZE,
+                      pricingItemsTotal,
+                    )} / ${pricingItemsTotal}`}
+              </span>
+              <div>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={
+                    pricingItemsLoading ||
+                    itemPage === 0
+                  }
+                  onClick={() =>
+                    changeItemPage(itemPage - 1)
+                  }
+                >
+                  Előző
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={
+                    pricingItemsLoading ||
+                    itemPage + 1 >= pageCount
+                  }
+                  onClick={() =>
+                    changeItemPage(itemPage + 1)
+                  }
+                >
+                  Következő
+                </button>
+              </div>
+            </div>
+
+            <small className="pricekit-note">
+              Az Árukereső oszlop a feed-tagságot
+              mutatja; az ajánlat aktivitásáról
+              (eredeti DeliveryTime / NO) az élő
+              feed-szabályok döntenek.
+            </small>
+          </>
+        )}
+      </div>
+    )
+  }
 
   async function loadPricingStatus() {
     setPricingStatusLoading(true)
@@ -1705,6 +2049,9 @@ function DataConnectionsSettings() {
                   'PRICING' &&
                   rows.length > 0 &&
                   renderPriceKitOverview(rows)}
+
+                {section.group === 'PRICING' &&
+                  renderPricingItems()}
 
                 {rows.length === 0 ? (
                   <p className="hub-muted-line">
