@@ -9,6 +9,7 @@ import {
 } from 'react-router-dom'
 import ArukeresoCatalogPage from './ArukeresoCatalogPage'
 import ArukeresoFeedPreviewPage from './ArukeresoFeedPreviewPage'
+import ArukeresoPerformancePage from './ArukeresoPerformancePage'
 import ArukeresoProductsPage from './ArukeresoProductsPage'
 import ArukeresoSettingsPage from './ArukeresoSettingsPage'
 import { API_BASE_URL } from '../config/api'
@@ -115,6 +116,10 @@ function ArukeresoPage() {
               Feed előnézet
             </NavLink>
 
+            <NavLink to="/arukereso/performance">
+              Teljesítmény
+            </NavLink>
+
             <NavLink to="/arukereso/settings">
               Beállítások
             </NavLink>
@@ -164,6 +169,11 @@ function ArukeresoPage() {
           <Route
             path="feed-preview"
             element={<ArukeresoFeedPreviewPage />}
+          />
+
+          <Route
+            path="performance"
+            element={<ArukeresoPerformancePage />}
           />
         </Routes>
       </main>

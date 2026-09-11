@@ -44,6 +44,7 @@ import {
   arukeresoApi,
   assertArukeresoConfiguration,
 } from './arukereso.js'
+import { arukeresoPerformanceApi } from './arukereso-performance.js'
 import {
   allegroAuth,
   finishOfferAllegroCampaign,
@@ -119,6 +120,10 @@ app.get('/auth/session', (context) => {
 app.route('/auth/allegro', allegroAuth)
 app.route('/data-connections', dataConnectionsApi)
 app.route('/arukereso', arukeresoApi)
+app.route(
+  '/arukereso/performance',
+  arukeresoPerformanceApi,
+)
 
 function resolveOptionalHistoryRange(
   requestedFrom: string | undefined,
