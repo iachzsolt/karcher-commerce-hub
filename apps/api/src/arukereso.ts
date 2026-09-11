@@ -21,6 +21,7 @@ import {
 import {
   and,
   asc,
+  count,
   desc,
   eq,
   inArray,
@@ -7561,6 +7562,138 @@ type FeedGenerationTrigger =
   | 'PRICING_SYNC'
   | 'CHANNEL_ACTIVATION'
 
+// Retention keeps feed_runs summaries indefinitely and
+// prunes feed_run_items of older runs: only the newest
+// runs that actually contain item rows consume
+// retention slots, independently per channel and
+// regardless of trigger type. Pure selection so the
+// semantics are unit-testable without a database.
+const FEED_RUN_ITEMS_RETAINED_RUNS = 5
+
+type FeedRunRetentionRow = {
+  id: string
+  channelId: string
+  startedAtMs: number
+  itemCount: number
+}
+
+function selectPrunableFeedRunIds(
+  runs: FeedRunRetentionRow[],
+  retainDetailedRuns: number = FEED_RUN_ITEMS_RETAINED_RUNS,
+): string[] {
+  const byChannel = new Map<
+    string,
+    FeedRunRetentionRow[]
+  >()
+
+  for (const run of runs) {
+    const list =
+      byChannel.get(run.channelId) ?? []
+    list.push(run)
+    byChannel.set(run.channelId, list)
+  }
+
+  const prunable: string[] = []
+
+  for (const list of byChannel.values()) {
+    const withItems = list
+      .filter((run) => run.itemCount > 0)
+      .sort(
+        (left, right) =>
+          right.startedAtMs -
+            left.startedAtMs ||
+          (left.id < right.id ? -1 : 1),
+      )
+    const retained = new Set(
+      withItems
+        .slice(
+          0,
+          Math.max(0, retainDetailedRuns),
+        )
+        .map((run) => run.id),
+    )
+
+    for (const run of withItems) {
+      if (!retained.has(run.id)) {
+        prunable.push(run.id)
+      }
+    }
+  }
+
+  return prunable.sort()
+}
+
+async function pruneOldFeedRunItems(
+  database: ReturnType<typeof requireDatabase>,
+  channelId?: string,
+): Promise<{
+  prunedRuns: number
+  deletedItems: number
+}> {
+  const groups = await database
+    .select({
+      id: feedRuns.id,
+      channelId: feedRuns.channelId,
+      startedAt: feedRuns.startedAt,
+      itemCount: count(feedRunItems.id),
+    })
+    .from(feedRuns)
+    .leftJoin(
+      feedRunItems,
+      eq(feedRunItems.runId, feedRuns.id),
+    )
+    .where(
+      channelId === undefined
+        ? undefined
+        : eq(feedRuns.channelId, channelId),
+    )
+    .groupBy(
+      feedRuns.id,
+      feedRuns.channelId,
+      feedRuns.startedAt,
+    )
+
+  const rows: FeedRunRetentionRow[] =
+    groups.map((group) => ({
+      id: group.id,
+      channelId: group.channelId,
+      startedAtMs:
+        group.startedAt instanceof Date
+          ? group.startedAt.getTime()
+          : 0,
+      itemCount: Number(group.itemCount),
+    }))
+
+  const prunable = new Set(
+    selectPrunableFeedRunIds(rows),
+  )
+
+  if (prunable.size === 0) {
+    return { prunedRuns: 0, deletedItems: 0 }
+  }
+
+  const deletedItems = rows
+    .filter((row) => prunable.has(row.id))
+    .reduce(
+      (total, row) => total + row.itemCount,
+      0,
+    )
+
+  await database
+    .delete(feedRunItems)
+    .where(
+      inArray(
+        feedRunItems.runId,
+        [...prunable],
+      ),
+    )
+
+  return {
+    prunedRuns: prunable.size,
+    deletedItems,
+  }
+}
+
 async function generateCatalogFeedRun(input: {
   database: ReturnType<typeof requireDatabase>
   channel: FeedOutputContext['channel']
@@ -7876,6 +8009,26 @@ async function generateCatalogFeedRun(input: {
       }
     }
 
+    // Retention runs only after the current run is fully
+    // persisted and never fails the successful result.
+    try {
+      const retention = await pruneOldFeedRunItems(
+        database,
+        channel.id,
+      )
+
+      if (retention.deletedItems > 0) {
+        console.log(
+          `Feed run items retention: removed ${retention.deletedItems} rows from ${retention.prunedRuns} old runs (channel ${channel.id}).`,
+        )
+      }
+    } catch (retentionError) {
+      console.error(
+        'Feed run items retention failed; successful feed result preserved:',
+        retentionError,
+      )
+    }
+
     return {
       runId: run.id,
       summary: output.summary,
@@ -8114,8 +8267,11 @@ async function buildFeedRunCsv(runId: string) {
         : run.itemsIncluded + run.itemsExcluded
 
   if (runItems.length !== expectedRunItemCount) {
+    // Retention prunes item rows of older runs while
+    // feed_runs summaries are kept, so a completed run
+    // can legitimately have no downloadable detail rows.
     throw new FeedOutputError(
-      'A feed futás elemszáma nem egyezik a naplózott értékkel.',
+      'A részletes termékadatok ehhez a korábbi feed futáshoz már nem érhetők el.',
       'FEED_RUN_ITEM_COUNT_MISMATCH',
     )
   }
@@ -10195,4 +10351,6 @@ export {
   collapsePricingItemRows,
   applyPricingItemSearch,
   derivePricingItemFeedState,
+  selectPrunableFeedRunIds,
+  FEED_RUN_ITEMS_RETAINED_RUNS,
 }
