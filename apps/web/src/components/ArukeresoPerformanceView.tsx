@@ -8,7 +8,8 @@ import {
 import { API_BASE_URL } from '../config/api'
 import ArukeresoTrendChart, {
   type TrendChartSeries,
-} from '../components/ArukeresoTrendChart'
+} from './ArukeresoTrendChart'
+import MetricInfo from './MetricInfo'
 import {
   aggregateProducts,
   applyProductView,
@@ -21,6 +22,7 @@ import {
   formatRoas,
   groupTrendPoints,
   last7CompletedDays,
+  METRIC_HELP,
   resolvePresetRange,
   shiftBudapestDate,
   sumDayRows,
@@ -161,13 +163,21 @@ const PAGE_SIZE = 50
 const LOAD_CONCURRENCY = 3
 const MAX_RANGE_DAYS = 366
 
+const ABBREVIATED_COLUMNS = new Set([
+  'roas',
+  'crr',
+  'cvr',
+  'cpc',
+  'aov',
+])
+
 function defaultDates(): string[] {
   return last7CompletedDays(
     budapestDateString(new Date()),
   )
 }
 
-function ArukeresoPerformancePage() {
+function ArukeresoPerformanceView() {
   const [preset, setPreset] = useState<
     PerformancePreset | 'custom'
   >('last7')
@@ -491,22 +501,26 @@ function ArukeresoPerformancePage() {
 
   const kpis: Array<{
     label: string
+    help: string
     value: string
   }> = [
     {
       label: 'Kattintások',
+      help: METRIC_HELP.visits,
       value: formatCount(
         showPlaceholders ? null : sums.visits,
       ),
     },
     {
       label: 'Rendelések',
+      help: METRIC_HELP.orders,
       value: formatCount(
         showPlaceholders ? null : sums.orders,
       ),
     },
     {
       label: 'Költség',
+      help: METRIC_HELP.cost,
       value: formatMoney(
         showPlaceholders ? null : sums.costGross,
         null,
@@ -514,6 +528,7 @@ function ArukeresoPerformancePage() {
     },
     {
       label: 'Bevétel',
+      help: METRIC_HELP.revenue,
       value: formatMoney(
         showPlaceholders ? null : sums.revenue,
         null,
@@ -521,24 +536,28 @@ function ArukeresoPerformancePage() {
     },
     {
       label: 'ROAS',
+      help: METRIC_HELP.roas,
       value: formatRoas(
         showPlaceholders ? null : ratios.roas,
       ),
     },
     {
       label: 'CRR',
+      help: METRIC_HELP.crr,
       value: formatRatioPercent(
         showPlaceholders ? null : ratios.crr,
       ),
     },
     {
       label: 'CVR',
+      help: METRIC_HELP.cvr,
       value: formatRatioPercent(
         showPlaceholders ? null : ratios.cvr,
       ),
     },
     {
       label: 'CPC',
+      help: METRIC_HELP.cpc,
       value: formatMoney(
         showPlaceholders ? null : ratios.cpc,
         null,
@@ -546,6 +565,7 @@ function ArukeresoPerformancePage() {
     },
     {
       label: 'AOV',
+      help: METRIC_HELP.aov,
       value: formatMoney(
         showPlaceholders ? null : ratios.aov,
         null,
@@ -573,21 +593,7 @@ function ArukeresoPerformancePage() {
   }
 
   return (
-    <section className="campaigns-page ap-page">
-      <div className="campaigns-page-header">
-        <div>
-          <p className="section-label">
-            ÁRUKERESŐ TELJESÍTMÉNY
-          </p>
-          <h2>Teljesítmény</h2>
-          <p className="campaigns-page-description">
-            Heureka hirdetési teljesítmény:
-            kattintások, rendelések, költség és
-            bevétel.
-          </p>
-        </div>
-      </div>
-
+    <div className="ap-view">
       <div className="ap-toolbar">
         <div
           className="ap-presets"
@@ -786,7 +792,13 @@ function ArukeresoPerformancePage() {
           <div className="ap-kpis">
             {kpis.map((kpi) => (
               <div key={kpi.label}>
-                <span>{kpi.label}</span>
+                <span className="ap-kpi-label">
+                  {kpi.label}
+                  <MetricInfo
+                    label={kpi.label}
+                    text={kpi.help}
+                  />
+                </span>
                 <strong>{kpi.value}</strong>
               </div>
             ))}
@@ -922,6 +934,19 @@ function ArukeresoPerformancePage() {
                                 ? ' ↑'
                                 : ' ↓')}
                           </button>
+                          {ABBREVIATED_COLUMNS.has(
+                            column.key,
+                          ) && (
+                            <MetricInfo
+                              label={column.label}
+                              text={
+                                METRIC_HELP[
+                                  column.key
+                                ] ?? ''
+                              }
+                              align="right"
+                            />
+                          )}
                         </th>
                       ),
                     )}
@@ -1050,8 +1075,8 @@ function ArukeresoPerformancePage() {
           </div>
         </>
       )}
-    </section>
+    </div>
   )
 }
 
-export default ArukeresoPerformancePage
+export default ArukeresoPerformanceView

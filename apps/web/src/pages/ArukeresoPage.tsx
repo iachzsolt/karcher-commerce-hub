@@ -9,7 +9,7 @@ import {
 } from 'react-router-dom'
 import ArukeresoCatalogPage from './ArukeresoCatalogPage'
 import ArukeresoFeedPreviewPage from './ArukeresoFeedPreviewPage'
-import ArukeresoPerformancePage from './ArukeresoPerformancePage'
+import ArukeresoPerformanceView from '../components/ArukeresoPerformanceView'
 import ArukeresoProductsPage from './ArukeresoProductsPage'
 import ArukeresoSettingsPage from './ArukeresoSettingsPage'
 import { API_BASE_URL } from '../config/api'
@@ -17,35 +17,39 @@ import { API_BASE_URL } from '../config/api'
 import '../CommerceHub.css'
 
 function ArukeresoOverview({
-  title,
   isActive,
 }: {
-  title: string
   isActive: boolean | null
 }) {
   return (
-    <section className="module-placeholder">
-      <div
-        className={`module-placeholder-status${
-          isActive === false ? ' is-inactive' : ''
-        }`}
-      >
-        <span className="platform-status-dot" />
-        {isActive === null
-          ? 'Állapot betöltése…'
-          : isActive
-            ? 'Bekötve'
-            : 'Kikapcsolva'}
-      </div>
+    <>
+      <section className="module-placeholder">
+        <div
+          className={`module-placeholder-status${
+            isActive === false ? ' is-inactive' : ''
+          }`}
+        >
+          <span className="platform-status-dot" />
+          {isActive === null
+            ? 'Állapot betöltése…'
+            : isActive
+              ? 'Bekötve'
+              : 'Kikapcsolva'}
+        </div>
 
-      <h3>{title}</h3>
+        <h3>Áttekintés</h3>
 
-      <p>
-        Az Árukereső katalógus, termékszabályok,
-        feed-előnézet és feed-generálás a fenti
-        menüpontokból kezelhető.
-      </p>
-    </section>
+        <p>
+          Az Árukereső teljesítménye a
+          kiválasztott időszakban. A mutatók,
+          trendek és termékszintű eredmények
+          közvetlenül az Árukereső adataiból
+          töltődnek be.
+        </p>
+      </section>
+
+      <ArukeresoPerformanceView />
+    </>
   )
 }
 
@@ -116,10 +120,6 @@ function ArukeresoPage() {
               Feed előnézet
             </NavLink>
 
-            <NavLink to="/arukereso/performance">
-              Teljesítmény
-            </NavLink>
-
             <NavLink to="/arukereso/settings">
               Beállítások
             </NavLink>
@@ -141,7 +141,6 @@ function ArukeresoPage() {
             path="overview"
             element={
               <ArukeresoOverview
-                title="Áttekintés"
                 isActive={isActive}
               />
             }
@@ -169,11 +168,6 @@ function ArukeresoPage() {
           <Route
             path="feed-preview"
             element={<ArukeresoFeedPreviewPage />}
-          />
-
-          <Route
-            path="performance"
-            element={<ArukeresoPerformancePage />}
           />
         </Routes>
       </main>

@@ -376,6 +376,22 @@ function productSortValue(
   }
 }
 
+export const METRIC_HELP: Record<string, string> = {
+  visits:
+    'Az Árukeresőről a webshopba érkező látogatások száma.',
+  orders:
+    'Az Árukereső konverzióméréséhez kapcsolt rendelések száma.',
+  cost: 'Az Árukereső által riportált bruttó kattintási költség.',
+  revenue:
+    'Az Árukereső konverzióméréséhez kapcsolt rendelések bevétele.',
+  roas:
+    'Return on Ad Spend. Megmutatja, hogy 1 Ft költség hány Ft bevételt hozott. A magasabb érték kedvezőbb.',
+  crr: 'Cost Revenue Ratio. A költség a bevétel százalékában. Az alacsonyabb érték kedvezőbb.',
+  cvr: 'Conversion Rate. Megmutatja, hogy a kattintások hány százalékából lett rendelés.',
+  cpc: 'Cost per Click. Egy kattintás átlagos költsége.',
+  aov: 'Average Order Value. Egy rendelés átlagos értéke.',
+}
+
 export type ProductViewFilters = {
   search: string
   sort: string

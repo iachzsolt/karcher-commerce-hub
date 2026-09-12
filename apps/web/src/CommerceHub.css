@@ -9127,6 +9127,85 @@ input:checked + span::after {
   text-transform: uppercase;
 }
 
+.ap-view {
+  display: grid;
+  gap: 0;
+}
+
+.ap-kpi-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.metric-info {
+  position: relative;
+  display: inline-flex;
+}
+
+.metric-info-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border: 1px solid #c9c9c9;
+  border-radius: 50%;
+  background: #fff;
+  color: #777;
+  font-size: 9px;
+  font-weight: 800;
+  font-style: normal;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.metric-info-button:hover,
+.metric-info-button:focus-visible {
+  border-color: #0873c5;
+  color: #0873c5;
+  outline: none;
+}
+
+.metric-info-popup {
+  display: none;
+  position: absolute;
+  top: calc(100% + 7px);
+  left: 0;
+  z-index: 40;
+  width: max-content;
+  max-width: min(250px, 72vw);
+  padding: 9px 11px;
+  border: 1px solid #d2d2d2;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+  color: #444;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.5;
+  text-transform: none;
+  white-space: normal;
+}
+
+.metric-info-right .metric-info-popup {
+  left: auto;
+  right: 0;
+}
+
+.metric-info-button[aria-expanded='true']
+  + .metric-info-popup,
+.metric-info:hover .metric-info-popup,
+.metric-info:focus-within .metric-info-popup {
+  display: block;
+}
+
+.ap-table th .metric-info {
+  margin-left: 5px;
+  vertical-align: 1px;
+}
+
 .ap-kpis strong {
   font-size: 20px;
   font-variant-numeric: tabular-nums;

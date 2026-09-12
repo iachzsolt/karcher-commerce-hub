@@ -19,6 +19,7 @@ import {
   sumDayRows,
   validateCustomRange,
   type PerformanceDayRow,
+  METRIC_HELP,
 } from '../src/utils/arukeresoPerformance.ts'
 
 void describe(
@@ -330,6 +331,65 @@ void describe(
         assert.equal(
           bucketKey('2026-09-11', 'week'),
           '2026-W37',
+        )
+      },
+    )
+  },
+)
+
+void describe(
+  'arukereso metric help',
+  () => {
+    void it(
+      'defines a Hungarian explanation for every KPI metric',
+      () => {
+        const keys = [
+          'visits',
+          'orders',
+          'cost',
+          'revenue',
+          'roas',
+          'crr',
+          'cvr',
+          'cpc',
+          'aov',
+        ]
+
+        for (const key of keys) {
+          assert.equal(
+            typeof METRIC_HELP[key],
+            'string',
+          )
+          assert.ok(
+            (METRIC_HELP[key]?.trim().length ??
+              0) > 0,
+          )
+        }
+      },
+    )
+
+    void it(
+      'expands abbreviations to full English names',
+      () => {
+        assert.match(
+          METRIC_HELP.roas ?? '',
+          /Return on Ad Spend/,
+        )
+        assert.match(
+          METRIC_HELP.crr ?? '',
+          /Cost Revenue Ratio/,
+        )
+        assert.match(
+          METRIC_HELP.cvr ?? '',
+          /Conversion Rate/,
+        )
+        assert.match(
+          METRIC_HELP.cpc ?? '',
+          /Cost per Click/,
+        )
+        assert.match(
+          METRIC_HELP.aov ?? '',
+          /Average Order Value/,
         )
       },
     )
