@@ -72,8 +72,75 @@ type InventoryRefreshRun = {
   rowsImported: number
   changedItemCount: number
   error: string | null
+  automationDetails: InventoryAutomationDetails | null
   startedAt: string
   finishedAt: string | null
+}
+
+type FailedInventoryListingDiagnostic = {
+  listingId: string | null
+  sku: string | null
+  offerId: string | null
+  action: string
+  remoteStock: number | null
+  targetStock: number | null
+  remotePublicationStatus: string | null
+  desiredPublicationStatus: string | null
+  historyGroupId: string | null
+  batchIndex: number | null
+  httpStatus: number | null
+  taskStatus: string | null
+  commandId: string | null
+  taskMessage: string | null
+  taskField: string | null
+}
+
+type InventoryAutomationPlatformDetails = {
+  platform: string
+  historyGroupId: string | null
+  transportStatus: number | null
+  totalListings: number
+  batchCount: number
+  successfulBatches: number
+  failedBatches: number
+  attempted: number
+  stockUpdated: number
+  reactivated: number
+  autoPaused: number
+  unchanged: number
+  skipped: number
+  pending: number
+  failed: number
+  skipBreakdown: {
+    stockLocked: number
+    duplicateSkuSkipped: number
+    manuallyInactive: number
+    other: number
+  }
+  failedListings: {
+    total: number
+    returned: number
+    truncated: boolean
+    items: FailedInventoryListingDiagnostic[]
+  }
+}
+
+type InventoryAutomationDetails = {
+  version: 1
+  platforms: InventoryAutomationPlatformDetails[]
+}
+
+function formatInventoryFailureAction(action: string) {
+  switch (action) {
+    case 'STOCK_UPDATE':
+      return 'Készletfrissítés'
+    case 'ACTIVATE':
+      return 'Aktiválás'
+    case 'END':
+      return 'Automatikus lekapcsolás'
+    default:
+      return action
+  }
 }
 
 type InventoryRefreshRunsResponse = {
@@ -979,7 +1046,9 @@ function InventoryRefreshHistoryGroup({
   // sync result it does not own. No persisted run→sync link
   // exists (historyGroupId lives only in SYNC event
   // metadata), hence source import and Allegro sync stay
-  // separate truthful blocks.
+  // separate truthful blocks. Newer runs carry their own
+  // persisted automation details and historyGroupId; older
+  // runs intentionally keep the legacy fallback below.
   const overall = summarizeRefreshRun({
     status: run.status,
     importStatus: run.importStatus,
@@ -1016,6 +1085,25 @@ function InventoryRefreshHistoryGroup({
               run.importStatus === 'NO_CHANGE')
           ? 'Az Allegro szinkron nem futott le.'
           : null
+  const allegroDetails =
+    run.automationDetails?.platforms.find(
+      (platform) => platform.platform === 'ALLEGRO',
+    ) ?? null
+  const automationMetrics = allegroDetails
+    ? [
+        ['Vizsgált', allegroDetails.totalListings],
+        ['Megkísérelt', allegroDetails.attempted],
+        ['Készlet frissítve', allegroDetails.stockUpdated],
+        ['Aktiválva', allegroDetails.reactivated],
+        ['Lekapcsolva', allegroDetails.autoPaused],
+        ['Változatlan', allegroDetails.unchanged],
+        ['Kihagyva', allegroDetails.skipped],
+        ['Függőben', allegroDetails.pending],
+        ['Sikertelen', allegroDetails.failed],
+        ['Sikeres batch', allegroDetails.successfulBatches],
+        ['Hibás batch', allegroDetails.failedBatches],
+      ] as const
+    : []
 
   return (
     <details className="allegro-history-run">
@@ -1073,14 +1161,128 @@ function InventoryRefreshHistoryGroup({
               nem volt értelmezhető.
             </p>
           )}
+          {allegroDetails && (
+            <>
+              <div className="allegro-history-sync-metrics">
+                {automationMetrics.map(([label, value]) => (
+                  <span
+                    className="allegro-history-sync-metric"
+                    key={label}
+                  >
+                    {label}: <strong>{value}</strong>
+                  </span>
+                ))}
+              </div>
+
+              {run.error && (
+                <p className="allegro-history-run-error">
+                  {run.error}
+                </p>
+              )}
+
+              {allegroDetails.failedListings.items.length > 0 && (
+                <div className="allegro-history-failed-listings">
+                  {allegroDetails.failedListings.items.map(
+                    (failure, index) => (
+                      <article
+                        className="allegro-history-failed-listing"
+                        key={`${failure.listingId ?? failure.sku ?? 'failure'}-${index}`}
+                      >
+                        <div className="allegro-history-failed-listing-heading">
+                          <strong>
+                            {failure.sku ?? 'Ismeretlen SKU'}
+                          </strong>
+                          <span>
+                            {formatInventoryFailureAction(
+                              failure.action,
+                            )}
+                          </span>
+                        </div>
+                        <p>
+                          {failure.taskMessage ??
+                            'Az Allegro nem hajtotta végre a műveletet.'}
+                        </p>
+                        <details className="allegro-history-tech">
+                          <summary>Technikai részletek</summary>
+                          <dl className="allegro-history-failure-meta">
+                            <div>
+                              <dt>Listing ID</dt>
+                              <dd>{failure.listingId ?? '–'}</dd>
+                            </div>
+                            <div>
+                              <dt>Offer ID</dt>
+                              <dd>{failure.offerId ?? '–'}</dd>
+                            </div>
+                            <div>
+                              <dt>Készlet</dt>
+                              <dd>
+                                {failure.remoteStock ?? '–'} →{' '}
+                                {failure.targetStock ?? '–'}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt>Távoli állapot</dt>
+                              <dd>
+                                {failure.remotePublicationStatus ?? '–'}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt>Kívánt állapot</dt>
+                              <dd>
+                                {failure.desiredPublicationStatus ?? '–'}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt>Batch</dt>
+                              <dd>{failure.batchIndex ?? '–'}</dd>
+                            </div>
+                            <div>
+                              <dt>HTTP / task</dt>
+                              <dd>
+                                {failure.httpStatus ?? '–'} /{' '}
+                                {failure.taskStatus ?? '–'}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt>Command ID</dt>
+                              <dd>{failure.commandId ?? '–'}</dd>
+                            </div>
+                            <div>
+                              <dt>Mező</dt>
+                              <dd>{failure.taskField ?? '–'}</dd>
+                            </div>
+                          </dl>
+                        </details>
+                      </article>
+                    ),
+                  )}
+                  {allegroDetails.failedListings.truncated && (
+                    <p className="allegro-history-run-note">
+                      További{' '}
+                      {allegroDetails.failedListings.total -
+                        allegroDetails.failedListings.returned}{' '}
+                      hibás ajánlat nincs megjelenítve.
+                    </p>
+                  )}
+                </div>
+              )}
+            </>
+          )}
         </div>
 
-        {run.error && (
+        {(run.error || run.automationDetails) && (
           <details className="allegro-history-tech">
             <summary>Technikai részletek</summary>
-            <p className="allegro-history-run-note">
-              {run.error}
-            </p>
+            {run.error && (
+              <p className="allegro-history-run-note">
+                {run.error}
+              </p>
+            )}
+            {run.automationDetails && (
+              <pre>
+                {JSON.stringify(run.automationDetails, null, 2)}
+              </pre>
+            )}
           </details>
         )}
       </div>

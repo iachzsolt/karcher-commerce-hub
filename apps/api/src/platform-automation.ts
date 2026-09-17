@@ -30,7 +30,7 @@ export type InventoryRefreshAutomationResult = {
   details: unknown
 }
 
-function hasInventorySyncFailure(details: unknown) {
+export function hasInventorySyncFailure(details: unknown) {
   if (!details || typeof details !== 'object') {
     return false
   }
@@ -265,6 +265,8 @@ export async function runInventoryRefreshAutomations(
                   connectionId,
                   listingIds: batch,
                   historyGroupId,
+                  batchIndex:
+                    batchIndex + 1,
                 }),
             },
           )
@@ -321,6 +323,7 @@ export async function runInventoryRefreshAutomations(
             failedBatches.length,
           failedBatches:
             failedBatches.length,
+          historyGroupId,
           batches:
             batchResults,
         },

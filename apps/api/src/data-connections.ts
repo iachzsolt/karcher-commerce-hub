@@ -28,6 +28,11 @@ import {
 import { JWT } from 'google-auth-library'
 import { Hono } from 'hono'
 import { runInventoryRefreshAutomations } from './platform-automation.js'
+import {
+  buildInventoryAutomationDiagnostics,
+  formatInventoryAutomationFailure,
+  parseInventoryAutomationDiagnostics,
+} from './inventory-automation-diagnostics.js'
 
 const dataConnectionsApi = new Hono()
 
@@ -803,6 +808,8 @@ dataConnectionsApi.get(
             dataConnectionRuns.changedItemCount,
           error:
             dataConnectionRuns.error,
+          automationDetailsJson:
+            dataConnectionRuns.automationDetailsJson,
           startedAt:
             dataConnectionRuns.startedAt,
           finishedAt:
@@ -822,8 +829,23 @@ dataConnectionsApi.get(
         )
         .limit(1)
 
+    if (!run) {
+      return context.json({ run: null })
+    }
+
+    const {
+      automationDetailsJson,
+      ...runFields
+    } = run
+
     return context.json({
-      run: run ?? null,
+      run: {
+        ...runFields,
+        automationDetails:
+          parseInventoryAutomationDiagnostics(
+            automationDetailsJson,
+          ),
+      },
     })
   },
 )
@@ -1234,6 +1256,7 @@ export async function processDueDataConnectionSchedules(
       let runRowsImported = 0
       let runChangedItemCount = 0
       let runError: string | null = null
+      let runAutomationDetailsJson: string | null = null
 
       const settings:
         RefreshScheduleSettings = {
@@ -1361,6 +1384,14 @@ export async function processDueDataConnectionSchedules(
                 requireDatabase(),
                 item.connection.id,
               )
+            const automationDiagnostics =
+              buildInventoryAutomationDiagnostics(
+                automationResult,
+              )
+
+            runAutomationDetailsJson = JSON.stringify(
+              automationDiagnostics,
+            )
 
             const failedAutomation =
               automationResult.results.find(
@@ -1370,7 +1401,9 @@ export async function processDueDataConnectionSchedules(
             if (failedAutomation) {
               runStatus = 'FAILED'
               runError =
-                `${failedAutomation.platform} inventory automation reported a failed result (HTTP ${failedAutomation.status}).`
+                formatInventoryAutomationFailure(
+                  automationDiagnostics,
+                )
             } else if (
               automationResult.status === 'SKIPPED' ||
               automationResult.results.length === 0 ||
@@ -1442,6 +1475,8 @@ export async function processDueDataConnectionSchedules(
             changedItemCount:
               runChangedItemCount,
             error: runError,
+            automationDetailsJson:
+              runAutomationDetailsJson,
             finishedAt,
           })
           .where(

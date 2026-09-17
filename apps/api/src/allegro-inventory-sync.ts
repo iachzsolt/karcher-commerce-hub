@@ -15,6 +15,10 @@ import {
   products,
 } from '@karcher-commerce-hub/database'
 
+import {
+  extractFailedInventoryListingDiagnostic,
+} from './inventory-automation-diagnostics.js'
+
 type Database =
   ReturnType<typeof createDatabase>
 
@@ -599,6 +603,7 @@ export async function syncAllegroInventoryRows(
   adapter: AllegroInventoryAdapter,
   options?: {
     historyGroupId?: string
+    batchIndex?: number
   },
 ) {
   const results:
@@ -864,8 +869,15 @@ export async function syncAllegroInventoryRows(
         results.push({
           sku: row.sku,
           listingId: row.listingId,
+          offerId: row.offerId,
           action: 'END',
           status: 'FAILED',
+          remoteStock: row.remoteStock,
+          targetStock: row.targetStock,
+          publicationStatus: row.publicationStatus,
+          desiredPublicationStatus:
+            'INACTIVE',
+          httpStatus: push.status,
           details: push.details,
         })
 
@@ -1022,12 +1034,19 @@ export async function syncAllegroInventoryRows(
         results.push({
           sku: row.sku,
           listingId: row.listingId,
+          offerId: row.offerId,
           action: 'STOCK_UPDATE',
           status: 'FAILED',
           fromStock:
             row.remoteStock,
           toStock:
             row.targetStock,
+          remoteStock: row.remoteStock,
+          targetStock: row.targetStock,
+          publicationStatus: row.publicationStatus,
+          desiredPublicationStatus:
+            row.desiredPublicationStatus,
+          httpStatus: push.status,
           details:
             push.details,
         })
@@ -1184,10 +1203,17 @@ export async function syncAllegroInventoryRows(
         results.push({
           sku: row.sku,
           listingId: row.listingId,
+          offerId: row.offerId,
           action: 'ACTIVATE',
           status: 'FAILED',
           stockUpdated:
             stockChanged,
+          remoteStock: row.remoteStock,
+          targetStock: row.targetStock,
+          publicationStatus: row.publicationStatus,
+          desiredPublicationStatus:
+            'ACTIVE',
+          httpStatus: push.status,
           details:
             push.details,
         })
@@ -1279,6 +1305,16 @@ export async function syncAllegroInventoryRows(
       typeof result.status === 'string'
         ? result.status
         : 'UNKNOWN'
+    const failedDiagnostic =
+      extractFailedInventoryListingDiagnostic(
+        result,
+        {
+          historyGroupId:
+            options?.historyGroupId,
+          batchIndex:
+            options?.batchIndex,
+        },
+      )
 
     if (!listingId) return []
 
@@ -1306,6 +1342,7 @@ export async function syncAllegroInventoryRows(
             typeof result.toStock === 'number'
               ? result.toStock
               : null,
+          ...(failedDiagnostic ?? {}),
         }),
         occurredAt: syncOccurredAt,
       },

@@ -988,6 +988,7 @@ allegroAuth.post('/inventory-sync', async (context) => {
           connectionId?: string
           listingIds?: string[]
           historyGroupId?: string
+          batchIndex?: number
         }
       | null
 
@@ -1281,6 +1282,10 @@ allegroAuth.post('/inventory-sync', async (context) => {
       {
         historyGroupId:
           body.historyGroupId ?? randomUUID(),
+        batchIndex:
+          typeof body.batchIndex === 'number'
+            ? body.batchIndex
+            : undefined,
       },
     )
 

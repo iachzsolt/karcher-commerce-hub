@@ -1119,6 +1119,10 @@ export const dataConnectionRuns = pgTable(
 
     error: text('error'),
 
+    automationDetailsJson: text(
+      'automation_details_json',
+    ),
+
     startedAt: timestamp('started_at', {
       withTimezone: true,
     })

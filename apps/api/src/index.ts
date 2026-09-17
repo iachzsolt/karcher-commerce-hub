@@ -63,6 +63,9 @@ import {
   getCommerceHubUser,
   type AccessVariables,
 } from './access-auth.js'
+import {
+  parseInventoryAutomationDiagnostics,
+} from './inventory-automation-diagnostics.js'
 
 export const app = new Hono<{
   Variables: AccessVariables
@@ -290,6 +293,8 @@ app.get('/allegro/inventory-refresh-runs', async (context) => {
       rowsImported: dataConnectionRuns.rowsImported,
       changedItemCount: dataConnectionRuns.changedItemCount,
       error: dataConnectionRuns.error,
+      automationDetailsJson:
+        dataConnectionRuns.automationDetailsJson,
       startedAt: dataConnectionRuns.startedAt,
       finishedAt: dataConnectionRuns.finishedAt,
     })
@@ -319,9 +324,18 @@ app.get('/allegro/inventory-refresh-runs', async (context) => {
       ),
     )
     .orderBy(desc(dataConnectionRuns.startedAt))
-  const runs = range.boundaries
+  const storedRuns = range.boundaries
     ? await runsQuery
     : await runsQuery.limit(100)
+  const runs = storedRuns.map(
+    ({ automationDetailsJson, ...run }) => ({
+      ...run,
+      automationDetails:
+        parseInventoryAutomationDiagnostics(
+          automationDetailsJson,
+        ),
+    }),
+  )
 
   return context.json({
     status: 'ok',

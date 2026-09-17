@@ -183,6 +183,13 @@
       "when": 1789139128890,
       "tag": "0025_feed-access-daily",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1789651614648,
+      "tag": "0026_inventory_refresh_run_diagnostics",
+      "breakpoints": true
     }
   ]
 }

@@ -1,0 +1,1 @@
+ALTER TABLE "data_connection_runs" ADD COLUMN "automation_details_json" text;

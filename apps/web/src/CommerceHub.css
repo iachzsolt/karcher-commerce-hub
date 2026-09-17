@@ -2245,6 +2245,71 @@ textarea {
   border-top: 1px solid #eef1f4;
 }
 
+.allegro-history-failed-listings {
+  display: grid;
+  gap: 8px;
+}
+
+.allegro-history-failed-listing {
+  display: grid;
+  gap: 7px;
+  padding: 11px 12px;
+  border: 1px solid #f0b8b8;
+  border-radius: 9px;
+  background: #fff8f8;
+}
+
+.allegro-history-failed-listing-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+}
+
+.allegro-history-failed-listing-heading strong {
+  font-size: 13px;
+}
+
+.allegro-history-failed-listing-heading span {
+  color: #b42318;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.allegro-history-failed-listing > p {
+  margin: 0;
+  color: #7a271a;
+  font-size: 12px;
+}
+
+.allegro-history-failure-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0 12px 12px;
+}
+
+.allegro-history-failure-meta > div {
+  min-width: 0;
+}
+
+.allegro-history-failure-meta dt {
+  color: #98a2b3;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.allegro-history-failure-meta dd {
+  margin: 2px 0 0;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .allegro-history-empty,
 .allegro-history-limit-note {
   padding: 34px 20px;
@@ -2336,6 +2401,10 @@ textarea {
   }
 
   .allegro-history-story-meta {
+    grid-template-columns: 1fr;
+  }
+
+  .allegro-history-failure-meta {
     grid-template-columns: 1fr;
   }
 
