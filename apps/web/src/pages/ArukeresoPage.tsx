@@ -16,10 +16,34 @@ import { API_BASE_URL } from '../config/api'
 
 import '../CommerceHub.css'
 
+type FeedDiagnostics = {
+  feedCurrent: boolean
+  inventoryStale: boolean
+  pricingStale: boolean
+  feedFinishedAt: string | null
+  inventoryUpdatedAt: string | null
+  pricingUpdatedAt: string | null
+}
+
+function formatFeedTime(value: string | null) {
+  if (!value) {
+    return 'nincs adat'
+  }
+
+  return new Intl.DateTimeFormat('hu-HU', {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(value))
+}
+
 function ArukeresoOverview({
   isActive,
+  feedDiagnostics,
 }: {
   isActive: boolean | null
+  feedDiagnostics: FeedDiagnostics | null
 }) {
   return (
     <>
@@ -46,6 +70,74 @@ function ArukeresoOverview({
           közvetlenül az Árukereső adataiból
           töltődnek be.
         </p>
+
+        <div className="arukereso-feed-health">
+          <div className="arukereso-feed-health-heading">
+            <strong>Feed állapota</strong>
+            <span>
+              {feedDiagnostics === null
+                ? 'Betöltés…'
+                : feedDiagnostics.feedCurrent
+                  ? 'Naprakész'
+                  : 'Frissítés szükséges'}
+            </span>
+          </div>
+
+          <div className="arukereso-feed-health-grid">
+            <div
+              className={
+                feedDiagnostics?.pricingStale
+                  ? 'is-stale'
+                  : 'is-current'
+              }
+            >
+              <span>Pricing Cockpit</span>
+              <strong>
+                {feedDiagnostics === null
+                  ? 'Betöltés…'
+                  : feedDiagnostics.pricingStale
+                    ? 'Újabb, mint a feed'
+                    : 'Naprakész'}
+              </strong>
+              <small>
+                {formatFeedTime(
+                  feedDiagnostics?.pricingUpdatedAt ??
+                    null,
+                )}
+              </small>
+            </div>
+
+            <div
+              className={
+                feedDiagnostics?.inventoryStale
+                  ? 'is-stale'
+                  : 'is-current'
+              }
+            >
+              <span>Készlet</span>
+              <strong>
+                {feedDiagnostics === null
+                  ? 'Betöltés…'
+                  : feedDiagnostics.inventoryStale
+                    ? 'Újabb, mint a feed'
+                    : 'Naprakész'}
+              </strong>
+              <small>
+                {formatFeedTime(
+                  feedDiagnostics?.inventoryUpdatedAt ??
+                    null,
+                )}
+              </small>
+            </div>
+          </div>
+
+          <small className="arukereso-feed-health-footnote">
+            Utolsó feed:{' '}
+            {formatFeedTime(
+              feedDiagnostics?.feedFinishedAt ?? null,
+            )}
+          </small>
+        </div>
       </section>
 
       <ArukeresoPerformanceView />
@@ -57,6 +149,8 @@ function ArukeresoPage() {
   const location = useLocation()
   const [isActive, setIsActive] =
     useState<boolean | null>(null)
+  const [feedDiagnostics, setFeedDiagnostics] =
+    useState<FeedDiagnostics | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -75,6 +169,21 @@ function ArukeresoPage() {
           typeof result.isActive === 'boolean'
         ) {
           setIsActive(result.isActive)
+        }
+      })
+      .catch(() => undefined)
+
+    void fetch(
+      `${API_BASE_URL}/arukereso/feed/latest`,
+      { signal: controller.signal },
+    )
+      .then(async (response) => {
+        const result = (await response.json()) as {
+          diagnostics?: FeedDiagnostics
+        }
+
+        if (response.ok && result.diagnostics) {
+          setFeedDiagnostics(result.diagnostics)
         }
       })
       .catch(() => undefined)
@@ -142,6 +251,7 @@ function ArukeresoPage() {
             element={
               <ArukeresoOverview
                 isActive={isActive}
+                feedDiagnostics={feedDiagnostics}
               />
             }
           />

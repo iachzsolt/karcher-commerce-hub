@@ -33,6 +33,7 @@ import {
   formatInventoryAutomationFailure,
   parseInventoryAutomationDiagnostics,
 } from './inventory-automation-diagnostics.js'
+import { requestArukeresoFeedGeneration } from './arukereso.js'
 
 const dataConnectionsApi = new Hono()
 
@@ -1929,6 +1930,64 @@ dataConnectionsApi.post(
    IMPORT INVENTORY
    ============================================================ */
 
+type InventoryImportFeedInput = {
+  status: string
+  changedItemCount: number
+}
+
+type InventoryFeedGenerationRequest = (
+  triggerType: 'INVENTORY_SYNC',
+) => Promise<unknown>
+
+function shouldRequestInventoryFeedGeneration(
+  input: InventoryImportFeedInput,
+) {
+  return (
+    input.status === 'SUCCESS' &&
+    input.changedItemCount > 0
+  )
+}
+
+async function runPostInventoryImportFeedHook(
+  input: InventoryImportFeedInput,
+  requestGeneration: InventoryFeedGenerationRequest =
+    requestArukeresoFeedGeneration,
+  automaticGenerationEnabled =
+    process.env.ARUKERESO_AUTO_GENERATE_ENABLED === 'true',
+) {
+  if (!shouldRequestInventoryFeedGeneration(input)) {
+    return {
+      status: 'skipped' as const,
+      reason: 'UNCHANGED_INVENTORY' as const,
+    }
+  }
+
+  if (!automaticGenerationEnabled) {
+    return {
+      status: 'skipped' as const,
+      reason:
+        'AUTOMATIC_GENERATION_DISABLED' as const,
+    }
+  }
+
+  try {
+    return await requestGeneration('INVENTORY_SYNC')
+  } catch (error) {
+    console.error(
+      'Inventory import succeeded, but Árukereső feed generation failed:',
+      error,
+    )
+
+    return {
+      status: 'error' as const,
+      message:
+        error instanceof Error
+          ? error.message
+          : 'Árukereső feed generation failed.',
+    }
+  }
+}
+
 dataConnectionsApi.post(
   '/:connectionId/import',
   async (context) => {
@@ -2373,6 +2432,12 @@ dataConnectionsApi.post(
           ),
         )
 
+      const feedGeneration =
+        await runPostInventoryImportFeedHook({
+          status: 'SUCCESS',
+          changedItemCount,
+        })
+
       return context.json({
         status: 'SUCCESS',
         rowsRead:
@@ -2387,6 +2452,7 @@ dataConnectionsApi.post(
             .duplicateSkuCount,
         changedItemCount,
         removedItemCount,
+        feedGeneration,
       })
     } catch (error) {
       const message =
@@ -2634,4 +2700,6 @@ dataConnectionsApi.get(
 
 export {
   dataConnectionsApi,
+  shouldRequestInventoryFeedGeneration,
+  runPostInventoryImportFeedHook,
 }

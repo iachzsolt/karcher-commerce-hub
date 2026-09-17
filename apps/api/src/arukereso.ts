@@ -8,10 +8,12 @@ import {
   feedProductOverrides,
   feedRunItems,
   feedRuns,
+  inventoryImportRuns,
   inventorySourceItems,
   pricingSourceItems,
   productIdentifiers,
   products,
+  schedulerLeases,
 } from '@karcher-commerce-hub/database'
 import { getCommerceHubUser } from './access-auth.js'
 import {
@@ -27,6 +29,7 @@ import {
   eq,
   inArray,
   isNull,
+  lte,
   ne,
   notInArray,
   or,
@@ -7561,7 +7564,486 @@ async function buildCatalogFeedOutput(
 type FeedGenerationTrigger =
   | 'MANUAL'
   | 'PRICING_SYNC'
+  | 'INVENTORY_SYNC'
   | 'CHANNEL_ACTIVATION'
+
+type FeedSourceRevision = {
+  fingerprint: string
+  inventoryConnectionId: string | null
+  pricingConnectionIds: string[]
+  inventoryFingerprint: string | null
+  pricingFingerprint: string
+  inventoryUpdatedAt: Date | null
+  pricingUpdatedAt: Date | null
+  inventoryImportRunning: boolean
+}
+
+type FeedFreshnessInput = {
+  feedFinishedAt: Date | string | null
+  feedSourceRevisionFingerprint: string | null
+  feedInventoryFingerprint: string | null
+  feedPricingFingerprint: string | null
+  currentSourceRevisionFingerprint: string
+  currentInventoryFingerprint: string | null
+  currentPricingFingerprint: string
+  inventoryUpdatedAt: Date | string | null
+  pricingUpdatedAt: Date | string | null
+}
+
+function toDateIso(
+  value: Date | string | null,
+): string | null {
+  if (value === null) {
+    return null
+  }
+
+  const date =
+    value instanceof Date ? value : new Date(value)
+
+  return Number.isNaN(date.getTime())
+    ? null
+    : date.toISOString()
+}
+
+function resolveFeedFreshness(
+  input: FeedFreshnessInput,
+) {
+  const hasFeed = input.feedFinishedAt !== null
+  const sourceRevisionStale =
+    hasFeed &&
+    input.feedSourceRevisionFingerprint !== null &&
+    input.feedSourceRevisionFingerprint !==
+      input.currentSourceRevisionFingerprint
+  const hasInventoryRevision =
+    input.currentInventoryFingerprint !== null ||
+    input.feedInventoryFingerprint !== null
+  const inventoryStale =
+    hasInventoryRevision &&
+    (!hasFeed ||
+      input.feedInventoryFingerprint !==
+        input.currentInventoryFingerprint)
+  const pricingStale =
+    input.currentPricingFingerprint !== '' &&
+    (!hasFeed ||
+      input.feedPricingFingerprint !==
+        input.currentPricingFingerprint)
+
+  return {
+    feedCurrent:
+      hasFeed &&
+      !sourceRevisionStale &&
+      !inventoryStale &&
+      !pricingStale,
+    sourceRevisionStale,
+    inventoryStale,
+    pricingStale,
+    feedFinishedAt: toDateIso(input.feedFinishedAt),
+    inventoryUpdatedAt: toDateIso(
+      input.inventoryUpdatedAt,
+    ),
+    pricingUpdatedAt: toDateIso(
+      input.pricingUpdatedAt,
+    ),
+  }
+}
+
+function hasFeedSourceRevisionChanged(
+  expectedFingerprint: string,
+  current: Pick<
+    FeedSourceRevision,
+    'fingerprint' | 'inventoryImportRunning'
+  >,
+) {
+  return (
+    current.inventoryImportRunning ||
+    current.fingerprint !== expectedFingerprint
+  )
+}
+
+function shouldDeduplicateFeedGeneration(input: {
+  triggerType: FeedGenerationTrigger
+  currentSourceRevision: string
+  completedSourceRevision: string | null
+}) {
+  return (
+    (input.triggerType === 'PRICING_SYNC' ||
+      input.triggerType === 'INVENTORY_SYNC') &&
+    input.completedSourceRevision ===
+      input.currentSourceRevision
+  )
+}
+
+function parseFeedSourceFingerprints(
+  sourceSnapshotJson: string | null,
+) {
+  if (!sourceSnapshotJson) {
+    return {
+      sourceRevisionFingerprint: null,
+      inventorySnapshotFingerprint: null,
+      pricingSnapshotFingerprint: null,
+    }
+  }
+
+  try {
+    const parsed = JSON.parse(sourceSnapshotJson) as Record<
+      string,
+      unknown
+    >
+    const pickString = (key: string) =>
+      typeof parsed[key] === 'string'
+        ? (parsed[key] as string)
+        : null
+
+    return {
+      sourceRevisionFingerprint: pickString(
+        'sourceRevisionFingerprint',
+      ),
+      inventorySnapshotFingerprint: pickString(
+        'inventorySnapshotFingerprint',
+      ),
+      pricingSnapshotFingerprint: pickString(
+        'pricingSnapshotFingerprint',
+      ),
+    }
+  } catch {
+    return {
+      sourceRevisionFingerprint: null,
+      inventorySnapshotFingerprint: null,
+      pricingSnapshotFingerprint: null,
+    }
+  }
+}
+
+function isCurrentSourceNewerThanLegacySnapshot(input: {
+  sourceSnapshotJson: string | null
+  connectionIds: string[]
+  currentUpdatedAt: Date | string | null
+}) {
+  if (
+    input.connectionIds.length === 0 ||
+    input.currentUpdatedAt === null
+  ) {
+    return false
+  }
+
+  try {
+    const parsed = JSON.parse(
+      input.sourceSnapshotJson ?? '{}',
+    ) as {
+      connectionRevisions?: Array<{
+        id?: unknown
+        updatedAt?: unknown
+      }>
+    }
+    const revisions =
+      parsed.connectionRevisions ?? []
+    const currentTime = new Date(
+      input.currentUpdatedAt,
+    ).getTime()
+
+    return input.connectionIds.some((connectionId) => {
+      const revision = revisions.find(
+        (item) => item.id === connectionId,
+      )
+
+      if (
+        !revision ||
+        (typeof revision.updatedAt !== 'string' &&
+          !(revision.updatedAt instanceof Date))
+      ) {
+        return true
+      }
+
+      return (
+        new Date(revision.updatedAt).getTime() < currentTime
+      )
+    })
+  } catch {
+    return true
+  }
+}
+
+async function loadFeedSourceRevision(
+  database: ReturnType<typeof requireDatabase>,
+  channel: FeedOutputContext['channel'],
+): Promise<FeedSourceRevision> {
+  const [connections, overrides] = await Promise.all([
+    database
+      .select({
+        id: dataConnections.id,
+        purpose: dataConnections.purpose,
+        sourceType: dataConnections.sourceType,
+        lastSuccessfulAt:
+          dataConnections.lastSuccessfulAt,
+      })
+      .from(dataConnections)
+      .where(eq(dataConnections.isActive, true)),
+    database
+      .select({
+        productId: feedProductOverrides.productId,
+        inclusionMode:
+          feedProductOverrides.inclusionMode,
+        reason: feedProductOverrides.reason,
+      })
+      .from(feedProductOverrides)
+      .where(
+        eq(feedProductOverrides.channelId, channel.id),
+      ),
+  ])
+  const catalogConnectionIds = connections
+    .filter(
+      (connection) =>
+        connection.purpose === 'CATALOG' &&
+        connection.sourceType === 'CSV_UPLOAD',
+    )
+    .map((connection) => connection.id)
+    .sort()
+  const pricingConnections = connections
+    .filter(
+      (connection) => connection.purpose === 'PRICING',
+    )
+    .sort((left, right) =>
+      left.id.localeCompare(right.id),
+    )
+  const inventoryConnection = connections.find(
+    (connection) => connection.purpose === 'INVENTORY',
+  )
+  const pricingConnectionIds = pricingConnections.map(
+    (connection) => connection.id,
+  )
+
+  const [
+    catalogRows,
+    pricingRows,
+    completedInventoryRuns,
+    runningInventoryRuns,
+    inventoryRows,
+  ] =
+    await Promise.all([
+      catalogConnectionIds.length > 0
+        ? database
+            .select({
+              connectionId:
+                catalogSourceItems.connectionId,
+              sourceItemKey:
+                catalogSourceItems.sourceItemKey,
+              productId: catalogSourceItems.productId,
+              sourceFingerprint:
+                catalogSourceItems.sourceFingerprint,
+            })
+            .from(catalogSourceItems)
+            .where(
+              inArray(
+                catalogSourceItems.connectionId,
+                catalogConnectionIds,
+              ),
+            )
+        : [],
+      pricingConnectionIds.length > 0
+        ? database
+            .select({
+              connectionId:
+                pricingSourceItems.connectionId,
+              sourceItemKey:
+                pricingSourceItems.sourceItemKey,
+              marketCode: pricingSourceItems.marketCode,
+              currency: pricingSourceItems.currency,
+              productId: pricingSourceItems.productId,
+              priceIndexBps:
+                pricingSourceItems.priceIndexBps,
+              medianIndexBps:
+                pricingSourceItems.medianIndexBps,
+              averageIndexBps:
+                pricingSourceItems.averageIndexBps,
+              dataStatus: pricingSourceItems.dataStatus,
+              sourceFingerprint:
+                pricingSourceItems.sourceFingerprint,
+            })
+            .from(pricingSourceItems)
+            .where(
+              and(
+                inArray(
+                  pricingSourceItems.connectionId,
+                  pricingConnectionIds,
+                ),
+                eq(pricingSourceItems.marketCode, 'HU'),
+                eq(pricingSourceItems.currency, 'HUF'),
+              ),
+            )
+        : [],
+      inventoryConnection
+        ? database
+            .select({
+              finishedAt: inventoryImportRuns.finishedAt,
+            })
+            .from(inventoryImportRuns)
+            .where(
+              and(
+                eq(
+                  inventoryImportRuns.connectionId,
+                  inventoryConnection.id,
+                ),
+                or(
+                  eq(
+                    inventoryImportRuns.status,
+                    'SUCCESS',
+                  ),
+                  eq(
+                    inventoryImportRuns.status,
+                    'NO_CHANGE',
+                  ),
+                ),
+              ),
+            )
+            .orderBy(desc(inventoryImportRuns.finishedAt))
+            .limit(1)
+        : [],
+      inventoryConnection
+        ? database
+            .select({
+              id: inventoryImportRuns.id,
+              startedAt: inventoryImportRuns.startedAt,
+            })
+            .from(inventoryImportRuns)
+            .where(
+              and(
+                eq(
+                  inventoryImportRuns.connectionId,
+                  inventoryConnection.id,
+                ),
+                eq(inventoryImportRuns.status, 'RUNNING'),
+              ),
+            )
+            .orderBy(desc(inventoryImportRuns.startedAt))
+        : [],
+      inventoryConnection
+        ? database
+            .select({
+              sku: inventorySourceItems.sku,
+              stock: inventorySourceItems.stock,
+              lastImportRunId:
+                inventorySourceItems.lastImportRunId,
+            })
+            .from(inventorySourceItems)
+            .where(
+              eq(
+                inventorySourceItems.connectionId,
+                inventoryConnection.id,
+              ),
+            )
+        : [],
+    ])
+  const latestCompletedInventoryRun =
+    completedInventoryRuns[0]
+  const inventoryFingerprint = inventoryConnection
+    ? createFeedFingerprint(
+        JSON.stringify(
+          inventoryRows
+            .map((row) => ({
+              sku: row.sku,
+              stock: row.stock,
+            }))
+            .sort((left, right) =>
+              left.sku.localeCompare(right.sku),
+            ),
+        ),
+      )
+    : null
+  const pricingFingerprint = createFeedFingerprint(
+    JSON.stringify(
+      pricingRows
+        .map((row) => ({
+          connectionId: row.connectionId,
+          sourceItemKey: row.sourceItemKey,
+          marketCode: row.marketCode,
+          currency: row.currency,
+          productId: row.productId,
+          priceIndexBps: row.priceIndexBps,
+          medianIndexBps: row.medianIndexBps,
+          averageIndexBps: row.averageIndexBps,
+          dataStatus: row.dataStatus,
+          sourceFingerprint: row.sourceFingerprint,
+        }))
+        .sort((left, right) =>
+          `${left.connectionId}:${left.sourceItemKey}:${left.marketCode}:${left.currency}`.localeCompare(
+            `${right.connectionId}:${right.sourceItemKey}:${right.marketCode}:${right.currency}`,
+          ),
+        ),
+    ),
+  )
+  const catalogFingerprint = createFeedFingerprint(
+    JSON.stringify(
+      catalogRows
+        .map((row) => ({
+          connectionId: row.connectionId,
+          sourceItemKey: row.sourceItemKey,
+          productId: row.productId,
+          sourceFingerprint: row.sourceFingerprint,
+        }))
+        .sort((left, right) =>
+          `${left.connectionId}:${left.sourceItemKey}`.localeCompare(
+            `${right.connectionId}:${right.sourceItemKey}`,
+          ),
+        ),
+    ),
+  )
+  const fingerprint = createFeedFingerprint(
+    JSON.stringify({
+      channelId: channel.id,
+      settingsJson: channel.settingsJson,
+      catalogConnectionIds,
+      catalogFingerprint,
+      pricingConnectionIds,
+      pricingFingerprint,
+      inventoryConnectionId:
+        inventoryConnection?.id ?? null,
+      inventoryFingerprint,
+      overrides: overrides
+        .map((override) => ({
+          productId: override.productId,
+          inclusionMode: override.inclusionMode,
+          reason: override.reason,
+        }))
+        .sort((left, right) =>
+          left.productId.localeCompare(right.productId),
+        ),
+    }),
+  )
+
+  return {
+    fingerprint,
+    inventoryConnectionId:
+      inventoryConnection?.id ?? null,
+    pricingConnectionIds,
+    inventoryFingerprint,
+    pricingFingerprint,
+    inventoryUpdatedAt:
+      latestCompletedInventoryRun?.finishedAt ??
+      inventoryConnection?.lastSuccessfulAt ??
+      null,
+    pricingUpdatedAt:
+      pricingConnections.reduce<Date | null>(
+        (latest, connection) => {
+          const value = connection.lastSuccessfulAt
+
+          if (!value) {
+            return latest
+          }
+
+          return !latest || value > latest ? value : latest
+        },
+        null,
+      ),
+    inventoryImportRunning: runningInventoryRuns.some(
+      (run) =>
+        run.startedAt.getTime() >
+          Date.now() - 10 * 60 * 1000 ||
+        inventoryRows.some(
+          (row) => row.lastImportRunId === run.id,
+        ),
+    ),
+  }
+}
 
 // Retention keeps feed_runs summaries indefinitely and
 // prunes feed_run_items of older runs: only the newest
@@ -7695,10 +8177,300 @@ async function pruneOldFeedRunItems(
   }
 }
 
+const FEED_GENERATION_LEASE_MS = 30_000
+const FEED_GENERATION_WAIT_MS = 35_000
+const FEED_GENERATION_POLL_MS = 250
+
+function delay(milliseconds: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, milliseconds)
+  })
+}
+
+function createKeyedSerialExecutor() {
+  const tails = new Map<string, Promise<void>>()
+
+  return async function run<T>(
+    key: string,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const previous = tails.get(key) ?? Promise.resolve()
+    let release: () => void = () => {}
+    const turn = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const tail = previous
+      .catch(() => undefined)
+      .then(() => turn)
+
+    tails.set(key, tail)
+    await previous.catch(() => undefined)
+
+    try {
+      return await action()
+    } finally {
+      release()
+
+      if (tails.get(key) === tail) {
+        tails.delete(key)
+      }
+    }
+  }
+}
+
+const runSerialFeedGeneration =
+  createKeyedSerialExecutor()
+
+async function withFeedGenerationLease<T>(input: {
+  database: ReturnType<typeof requireDatabase>
+  channelId: string
+  action: (
+    lease: {
+      name: string
+      ownerId: string
+      assertOwned: () => Promise<void>
+    },
+  ) => Promise<T>
+}): Promise<T> {
+  const name = `arukereso-feed:${input.channelId}`
+  const ownerId = randomUUID()
+  const deadline = Date.now() + FEED_GENERATION_WAIT_MS
+
+  while (true) {
+    const now = new Date()
+    const lockedUntil = new Date(
+      now.getTime() + FEED_GENERATION_LEASE_MS,
+    )
+    const acquired = await input.database
+      .insert(schedulerLeases)
+      .values({
+        name,
+        ownerId,
+        lockedUntil,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: schedulerLeases.name,
+        set: {
+          ownerId,
+          lockedUntil,
+          updatedAt: now,
+        },
+        setWhere: lte(schedulerLeases.lockedUntil, now),
+      })
+      .returning({ ownerId: schedulerLeases.ownerId })
+
+    if (acquired[0]?.ownerId === ownerId) {
+      break
+    }
+
+    if (Date.now() >= deadline) {
+      throw new FeedOutputError(
+        'A feed generálás már folyamatban van; próbáld újra.',
+        'FEED_GENERATION_BUSY',
+      )
+    }
+
+    await delay(FEED_GENERATION_POLL_MS)
+  }
+
+  let leaseLost = false
+  let renewalInFlight: Promise<void> | null = null
+  const renewLease = async () => {
+    const now = new Date()
+    const renewed = await input.database
+      .update(schedulerLeases)
+      .set({
+        lockedUntil: new Date(
+          now.getTime() + FEED_GENERATION_LEASE_MS,
+        ),
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schedulerLeases.name, name),
+          eq(schedulerLeases.ownerId, ownerId),
+        ),
+      )
+      .returning({ ownerId: schedulerLeases.ownerId })
+
+    if (renewed[0]?.ownerId !== ownerId) {
+      leaseLost = true
+    }
+  }
+  const renewalTimer = setInterval(() => {
+    if (renewalInFlight !== null) {
+      return
+    }
+
+    const renewal = renewLease()
+      .catch((error: unknown) => {
+        leaseLost = true
+        console.error(
+          'Feed generation lease renewal failed:',
+          error,
+        )
+      })
+      .finally(() => {
+        if (renewalInFlight === renewal) {
+          renewalInFlight = null
+        }
+      })
+
+    renewalInFlight = renewal
+  }, Math.floor(FEED_GENERATION_LEASE_MS / 3))
+  const assertLeaseOwned = async () => {
+    if (renewalInFlight) {
+      await renewalInFlight
+    }
+
+    const [lease] = await input.database
+      .select({
+        ownerId: schedulerLeases.ownerId,
+        lockedUntil: schedulerLeases.lockedUntil,
+      })
+      .from(schedulerLeases)
+      .where(eq(schedulerLeases.name, name))
+      .limit(1)
+
+    if (
+      leaseLost ||
+      lease?.ownerId !== ownerId ||
+      !lease.lockedUntil ||
+      lease.lockedUntil.getTime() <= Date.now()
+    ) {
+      throw new FeedOutputError(
+        'A feed generálási zárolás lejárt vagy másik folyamat vette át.',
+        'FEED_GENERATION_LEASE_LOST',
+      )
+    }
+  }
+
+  try {
+    return await input.action({
+      name,
+      ownerId,
+      assertOwned: assertLeaseOwned,
+    })
+  } finally {
+    clearInterval(renewalTimer)
+
+    if (renewalInFlight) {
+      await renewalInFlight
+    }
+
+    await input.database
+      .delete(schedulerLeases)
+      .where(
+        and(
+          eq(schedulerLeases.name, name),
+          eq(schedulerLeases.ownerId, ownerId),
+        ),
+      )
+      .catch((error: unknown) => {
+        console.error(
+          'Feed generation lease release failed:',
+          error,
+        )
+      })
+  }
+}
+
+async function findCompletedRunBySourceRevision(
+  database: ReturnType<typeof requireDatabase>,
+  channelId: string,
+  sourceRevisionFingerprint: string,
+) {
+  const runs = await database
+    .select({
+      id: feedRuns.id,
+      itemsEvaluated: feedRuns.itemsEvaluated,
+      itemsIncluded: feedRuns.itemsIncluded,
+      itemsExcluded: feedRuns.itemsExcluded,
+      sourceSnapshotJson: feedRuns.sourceSnapshotJson,
+      artifactFileName: feedRuns.artifactFileName,
+      artifactContentType: feedRuns.artifactContentType,
+      artifactFingerprint: feedRuns.artifactFingerprint,
+    })
+    .from(feedRuns)
+    .where(
+      and(
+        eq(feedRuns.channelId, channelId),
+        eq(feedRuns.status, 'COMPLETED'),
+        eq(feedRuns.generatorVersion, FEED_GENERATOR_VERSION),
+      ),
+    )
+    .orderBy(desc(feedRuns.startedAt))
+    .limit(1)
+
+  for (const run of runs) {
+    const snapshot = parseFeedSourceFingerprints(
+      run.sourceSnapshotJson,
+    )
+
+    if (
+      snapshot.sourceRevisionFingerprint !==
+      sourceRevisionFingerprint
+    ) {
+      continue
+    }
+
+    let sourceRows = run.itemsEvaluated
+
+    try {
+      const parsed = JSON.parse(
+        run.sourceSnapshotJson,
+      ) as { sourceRows?: unknown }
+
+      if (typeof parsed.sourceRows === 'number') {
+        sourceRows = parsed.sourceRows
+      }
+    } catch {
+      // The fingerprint parser already validated enough for deduplication.
+    }
+
+    return {
+      runId: run.id,
+      deduplicated: true,
+      sourceRevisionFingerprint:
+        snapshot.sourceRevisionFingerprint,
+      summary: {
+        sourceRows,
+        matchedRows: run.itemsEvaluated,
+        outputRows:
+          run.itemsIncluded + run.itemsExcluded,
+        activeRows: run.itemsIncluded,
+        disabledRows: run.itemsExcluded,
+        includedRows: run.itemsIncluded,
+        excludedRows: run.itemsExcluded,
+      },
+      reasonCounts: {},
+      artifact: {
+        fileName:
+          run.artifactFileName ?? FEED_OUTPUT_FILE_NAME,
+        contentType:
+          run.artifactContentType ??
+          'text/csv; charset=utf-8',
+        fingerprint: run.artifactFingerprint,
+        downloadPath:
+          `/arukereso/feed/runs/${run.id}/csv`,
+      },
+    }
+  }
+
+  return null
+}
+
 async function generateCatalogFeedRun(input: {
   database: ReturnType<typeof requireDatabase>
   channel: FeedOutputContext['channel']
   triggerType: FeedGenerationTrigger
+  sourceRevision: FeedSourceRevision
+  lease: {
+    name: string
+    ownerId: string
+    assertOwned: () => Promise<void>
+  }
   activateChannel?: boolean
 }) {
   const { database, channel } = input
@@ -7767,6 +8539,21 @@ async function generateCatalogFeedRun(input: {
     assertCatalogFeedOutputUniqueness(
       output.outputItems,
     )
+
+    const currentSourceRevision =
+      await loadFeedSourceRevision(database, channel)
+
+    if (
+      hasFeedSourceRevisionChanged(
+        input.sourceRevision.fingerprint,
+        currentSourceRevision,
+      )
+    ) {
+      throw new FeedOutputError(
+        'A feed forrásadatai generálás közben megváltoztak.',
+        'FEED_SOURCE_REVISION_CHANGED',
+      )
+    }
 
     const csv = createCatalogFeedCsv(
       output.outputItems,
@@ -7867,6 +8654,13 @@ async function generateCatalogFeedRun(input: {
       )
     }
 
+    const leaseOwnedCondition = sql<boolean>`exists (
+      select 1
+      from ${schedulerLeases}
+      where ${schedulerLeases.name} = ${input.lease.name}
+        and ${schedulerLeases.ownerId} = ${input.lease.ownerId}
+        and ${schedulerLeases.lockedUntil} > now()
+    )`
     const completeRun = database
       .update(feedRuns)
       .set({
@@ -7881,6 +8675,16 @@ async function generateCatalogFeedRun(input: {
         outputFingerprint: artifactFingerprint,
         sourceSnapshotJson: JSON.stringify({
           ...output.sourceSnapshot,
+          sourceRevisionFingerprint:
+            input.sourceRevision.fingerprint,
+          inventorySnapshotFingerprint:
+            input.sourceRevision.inventoryFingerprint,
+          pricingSnapshotFingerprint:
+            input.sourceRevision.pricingFingerprint,
+          inventoryUpdatedAt:
+            input.sourceRevision.inventoryUpdatedAt,
+          pricingUpdatedAt:
+            input.sourceRevision.pricingUpdatedAt,
           priceKitBaseRows:
             output.summary.priceKitBaseRows,
           manuallyAddedRows:
@@ -7901,9 +8705,16 @@ async function generateCatalogFeedRun(input: {
         artifactFingerprint,
         finishedAt: new Date(),
       })
-      .where(eq(feedRuns.id, run.id))
+      .where(
+        and(
+          eq(feedRuns.id, run.id),
+          leaseOwnedCondition,
+        ),
+      )
+      .returning({ id: feedRuns.id })
     const channelUpdateConditions = [
       eq(feedChannels.id, channel.id),
+      leaseOwnedCondition,
     ]
 
     if (input.activateChannel) {
@@ -7990,12 +8801,40 @@ async function generateCatalogFeedRun(input: {
       markChannelSuccessful,
     ]
 
+    await input.lease.assertOwned()
+    const finalSourceRevision =
+      await loadFeedSourceRevision(database, channel)
+
+    if (
+      hasFeedSourceRevisionChanged(
+        input.sourceRevision.fingerprint,
+        finalSourceRevision,
+      )
+    ) {
+      throw new FeedOutputError(
+        'A feed forrásadatai mentés előtt megváltoztak.',
+        'FEED_SOURCE_REVISION_CHANGED',
+      )
+    }
+
+    await input.lease.assertOwned()
+
     const batchResults = await database.batch(
       batchQueries as [
         (typeof batchQueries)[number],
         ...(typeof batchQueries)[number][],
       ],
     )
+    const completeRunResult = batchResults[
+      insertItemQueries.length
+    ] as Array<{ id: string }>
+
+    if (completeRunResult.length === 0) {
+      throw new FeedOutputError(
+        'A feed generálási zárolás mentés előtt lejárt.',
+        'FEED_GENERATION_LEASE_LOST',
+      )
+    }
 
     if (input.activateChannel) {
       const channelUpdateResult = batchResults[
@@ -8049,6 +8888,16 @@ async function generateCatalogFeedRun(input: {
         : 'Feed generation failed.'
 
     await database
+      .delete(feedRunItems)
+      .where(eq(feedRunItems.runId, run.id))
+      .catch((cleanupError: unknown) => {
+        console.error(
+          'Failed feed run item cleanup failed:',
+          cleanupError,
+        )
+      })
+
+    await database
       .update(feedRuns)
       .set({
         status: 'FAILED',
@@ -8081,6 +8930,140 @@ async function generateCatalogFeedRun(input: {
       feedRunId: run.id,
     })
     throw generationError
+  }
+}
+
+async function coordinateCatalogFeedGeneration(input: {
+  database: ReturnType<typeof requireDatabase>
+  channel: FeedOutputContext['channel']
+  triggerType: FeedGenerationTrigger
+  activateChannel?: boolean
+}) {
+  return runSerialFeedGeneration(
+    input.channel.id,
+    () =>
+      withFeedGenerationLease({
+        database: input.database,
+        channelId: input.channel.id,
+        action: async (lease) => {
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            let sourceRevision =
+              await loadFeedSourceRevision(
+                input.database,
+                input.channel,
+              )
+            const inventoryWaitDeadline =
+              Date.now() + FEED_GENERATION_WAIT_MS
+
+            while (
+              sourceRevision.inventoryImportRunning &&
+              Date.now() < inventoryWaitDeadline
+            ) {
+              await delay(FEED_GENERATION_POLL_MS)
+              sourceRevision =
+                await loadFeedSourceRevision(
+                  input.database,
+                  input.channel,
+                )
+            }
+
+            if (sourceRevision.inventoryImportRunning) {
+              throw new FeedOutputError(
+                'A készletimport még folyamatban van; a feed generálása nem indult el.',
+                'INVENTORY_IMPORT_RUNNING',
+              )
+            }
+
+            if (
+              input.triggerType === 'PRICING_SYNC' ||
+              input.triggerType === 'INVENTORY_SYNC'
+            ) {
+              const existing =
+                await findCompletedRunBySourceRevision(
+                  input.database,
+                  input.channel.id,
+                  sourceRevision.fingerprint,
+                )
+
+              if (
+                existing &&
+                shouldDeduplicateFeedGeneration({
+                  triggerType: input.triggerType,
+                  currentSourceRevision:
+                    sourceRevision.fingerprint,
+                  completedSourceRevision:
+                    existing.sourceRevisionFingerprint,
+                })
+              ) {
+                return existing
+              }
+            }
+
+            try {
+              return await generateCatalogFeedRun({
+                ...input,
+                sourceRevision,
+                lease,
+              })
+            } catch (error) {
+              if (
+                attempt === 0 &&
+                error instanceof FeedOutputError &&
+                error.code ===
+                  'FEED_SOURCE_REVISION_CHANGED'
+              ) {
+                console.warn(
+                  'Feed source changed during generation; retrying once.',
+                  {
+                    channelId: input.channel.id,
+                    triggerType: input.triggerType,
+                  },
+                )
+                continue
+              }
+
+              throw error
+            }
+          }
+
+          throw new FeedOutputError(
+            'A feed forrásadatai ismételten megváltoztak.',
+            'FEED_SOURCE_REVISION_CHANGED',
+          )
+        },
+      }),
+  )
+}
+
+async function requestArukeresoFeedGeneration(
+  triggerType: FeedGenerationTrigger,
+) {
+  const { database, channel } =
+    await resolveFeedChannel()
+
+  if (!channel) {
+    throw new FeedOutputError(
+      'Az Árukereső feed csatorna nincs konfigurálva (ARUKERESO_HU).',
+      'FEED_CHANNEL_NOT_FOUND',
+    )
+  }
+
+  if (!channel.isActive) {
+    return {
+      status: 'skipped' as const,
+      code: 'CHANNEL_INACTIVE' as const,
+      message:
+        'Az Árukereső feed csatorna ki van kapcsolva. Generálás nem történt.',
+    }
+  }
+
+  return {
+    status: 'ok' as const,
+    ...(await coordinateCatalogFeedGeneration({
+      database,
+      channel,
+      triggerType,
+    })),
   }
 }
 
@@ -8141,11 +9124,13 @@ arukeresoApi.post(
     const triggerType =
       requestedTriggerType === 'PRICING_SYNC'
         ? 'PRICING_SYNC'
+        : requestedTriggerType === 'INVENTORY_SYNC'
+          ? 'INVENTORY_SYNC'
         : 'MANUAL'
 
     try {
       const generated =
-        await generateCatalogFeedRun({
+        await coordinateCatalogFeedGeneration({
           database,
           channel,
           triggerType,
@@ -8468,10 +9453,89 @@ arukeresoApi.get(
           database,
           channel.id,
         )
+      const currentRevision =
+        await loadFeedSourceRevision(database, channel)
+      const feedFingerprints =
+        parseFeedSourceFingerprints(
+          latestRun?.sourceSnapshotJson ?? null,
+        )
+      const fingerprintFreshness =
+        resolveFeedFreshness({
+          feedFinishedAt:
+            latestRun?.finishedAt ?? null,
+          feedSourceRevisionFingerprint:
+            feedFingerprints.sourceRevisionFingerprint,
+          feedInventoryFingerprint:
+            feedFingerprints.inventorySnapshotFingerprint,
+          feedPricingFingerprint:
+            feedFingerprints.pricingSnapshotFingerprint,
+          currentSourceRevisionFingerprint:
+            currentRevision.fingerprint,
+          currentInventoryFingerprint:
+            currentRevision.inventoryFingerprint,
+          currentPricingFingerprint:
+            currentRevision.pricingFingerprint,
+          inventoryUpdatedAt:
+            currentRevision.inventoryUpdatedAt,
+          pricingUpdatedAt:
+            currentRevision.pricingUpdatedAt,
+        })
+      const inventoryStale =
+        feedFingerprints.inventorySnapshotFingerprint ===
+          null && latestRun
+          ? isCurrentSourceNewerThanLegacySnapshot({
+              sourceSnapshotJson:
+                latestRun.sourceSnapshotJson,
+              connectionIds:
+                currentRevision.inventoryConnectionId
+                  ? [
+                      currentRevision.inventoryConnectionId,
+                    ]
+                  : [],
+              currentUpdatedAt:
+                currentRevision.inventoryUpdatedAt,
+            })
+          : fingerprintFreshness.inventoryStale
+      const pricingStale =
+        feedFingerprints.pricingSnapshotFingerprint ===
+          null && latestRun
+          ? isCurrentSourceNewerThanLegacySnapshot({
+              sourceSnapshotJson:
+                latestRun.sourceSnapshotJson,
+              connectionIds:
+                currentRevision.pricingConnectionIds,
+              currentUpdatedAt:
+                currentRevision.pricingUpdatedAt,
+            })
+          : fingerprintFreshness.pricingStale
+      const publicLatestRun = latestRun
+        ? {
+            runId: latestRun.runId,
+            status: latestRun.status,
+            includedRows: latestRun.includedRows,
+            excludedRows: latestRun.excludedRows,
+            outputRows: latestRun.outputRows,
+            finishedAt: latestRun.finishedAt,
+            artifactFingerprint:
+              latestRun.artifactFingerprint,
+            generatorVersion:
+              latestRun.generatorVersion,
+          }
+        : null
 
       return context.json({
         status: 'ok',
-        latestRun,
+        latestRun: publicLatestRun,
+        diagnostics: {
+          ...fingerprintFreshness,
+          feedCurrent:
+            latestRun !== null &&
+            !fingerprintFreshness.sourceRevisionStale &&
+            !inventoryStale &&
+            !pricingStale,
+          inventoryStale,
+          pricingStale,
+        },
       })
     } catch (error) {
       return context.json(
@@ -8504,6 +9568,8 @@ async function findLatestCompletedNormalFeedRun(
           feedRuns.artifactFingerprint,
         generatorVersion:
           feedRuns.generatorVersion,
+        sourceSnapshotJson:
+          feedRuns.sourceSnapshotJson,
       })
       .from(feedRuns)
       .where(
@@ -10209,7 +11275,7 @@ arukeresoApi.patch(
         !channel.isActive
       ) {
         const generated =
-          await generateCatalogFeedRun({
+          await coordinateCatalogFeedGeneration({
             database,
             channel: {
               ...channel,
@@ -10590,6 +11656,11 @@ export {
   collapsePricingItemRows,
   applyPricingItemSearch,
   derivePricingItemFeedState,
+  requestArukeresoFeedGeneration,
+  resolveFeedFreshness,
+  hasFeedSourceRevisionChanged,
+  shouldDeduplicateFeedGeneration,
+  createKeyedSerialExecutor,
   selectPrunableFeedRunIds,
   FEED_RUN_ITEMS_RETAINED_RUNS,
   resolveFeedAccessDay,
