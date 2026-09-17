@@ -78,6 +78,16 @@ COMMERCE_HUB_ARUKERESO_PRICING_SYNC_TOKEN=replace-with-random-secret
 ARUKERESO_PUBLIC_FEED_TOKEN=replace-with-url-safe-random-token
 ARUKERESO_AUTO_GENERATE_ENABLED=true
 ARUKERESO_SNAPSHOT_MIN_RATIO=0.60
+ARUKERESO_CATALOG_SNAPSHOT_MIN_RATIO=0.85
+ARUKERESO_PRICING_SNAPSHOT_MIN_RATIO=0.60
+ARUKERESO_SOURCE_FEED_URL=https://source.example.com/catalog.csv
+ARUKERESO_SOURCE_FEED_USERNAME=replace-with-service-username
+ARUKERESO_SOURCE_FEED_PASSWORD=replace-with-service-password
+ARUKERESO_SOURCE_FEED_SCHEDULE_ENABLED=false
+ARUKERESO_SOURCE_FEED_REFRESH_TIME=06:45
+ARUKERESO_SOURCE_FEED_TIMEOUT_MS=30000
+ARUKERESO_SOURCE_FEED_MAX_BYTES=26214400
+ARUKERESO_SOURCE_FEED_MAX_ATTEMPTS=3
 ```
 
 Multiple origins and email addresses are comma-separated. Email matching is
@@ -86,6 +96,13 @@ missing or both email lists are empty. `/health` and the Allegro OAuth callback
 are public. The direct API routes `/arukereso/pricing/sync` and
 `/arukereso/feed/public/<TOKEN>.csv` use their own tokens and must not be
 exposed through a broader authentication bypass.
+
+`ARUKERESO_CATALOG_SNAPSHOT_MIN_RATIO` and
+`ARUKERESO_PRICING_SNAPSHOT_MIN_RATIO` independently protect the two snapshot
+types. If either source-specific variable is absent, it falls back to the
+legacy shared `ARUKERESO_SNAPSHOT_MIN_RATIO`, then to `0.60`. Keep catalog at
+`0.85` for production; pricing remains `0.60` unless its observed row-count
+variation supports a stricter setting.
 
 Authenticated users are read-only by default. Only addresses listed in
 `COMMERCE_HUB_ADMIN_EMAILS` can call non-GET API routes. For the first pilot,
@@ -143,6 +160,16 @@ intended local times hold regardless of timezone support:
   page, so silent failures are visible. A manual trigger
   (`POST /allegro/catalog-sync`, admin only) imports new Allegro offers on
   demand; recent runs are readable via `GET /allegro/catalog-sync-runs`.
+- The Kärcher commercial source refresh defaults to 06:45 Europe/Budapest
+  when `ARUKERESO_SOURCE_FEED_SCHEDULE_ENABLED=true`. Deno registers 04:45,
+  05:45, and 06:45 UTC candidates and validates the current Budapest calendar
+  time in an inclusive two-hour grace window. A renewable cross-runtime lock
+  prevents overlapping attempts. Only a successful source refresh writes the
+  Budapest-date-specific 22-hour daily-success marker, so a later eligible
+  candidate retries after a failed download while later candidates skip after
+  success without suppressing the next calendar day. A successful
+  changed snapshot triggers the existing coordinated Árukereső feed
+  generation; an unchanged snapshot does not.
 - `0 2 * * *` — daily maintenance (Allegro history cleanup), 02:00 UTC.
 
 The former minute poll, six-hour cron, and standalone catalog-sync cron were

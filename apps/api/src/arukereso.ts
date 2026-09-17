@@ -37,6 +37,10 @@ import {
 } from 'drizzle-orm'
 import { Hono, type Context } from 'hono'
 import * as XLSX from 'xlsx'
+import {
+  downloadArukeresoSourceFeed,
+  SourceFeedRefreshError,
+} from './arukereso-source-feed.js'
 
 const arukeresoApi = new Hono()
 
@@ -76,8 +80,12 @@ const EXPECTED_CATALOG_HEADERS = [
 const PREVIEW_LIMIT = 50
 
 const INVALID_ROWS_LIMIT = 100
-const SNAPSHOT_MIN_RATIO_ENV =
+const LEGACY_SNAPSHOT_MIN_RATIO_ENV =
   'ARUKERESO_SNAPSHOT_MIN_RATIO'
+const CATALOG_SNAPSHOT_MIN_RATIO_ENV =
+  'ARUKERESO_CATALOG_SNAPSHOT_MIN_RATIO'
+const PRICING_SNAPSHOT_MIN_RATIO_ENV =
+  'ARUKERESO_PRICING_SNAPSHOT_MIN_RATIO'
 const SNAPSHOT_MIN_RATIO_DEFAULT = 0.6
 const SNAPSHOT_GUARD_MIN_PREVIOUS_ROWS = 100
 
@@ -103,17 +111,29 @@ class SnapshotSafetyConfigurationError extends Error {
   readonly code =
     'INVALID_SNAPSHOT_SAFETY_CONFIGURATION'
 
-  constructor() {
+  constructor(readonly variableName: string) {
     super(
-      `${SNAPSHOT_MIN_RATIO_ENV} must be greater than 0 and at most 1.`,
+      `${variableName} must be greater than 0 and at most 1.`,
     )
     this.name = 'SnapshotSafetyConfigurationError'
   }
 }
 
-function getSnapshotMinRatio() {
-  const configured =
-    process.env[SNAPSHOT_MIN_RATIO_ENV]?.trim()
+function getSnapshotMinRatio(
+  source: 'CATALOG' | 'PRICING',
+) {
+  const specificVariable =
+    source === 'CATALOG'
+      ? CATALOG_SNAPSHOT_MIN_RATIO_ENV
+      : PRICING_SNAPSHOT_MIN_RATIO_ENV
+  const specificValue =
+    process.env[specificVariable]?.trim()
+  const legacyValue =
+    process.env[LEGACY_SNAPSHOT_MIN_RATIO_ENV]?.trim()
+  const configured = specificValue || legacyValue
+  const configuredVariable = specificValue
+    ? specificVariable
+    : LEGACY_SNAPSHOT_MIN_RATIO_ENV
 
   if (!configured) {
     return SNAPSHOT_MIN_RATIO_DEFAULT
@@ -126,7 +146,9 @@ function getSnapshotMinRatio() {
     ratio <= 0 ||
     ratio > 1
   ) {
-    throw new SnapshotSafetyConfigurationError()
+    throw new SnapshotSafetyConfigurationError(
+      configuredVariable,
+    )
   }
 
   return ratio
@@ -137,7 +159,7 @@ function assertSnapshotSizeSafety(input: {
   previousRows: number
   incomingRows: number
 }) {
-  const minRatio = getSnapshotMinRatio()
+  const minRatio = getSnapshotMinRatio(input.source)
 
   if (
     input.previousRows >=
@@ -202,7 +224,8 @@ function isSnapshotSafetyError(
 }
 
 function assertArukeresoConfiguration() {
-  getSnapshotMinRatio()
+  getSnapshotMinRatio('CATALOG')
+  getSnapshotMinRatio('PRICING')
 }
 
 type CatalogHeader =
@@ -346,7 +369,7 @@ function parseSemicolonCsv(
   }
 
   if (inQuotes) {
-    throw new Error(
+    throw new CatalogCsvValidationError(
       'A CSV fajlban le nem zart idezojeles mezo talalhato.',
     )
   }
@@ -831,10 +854,22 @@ async function analyzeCatalogCsv(
     const netPriceRaw =
       normalizeCell(rawSource.NetPrice)
 
+    const netPriceMinor =
+      netPriceRaw
+        ? parseMoneyMinor(netPriceRaw)
+        : null
+
     const deliveryCostRaw =
       normalizeCell(
         rawSource.DeliveryCost,
       )
+
+    const deliveryCostMinor =
+      deliveryCostRaw
+        ? parseMoneyMinor(
+            deliveryCostRaw,
+          )
+        : null
 
     const deliveryTimeRaw =
       normalizeCell(
@@ -849,6 +884,10 @@ async function analyzeCatalogCsv(
         : null
 
     const errors: string[] = []
+
+    if (row.length !== headers.length) {
+      errors.push('INVALID_COLUMN_COUNT')
+    }
 
     if (!identifier) {
       errors.push('MISSING_IDENTIFIER')
@@ -881,6 +920,20 @@ async function analyzeCatalogCsv(
       if (priceMinor === 0) {
         zeroPriceRows += 1
       }
+    }
+
+    if (
+      netPriceRaw !== null &&
+      netPriceMinor === null
+    ) {
+      errors.push('INVALID_NET_PRICE')
+    }
+
+    if (
+      deliveryCostRaw !== null &&
+      deliveryCostMinor === null
+    ) {
+      errors.push('INVALID_DELIVERY_COST')
     }
 
     if (deliveryTimeDays === null) {
@@ -943,17 +996,9 @@ async function analyzeCatalogCsv(
       priceRaw,
       priceMinor,
       netPriceRaw,
-      netPriceMinor:
-        netPriceRaw
-          ? parseMoneyMinor(netPriceRaw)
-          : null,
+      netPriceMinor,
       deliveryCostRaw,
-      deliveryCostMinor:
-        deliveryCostRaw
-          ? parseMoneyMinor(
-              deliveryCostRaw,
-            )
-          : null,
+      deliveryCostMinor,
       deliveryTimeRaw,
       deliveryTimeDays,
       normalizedSku,
@@ -1030,6 +1075,752 @@ function createCatalogSourceFingerprint(
       }),
     )
     .digest('hex')
+}
+
+type CatalogRefreshTrigger = 'MANUAL' | 'SCHEDULED'
+type CatalogSourceMetadata = Record<string, unknown>
+
+type CatalogSnapshotDiffItem = {
+  sourceItemKey: string
+  sourceFingerprint: string | null
+}
+
+function computeCatalogSnapshotDiff(
+  existingItems: Array<{
+    sourceItemKey: string
+    sourceFingerprint: string | null
+  }>,
+  candidateItems: CatalogSnapshotDiffItem[],
+) {
+  const existingFingerprintByKey = new Map(
+    existingItems.map((item) => [
+      item.sourceItemKey,
+      item.sourceFingerprint,
+    ]),
+  )
+  const candidateKeys = new Set(
+    candidateItems.map((item) => item.sourceItemKey),
+  )
+  let added = 0
+  let changed = 0
+  let unchanged = 0
+
+  for (const item of candidateItems) {
+    if (!existingFingerprintByKey.has(item.sourceItemKey)) {
+      added += 1
+    } else if (
+      existingFingerprintByKey.get(item.sourceItemKey) !==
+      item.sourceFingerprint
+    ) {
+      changed += 1
+    } else {
+      unchanged += 1
+    }
+  }
+
+  const removed = existingItems.filter(
+    (item) => !candidateKeys.has(item.sourceItemKey),
+  ).length
+
+  return {
+    added,
+    removed,
+    changed,
+    unchanged,
+    changedItemCount: added + removed + changed,
+  }
+}
+
+function catalogInvalidRows(
+  analysis: Awaited<ReturnType<typeof analyzeCatalogCsv>>,
+) {
+  return analysis.allItems
+    .filter((item) => item.errors.length > 0)
+    .slice(0, INVALID_ROWS_LIMIT)
+    .map((item) => ({
+      rowNumber: item.rowNumber,
+      identifier: item.identifier,
+      eanCode: item.eanCode,
+      name: item.name,
+      errors: item.errors,
+    }))
+}
+
+function toCatalogRefreshError(
+  error: unknown,
+): SourceFeedRefreshError {
+  if (error instanceof SourceFeedRefreshError) return error
+
+  if (error instanceof CatalogCsvValidationError) {
+    return new SourceFeedRefreshError(
+      'FAILED_VALIDATION',
+      error.message,
+      400,
+      error.headers
+        ? {
+            headers: error.headers,
+            missingHeaders: error.missingHeaders ?? [],
+          }
+        : undefined,
+    )
+  }
+
+  if (error instanceof SnapshotSizeRejectedError) {
+    return new SourceFeedRefreshError(
+      'FAILED_SAFETY_GUARD',
+      error.message,
+      409,
+      snapshotSafetyErrorBody(error).snapshot,
+    )
+  }
+
+  if (error instanceof SnapshotSafetyConfigurationError) {
+    return new SourceFeedRefreshError(
+      'FAILED_SAFETY_GUARD',
+      'Az Árukereső snapshot biztonsági beállítása érvénytelen.',
+      503,
+    )
+  }
+
+  return new SourceFeedRefreshError(
+    'FAILED_IMPORT',
+    'CMS katalógus import sikertelen.',
+    500,
+  )
+}
+
+function parseCatalogAutomationDetails(value: string | null) {
+  if (!value) return null
+
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return parsed !== null &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed)
+      ? (parsed as CatalogSourceMetadata)
+      : null
+  } catch {
+    return null
+  }
+}
+
+async function resolveCatalogConnection(
+  requestedConnectionId?: string | null,
+) {
+  const database = requireDatabase()
+  const connectionId = requestedConnectionId?.trim() || null
+  const activeConnections = await database
+    .select({
+      id: dataConnections.id,
+      name: dataConnections.name,
+      status: dataConnections.status,
+      lastSuccessfulAt: dataConnections.lastSuccessfulAt,
+      lastError: dataConnections.lastError,
+      updatedAt: dataConnections.updatedAt,
+    })
+    .from(dataConnections)
+    .where(
+      and(
+        eq(dataConnections.sourceType, 'CSV_UPLOAD'),
+        eq(dataConnections.purpose, 'CATALOG'),
+        eq(dataConnections.isActive, true),
+        ...(connectionId
+          ? [eq(dataConnections.id, connectionId)]
+          : []),
+      ),
+    )
+    .limit(2)
+
+  if (activeConnections.length !== 1) {
+    throw new SourceFeedRefreshError(
+      'FAILED_CONFIGURATION',
+      activeConnections.length === 0
+        ? 'Nem található aktív CSV katalógusforrás.'
+        : 'Több aktív CSV katalógusforrás található; connectionId szükséges.',
+      409,
+    )
+  }
+
+  return { database, connection: activeConnections[0] }
+}
+
+async function importCatalogSnapshot(input: {
+  database?: ReturnType<typeof requireDatabase>
+  connectionId: string
+  runId: string
+  csvText: string
+  sourceMetadata: CatalogSourceMetadata
+  lease?: {
+    name: string
+    ownerId: string
+    assertOwned: () => Promise<void>
+  }
+}) {
+  const database = input.database ?? requireDatabase()
+  const analysis = await analyzeCatalogCsv(input.csvText)
+  const validItems = analysis.allItems.filter(
+    (item) => item.errors.length === 0,
+  )
+
+  if (analysis.summary.invalidRows > 0) {
+    throw new SourceFeedRefreshError(
+      'FAILED_VALIDATION',
+      'A katalógus import hibás sorokat tartalmaz; a jelenlegi snapshot változatlan maradt.',
+      422,
+      {
+        summary: analysis.summary,
+        invalidRows: catalogInvalidRows(analysis),
+      },
+    )
+  }
+
+  if (validItems.length === 0) {
+    throw new SourceFeedRefreshError(
+      'FAILED_VALIDATION',
+      'A katalógus import nem tartalmaz érvényes importálható sort.',
+      422,
+      { summary: analysis.summary },
+    )
+  }
+
+  if (analysis.summary.matchConflicts > 0) {
+    throw new SourceFeedRefreshError(
+      'FAILED_VALIDATION',
+      'A katalógus import SKU/EAN egyezési konfliktust tartalmaz.',
+      422,
+      { summary: analysis.summary },
+    )
+  }
+
+  const normalizedIdentifiers = validItems.map(
+    (item) => (item.identifier as string).toLowerCase(),
+  )
+
+  if (
+    new Set(normalizedIdentifiers).size !==
+    normalizedIdentifiers.length
+  ) {
+    throw new SourceFeedRefreshError(
+      'FAILED_VALIDATION',
+      'Az érvényes CSV sorok között kis- és nagybetűtől függetlenül duplikált Identifier található.',
+      409,
+      { summary: analysis.summary },
+    )
+  }
+
+  const matchedProductIds = validItems
+    .map((item) => item.matchedProductId)
+    .filter((value): value is string => value !== null)
+
+  if (
+    new Set(matchedProductIds).size !==
+    matchedProductIds.length
+  ) {
+    throw new SourceFeedRefreshError(
+      'FAILED_VALIDATION',
+      'A katalógus import több forrássort kapcsol ugyanahhoz a Hub termékhez.',
+      409,
+      { summary: analysis.summary },
+    )
+  }
+
+  const now = new Date()
+  const sourceItems = validItems.map((item) => ({
+    connectionId: input.connectionId,
+    productId: item.matchedProductId,
+    sourceItemKey: item.identifier as string,
+    identifier: item.identifier,
+    eanCode: item.eanCode,
+    manufacturer: item.manufacturer,
+    name: item.name,
+    description: item.description,
+    category: item.category,
+    productUrl: item.productUrl,
+    imageUrl: item.imageUrl,
+    imageUrl2: item.imageUrl2,
+    priceMinor: item.priceMinor,
+    netPriceMinor: item.netPriceMinor,
+    deliveryCostMinor: item.deliveryCostMinor,
+    deliveryTimeRaw: item.deliveryTimeRaw,
+    deliveryTimeDays: item.deliveryTimeDays,
+    additionalImageUrlsJson: '[]',
+    sourceFingerprint: createCatalogSourceFingerprint(item),
+    rawDataJson: JSON.stringify(item.rawSource),
+    matchStatus: item.matchStatus,
+    matchError:
+      item.matchStatus === 'CONFLICT'
+        ? 'SKU_EAN_CONFLICT'
+        : null,
+    observedAt: now,
+    updatedAt: now,
+  }))
+  const existingItems = await database
+    .select({
+      sourceItemKey: catalogSourceItems.sourceItemKey,
+      sourceFingerprint: catalogSourceItems.sourceFingerprint,
+    })
+    .from(catalogSourceItems)
+    .where(eq(catalogSourceItems.connectionId, input.connectionId))
+
+  assertSnapshotSizeSafety({
+    source: 'CATALOG',
+    previousRows: existingItems.length,
+    incomingRows: sourceItems.length,
+  })
+
+  const diff = computeCatalogSnapshotDiff(
+    existingItems,
+    sourceItems.map((item) => ({
+      sourceItemKey: item.sourceItemKey,
+      sourceFingerprint: item.sourceFingerprint,
+    })),
+  )
+  const importStatus =
+    diff.changedItemCount === 0 ? 'NO_CHANGE' : 'SUCCESS'
+  const summary = {
+    ...analysis.summary,
+    totalRows: sourceItems.length,
+    matchedRows: sourceItems.filter(
+      (item) => item.matchStatus === 'MATCHED',
+    ).length,
+    ...diff,
+    upserted:
+      diff.changedItemCount === 0 ? 0 : sourceItems.length,
+    staleRemoved: diff.removed,
+  }
+  const automationDetails = {
+    source: input.sourceMetadata,
+    summary,
+    feedGeneration: {
+      status:
+        diff.changedItemCount === 0
+          ? 'NOT_REQUESTED'
+          : 'PENDING',
+    },
+  }
+  const completeRun = database
+    .update(dataConnectionRuns)
+    .set({
+      status: 'COMPLETED',
+      importStatus,
+      rowsImported: sourceItems.length,
+      changedItemCount: diff.changedItemCount,
+      error: null,
+      automationDetailsJson: JSON.stringify(automationDetails),
+      finishedAt: new Date(),
+    })
+    .where(eq(dataConnectionRuns.id, input.runId))
+  const markConnectionReady = database
+    .update(dataConnections)
+    .set({
+      status: 'READY',
+      lastSuccessfulAt: new Date(),
+      lastError: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(dataConnections.id, input.connectionId))
+
+  await input.lease?.assertOwned()
+  const leaseGuard = input.lease
+    ? database.execute(sql`
+        select 1 / count(*)::integer as lease_guard
+        from (
+          select 1
+          from ${schedulerLeases}
+          where ${schedulerLeases.name} = ${input.lease.name}
+            and ${schedulerLeases.ownerId} = ${input.lease.ownerId}
+            and ${schedulerLeases.lockedUntil} > now()
+          for update
+        ) as owned_lease
+      `)
+    : null
+
+  if (diff.changedItemCount === 0) {
+    const noChangeQueries = [
+      ...(leaseGuard ? [leaseGuard] : []),
+      completeRun,
+      markConnectionReady,
+    ]
+    await database.batch(
+      noChangeQueries as [
+        (typeof noChangeQueries)[number],
+        ...(typeof noChangeQueries)[number][],
+      ],
+    )
+    return {
+      importStatus,
+      changed: false as const,
+      summary,
+      automationDetails,
+    }
+  }
+
+  const upsertQueries = []
+
+  for (
+    let offset = 0;
+    offset < sourceItems.length;
+    offset += 200
+  ) {
+    const chunk = sourceItems
+      .slice(offset, offset + 200)
+      .map((item) => ({
+        ...item,
+        lastImportRunId: input.runId,
+      }))
+
+    upsertQueries.push(
+      database
+        .insert(catalogSourceItems)
+        .values(chunk)
+        .onConflictDoUpdate({
+          target: [
+            catalogSourceItems.connectionId,
+            catalogSourceItems.sourceItemKey,
+          ],
+          set: {
+            productId: sql`excluded.product_id`,
+            identifier: sql`excluded.identifier`,
+            eanCode: sql`excluded.ean_code`,
+            manufacturer: sql`excluded.manufacturer`,
+            name: sql`excluded.name`,
+            description: sql`excluded.description`,
+            category: sql`excluded.category`,
+            productUrl: sql`excluded.product_url`,
+            imageUrl: sql`excluded.image_url`,
+            imageUrl2: sql`excluded.image_url_2`,
+            priceMinor: sql`excluded.price_minor`,
+            netPriceMinor: sql`excluded.net_price_minor`,
+            deliveryCostMinor: sql`excluded.delivery_cost_minor`,
+            deliveryTimeRaw: sql`excluded.delivery_time_raw`,
+            deliveryTimeDays: sql`excluded.delivery_time_days`,
+            additionalImageUrlsJson:
+              sql`excluded.additional_image_urls_json`,
+            sourceFingerprint: sql`excluded.source_fingerprint`,
+            rawDataJson: sql`excluded.raw_data_json`,
+            matchStatus: sql`excluded.match_status`,
+            matchError: sql`excluded.match_error`,
+            lastImportRunId: sql`excluded.last_import_run_id`,
+            observedAt: sql`excluded.observed_at`,
+            updatedAt: sql`excluded.updated_at`,
+          },
+        }),
+    )
+  }
+
+  const staleDelete = database
+    .delete(catalogSourceItems)
+    .where(
+      and(
+        eq(catalogSourceItems.connectionId, input.connectionId),
+        or(
+          isNull(catalogSourceItems.lastImportRunId),
+          ne(catalogSourceItems.lastImportRunId, input.runId),
+        ),
+      ),
+    )
+  const batchQueries = [
+    ...(leaseGuard ? [leaseGuard] : []),
+    ...upsertQueries,
+    staleDelete,
+    completeRun,
+    markConnectionReady,
+  ]
+
+  await database.batch(
+    batchQueries as [
+      (typeof batchQueries)[number],
+      ...(typeof batchQueries)[number][],
+    ],
+  )
+
+  return {
+    importStatus,
+    changed: true as const,
+    summary,
+    automationDetails,
+  }
+}
+
+const runSerialCatalogRefresh = createKeyedSerialExecutor()
+
+async function runPostCatalogImportFeedHook(
+  importResult: { changed: boolean },
+  requestGeneration: (
+    triggerType: 'CATALOG_SYNC',
+  ) => Promise<{
+    status: string
+    runId?: string
+    code?: string
+  }> = requestArukeresoFeedGeneration,
+  logErrors = true,
+) {
+  if (!importResult.changed) {
+    return { status: 'NOT_REQUESTED' as const }
+  }
+
+  try {
+    const generated =
+      await requestGeneration('CATALOG_SYNC')
+
+    return {
+      status: generated.status,
+      ...(generated.runId
+        ? { runId: generated.runId }
+        : {}),
+      ...(generated.code
+        ? { code: generated.code }
+        : {}),
+    }
+  } catch (error) {
+    const feedRunId =
+      error instanceof Error &&
+      'feedRunId' in error &&
+      typeof error.feedRunId === 'string'
+        ? error.feedRunId
+        : null
+
+    if (logErrors) {
+      console.error(
+        'Catalog source refresh feed generation failed:',
+        error,
+      )
+    }
+
+    return {
+      status: 'FAILED' as const,
+      ...(error instanceof FeedOutputError
+        ? { code: error.code }
+        : {}),
+      error:
+        error instanceof FeedOutputError
+          ? error.message
+          : 'Feed generation failed.',
+      ...(feedRunId ? { runId: feedRunId } : {}),
+    }
+  }
+}
+
+async function refreshArukeresoSourceFeed(input: {
+  connectionId?: string | null
+  triggerType?: CatalogRefreshTrigger
+  sourceMetadata?: CatalogSourceMetadata
+  loadSource?: () => Promise<{
+    csvText: string
+    metadata?: CatalogSourceMetadata
+  }>
+}) {
+  const { database, connection } =
+    await resolveCatalogConnection(input.connectionId)
+  const initialDetails = {
+    source: input.sourceMetadata ?? {
+      kind: 'REMOTE',
+      provider: 'KARCHER',
+    },
+  }
+  let runId: string | null = null
+  let automationDetails: CatalogSourceMetadata = initialDetails
+
+  try {
+    return await runSerialCatalogRefresh(connection.id, () =>
+      withRenewingSchedulerLease({
+        database,
+        name: `arukereso-source-refresh:${connection.id}`,
+        logLabel: 'Arukereso source refresh',
+        busyError: () =>
+          new SourceFeedRefreshError(
+            'REFRESH_BUSY',
+            'Az Árukereső source frissítése már folyamatban van; próbáld újra.',
+            409,
+          ),
+        lostError: () =>
+          new SourceFeedRefreshError(
+            'FAILED_IMPORT',
+            'Az Árukereső source frissítési zárolása lejárt.',
+            503,
+          ),
+        action: async (lease) => {
+          const [run] = await database
+            .insert(dataConnectionRuns)
+            .values({
+              connectionId: connection.id,
+              triggerType: input.triggerType ?? 'MANUAL',
+              status: 'RUNNING',
+              importStatus: 'RUNNING',
+              automationDetailsJson:
+                JSON.stringify(initialDetails),
+              startedAt: new Date(),
+            })
+            .returning({ id: dataConnectionRuns.id })
+
+          if (!run) {
+            throw new SourceFeedRefreshError(
+              'FAILED_IMPORT',
+              'A katalógus import futása nem hozható létre.',
+              500,
+            )
+          }
+
+          runId = run.id
+          const loaded = input.loadSource
+            ? await input.loadSource()
+            : {
+                csvText: await downloadArukeresoSourceFeed(),
+              }
+          const sourceMetadata = {
+            ...((input.sourceMetadata ??
+              initialDetails.source) as CatalogSourceMetadata),
+            ...(loaded.metadata ?? {}),
+          }
+          automationDetails = { source: sourceMetadata }
+          const imported = await importCatalogSnapshot({
+            database,
+            connectionId: connection.id,
+            runId,
+            csvText: loaded.csvText,
+            sourceMetadata,
+            lease,
+          })
+
+          automationDetails = imported.automationDetails
+
+          if (!imported.changed) {
+            return {
+              status: 'ok' as const,
+              importRunId: runId,
+              connectionId: connection.id,
+              importStatus: imported.importStatus,
+              summary: imported.summary,
+              refresh: {
+                status: 'COMPLETED' as const,
+                source: sourceMetadata,
+              },
+              feedGeneration:
+                imported.automationDetails.feedGeneration,
+            }
+          }
+
+          const feedGeneration =
+            await runPostCatalogImportFeedHook(imported)
+
+          automationDetails = {
+            ...imported.automationDetails,
+            feedGeneration,
+          }
+          try {
+            await database
+              .update(dataConnectionRuns)
+              .set({
+                automationDetailsJson:
+                  JSON.stringify(automationDetails),
+              })
+              .where(eq(dataConnectionRuns.id, runId))
+          } catch (detailsError) {
+            console.error(
+              'Catalog source refresh feed status update failed:',
+              detailsError,
+            )
+          }
+
+          return {
+            status: 'ok' as const,
+            importRunId: runId,
+            connectionId: connection.id,
+            importStatus: imported.importStatus,
+            summary: imported.summary,
+            refresh: {
+              status: 'COMPLETED' as const,
+              source: sourceMetadata,
+            },
+            feedGeneration,
+          }
+        },
+      }),
+    )
+  } catch (error) {
+    const refreshError = toCatalogRefreshError(error)
+    automationDetails = {
+      ...automationDetails,
+      failure: {
+        category: refreshError.code,
+        message: refreshError.message,
+        ...(refreshError.details
+          ? { details: refreshError.details }
+          : {}),
+      },
+    }
+
+    if (runId) {
+      try {
+        await database.batch([
+        database
+          .update(dataConnectionRuns)
+          .set({
+            status: 'FAILED',
+            importStatus: refreshError.code,
+            error: refreshError.message,
+            automationDetailsJson:
+              JSON.stringify(automationDetails),
+            finishedAt: new Date(),
+          })
+          .where(eq(dataConnectionRuns.id, runId)),
+        database
+          .update(dataConnections)
+          .set({
+            lastError: refreshError.message,
+            updatedAt: new Date(),
+          })
+          .where(eq(dataConnections.id, connection.id)),
+        ])
+      } catch (statusError) {
+        console.error(
+          'Catalog refresh failure status update failed:',
+          statusError,
+        )
+      }
+    }
+
+    Object.assign(refreshError, {
+      ...(runId ? { importRunId: runId } : {}),
+      connectionId: connection.id,
+    })
+    throw refreshError
+  }
+}
+
+function catalogRefreshErrorResponse(
+  context: Context,
+  error: unknown,
+) {
+  const refreshError = toCatalogRefreshError(error)
+  const importRunId =
+    'importRunId' in refreshError &&
+    typeof refreshError.importRunId === 'string'
+      ? refreshError.importRunId
+      : null
+  const connectionId =
+    'connectionId' in refreshError &&
+    typeof refreshError.connectionId === 'string'
+      ? refreshError.connectionId
+      : null
+  const status = ([400, 409, 422, 502, 503] as const).find(
+    (value) => value === refreshError.httpStatus,
+  ) ?? 500
+
+  return context.json(
+    {
+      status: 'error',
+      code: refreshError.code,
+      message: refreshError.message,
+      ...(importRunId ? { importRunId } : {}),
+      ...(connectionId ? { connectionId } : {}),
+      ...(refreshError.code === 'FAILED_SAFETY_GUARD' &&
+      refreshError.details
+        ? { snapshot: refreshError.details }
+        : (refreshError.details ?? {})),
+    },
+    status,
+  )
 }
 
 arukeresoApi.post(
@@ -1164,489 +1955,196 @@ arukeresoApi.post(
         )
       }
 
-      const analysis =
-        await analyzeCatalogCsv(
-          await uploadedFile.text(),
-        )
-
-      const validItems =
-        analysis.allItems.filter(
-          (item) => item.errors.length === 0,
-        )
-
-      // A catalog import is a full current snapshot.
-      // Reject partial validity so a malformed row
-      // cannot be mistaken for a removed product and
-      // delete its previously valid current record.
-      if (analysis.summary.invalidRows > 0) {
-        return context.json(
-          {
-            status: 'error',
-            message:
-              'A katalógus import hibás sorokat tartalmaz; a jelenlegi snapshot változatlan maradt.',
-            summary: analysis.summary,
-            invalidRows: analysis.allItems
-              .filter(
-                (item) => item.errors.length > 0,
-              )
-              .slice(0, INVALID_ROWS_LIMIT)
-              .map((item) => ({
-                rowNumber: item.rowNumber,
-                identifier: item.identifier,
-                eanCode: item.eanCode,
-                name: item.name,
-                errors: item.errors,
-              })),
-          },
-          422,
-        )
-      }
-
-      if (validItems.length === 0) {
-        return context.json(
-          {
-            status: 'error',
-            message:
-              'A katalógus import nem tartalmaz érvényes importálható sort.',
-            summary: analysis.summary,
-          },
-          422,
-        )
-      }
-
-      const sourceItemKeys =
-        validItems.map(
-          (item) => item.identifier as string,
-        )
-
-      if (
-        new Set(sourceItemKeys).size !==
-        sourceItemKeys.length
-      ) {
-        return context.json(
-          {
-            status: 'error',
-            message:
-              'Az érvényes CSV sorok között duplikált Identifier található.',
-            summary: analysis.summary,
-          },
-          409,
-        )
-      }
-
-      const requestedConnection =
-        formData.get('connectionId')
-
-      const requestedConnectionId =
-        typeof requestedConnection === 'string'
-          ? requestedConnection.trim() || null
+      const manualConnection = formData.get('connectionId')
+      const manualConnectionId =
+        typeof manualConnection === 'string'
+          ? manualConnection.trim() || null
           : null
 
-      const database = requireDatabase()
-
-      const activeConnections = await database
-        .select({
-          id: dataConnections.id,
-        })
-        .from(dataConnections)
-        .where(
-          and(
-            eq(
-              dataConnections.sourceType,
-              'CSV_UPLOAD',
-            ),
-            eq(
-              dataConnections.purpose,
-              'CATALOG',
-            ),
-            eq(dataConnections.isActive, true),
-            ...(requestedConnectionId
-              ? [
-                  eq(
-                    dataConnections.id,
-                    requestedConnectionId,
-                  ),
-                ]
-              : []),
-          ),
-        )
-        .limit(2)
-
-      if (activeConnections.length !== 1) {
-        return context.json(
-          {
-            status: 'error',
-            message:
-              activeConnections.length === 0
-                ? 'Nem található aktív CSV katalógusforrás.'
-                : 'Több aktív CSV katalógusforrás található; connectionId szükséges.',
+      return context.json(
+        await refreshArukeresoSourceFeed({
+          connectionId: manualConnectionId,
+          triggerType: 'MANUAL',
+          sourceMetadata: {
+            kind: 'MULTIPART_UPLOAD',
+            fileName: uploadedFile.name,
+            size: uploadedFile.size,
           },
-          409,
-        )
-      }
-
-      const connectionId =
-        activeConnections[0].id
-
-      const now = new Date()
-
-      const sourceItems = validItems.map(
-        (item) => ({
-          connectionId,
-          productId: item.matchedProductId,
-          sourceItemKey:
-            item.identifier as string,
-          identifier: item.identifier,
-          eanCode: item.eanCode,
-          manufacturer: item.manufacturer,
-          name: item.name,
-          description: item.description,
-          category: item.category,
-          productUrl: item.productUrl,
-          imageUrl: item.imageUrl,
-          imageUrl2: item.imageUrl2,
-          priceMinor: item.priceMinor,
-          netPriceMinor: item.netPriceMinor,
-          deliveryCostMinor:
-            item.deliveryCostMinor,
-          deliveryTimeRaw:
-            item.deliveryTimeRaw,
-          deliveryTimeDays:
-            item.deliveryTimeDays,
-          additionalImageUrlsJson: '[]',
-          sourceFingerprint:
-            createCatalogSourceFingerprint(
-              item,
-            ),
-          rawDataJson:
-            JSON.stringify(item.rawSource),
-          matchStatus: item.matchStatus,
-          matchError:
-            item.matchStatus === 'CONFLICT'
-              ? 'SKU_EAN_CONFLICT'
-              : null,
-          observedAt: now,
-          updatedAt: now,
+          loadSource: async () => ({
+            csvText: await uploadedFile.text(),
+          }),
         }),
       )
-
-      const existingItems = await database
-        .select({
-          sourceItemKey:
-            catalogSourceItems.sourceItemKey,
-          sourceFingerprint:
-            catalogSourceItems.sourceFingerprint,
-        })
-        .from(catalogSourceItems)
-        .where(
-          eq(
-            catalogSourceItems.connectionId,
-            connectionId,
-          ),
-        )
-
-      assertSnapshotSizeSafety({
-        source: 'CATALOG',
-        previousRows: existingItems.length,
-        incomingRows: sourceItems.length,
-      })
-
-      const currentKeySet =
-        new Set(sourceItemKeys)
-
-      const existingFingerprintByKey =
-        new Map(
-          existingItems.map((item) => [
-            item.sourceItemKey,
-            item.sourceFingerprint,
-          ]),
-        )
-
-      const staleRemoved =
-        existingItems.filter(
-          (item) =>
-            !currentKeySet.has(
-              item.sourceItemKey,
-            ),
-        ).length
-
-      const changedItemCount =
-        sourceItems.filter(
-          (item) =>
-            existingFingerprintByKey.get(
-              item.sourceItemKey,
-            ) !== item.sourceFingerprint,
-        ).length + staleRemoved
-
-      const [run] = await database
-        .insert(dataConnectionRuns)
-        .values({
-          connectionId,
-          triggerType: 'MANUAL',
-          status: 'RUNNING',
-          importStatus: 'RUNNING',
-          startedAt: now,
-        })
-        .returning({
-          id: dataConnectionRuns.id,
-        })
-
-      if (!run) {
-        throw new Error(
-          'A katalógus import futása nem hozható létre.',
-        )
-      }
-
-      try {
-        const chunkSize = 200
-        const upsertQueries = []
-
-        for (
-          let offset = 0;
-          offset < sourceItems.length;
-          offset += chunkSize
-        ) {
-          const chunk = sourceItems
-            .slice(
-              offset,
-              offset + chunkSize,
-            )
-            .map((item) => ({
-              ...item,
-              lastImportRunId: run.id,
-            }))
-
-          upsertQueries.push(
-            database
-              .insert(catalogSourceItems)
-              .values(chunk)
-              .onConflictDoUpdate({
-                target: [
-                  catalogSourceItems.connectionId,
-                  catalogSourceItems.sourceItemKey,
-                ],
-                set: {
-                  productId:
-                    sql`excluded.product_id`,
-                  identifier:
-                    sql`excluded.identifier`,
-                  eanCode:
-                    sql`excluded.ean_code`,
-                  manufacturer:
-                    sql`excluded.manufacturer`,
-                  name: sql`excluded.name`,
-                  description:
-                    sql`excluded.description`,
-                  category:
-                    sql`excluded.category`,
-                  productUrl:
-                    sql`excluded.product_url`,
-                  imageUrl:
-                    sql`excluded.image_url`,
-                  imageUrl2:
-                    sql`excluded.image_url_2`,
-                  priceMinor:
-                    sql`excluded.price_minor`,
-                  netPriceMinor:
-                    sql`excluded.net_price_minor`,
-                  deliveryCostMinor:
-                    sql`excluded.delivery_cost_minor`,
-                  deliveryTimeRaw:
-                    sql`excluded.delivery_time_raw`,
-                  deliveryTimeDays:
-                    sql`excluded.delivery_time_days`,
-                  additionalImageUrlsJson:
-                    sql`excluded.additional_image_urls_json`,
-                  sourceFingerprint:
-                    sql`excluded.source_fingerprint`,
-                  rawDataJson:
-                    sql`excluded.raw_data_json`,
-                  matchStatus:
-                    sql`excluded.match_status`,
-                  matchError:
-                    sql`excluded.match_error`,
-                  lastImportRunId:
-                    sql`excluded.last_import_run_id`,
-                  observedAt:
-                    sql`excluded.observed_at`,
-                  updatedAt:
-                    sql`excluded.updated_at`,
-                },
-              }),
-          )
-        }
-
-        const staleDelete = database
-          .delete(catalogSourceItems)
-          .where(
-            and(
-              eq(
-                catalogSourceItems.connectionId,
-                connectionId,
-              ),
-              or(
-                isNull(
-                  catalogSourceItems.lastImportRunId,
-                ),
-                ne(
-                  catalogSourceItems.lastImportRunId,
-                  run.id,
-                ),
-              ),
-            ),
-          )
-
-        const completeRun = database
-          .update(dataConnectionRuns)
-          .set({
-            status: 'COMPLETED',
-            importStatus:
-              analysis.summary.invalidRows > 0
-                ? 'SUCCESS_WITH_INVALID_ROWS'
-                : 'SUCCESS',
-            rowsImported: sourceItems.length,
-            changedItemCount,
-            finishedAt: new Date(),
-          })
-          .where(
-            eq(dataConnectionRuns.id, run.id),
-          )
-
-        const markConnectionReady = database
-          .update(dataConnections)
-          .set({
-            status: 'READY',
-            lastSuccessfulAt: new Date(),
-            lastError: null,
-            updatedAt: new Date(),
-          })
-          .where(
-            eq(dataConnections.id, connectionId),
-          )
-
-        const batchQueries = [
-          ...upsertQueries,
-          staleDelete,
-          completeRun,
-          markConnectionReady,
-        ]
-
-        await database.batch(
-          batchQueries as [
-            (typeof batchQueries)[number],
-            ...(typeof batchQueries)[number][],
-          ],
-        )
-
-        return context.json({
-          status: 'ok',
-          importRunId: run.id,
-          connectionId,
-          summary: {
-            ...analysis.summary,
-            upserted: sourceItems.length,
-            staleRemoved,
-          },
-        })
-      } catch (error) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : 'CMS katalógus import sikertelen.'
-
-        try {
-          await database.batch([
-            database
-              .update(dataConnectionRuns)
-              .set({
-                status: 'FAILED',
-                importStatus: 'FAILED',
-                error: message,
-                finishedAt: new Date(),
-              })
-              .where(
-                eq(dataConnectionRuns.id, run.id),
-              ),
-            database
-              .update(dataConnections)
-              .set({
-                status: 'ERROR',
-                lastError: message,
-                updatedAt: new Date(),
-              })
-              .where(
-                eq(
-                  dataConnections.id,
-                  connectionId,
-                ),
-              ),
-          ])
-        } catch (statusError) {
-          console.error(
-            'Catalog import failure status update failed:',
-            statusError,
-          )
-        }
-
-        console.error(
-          'Catalog import failed:',
-          error,
-        )
-
-        return context.json(
-          {
-            status: 'error',
-            importRunId: run.id,
-            message,
-          },
-          500,
-        )
-      }
     } catch (error) {
-      if (
-        error instanceof
-          CatalogCsvValidationError
-      ) {
-        return context.json(
-          {
-            status: 'error',
-            message: error.message,
-            ...(error.headers
-              ? {
-                  headers: error.headers,
-                  missingHeaders:
-                    error.missingHeaders ?? [],
-                }
-              : {}),
-          },
-          400,
-        )
-      }
+      return catalogRefreshErrorResponse(context, error)
+    }
+  },
+)
 
-      if (isSnapshotSafetyError(error)) {
-        return context.json(
-          snapshotSafetyErrorBody(error),
-          error instanceof SnapshotSizeRejectedError
-            ? 409
-            : 503,
-        )
-      }
+arukeresoApi.post(
+  '/catalog/source-refresh',
+  async (context) => {
+    let body: unknown
 
-      console.error(
-        'Catalog import setup failed:',
-        error,
-      )
+    try {
+      body = await context.req.json()
+    } catch {
+      body = null
+    }
 
+    if (
+      body === null ||
+      typeof body !== 'object' ||
+      Array.isArray(body) ||
+      (body as Record<string, unknown>)['confirm'] !== true
+    ) {
       return context.json(
         {
           status: 'error',
           message:
-            error instanceof Error
-              ? error.message
-              : 'CMS katalógus import sikertelen.',
+            'A source frissítéséhez confirm=true szükséges.',
         },
-        500,
+        400,
       )
+    }
+
+    const connectionValue = (
+      body as Record<string, unknown>
+    )['connectionId']
+    const connectionId =
+      typeof connectionValue === 'string'
+        ? connectionValue.trim() || null
+        : null
+
+    try {
+      return context.json(
+        await refreshArukeresoSourceFeed({
+          connectionId,
+          triggerType: 'MANUAL',
+          sourceMetadata: {
+            kind: 'REMOTE',
+            provider: 'KARCHER',
+          },
+        }),
+      )
+    } catch (error) {
+      return catalogRefreshErrorResponse(context, error)
+    }
+  },
+)
+
+arukeresoApi.get(
+  '/catalog/source-status',
+  async (context) => {
+    try {
+      const { database, connection } =
+        await resolveCatalogConnection(
+          context.req.query('connectionId') ?? null,
+        )
+      const runSelection = {
+        id: dataConnectionRuns.id,
+        triggerType: dataConnectionRuns.triggerType,
+        status: dataConnectionRuns.status,
+        importStatus: dataConnectionRuns.importStatus,
+        rowsImported: dataConnectionRuns.rowsImported,
+        changedItemCount: dataConnectionRuns.changedItemCount,
+        error: dataConnectionRuns.error,
+        automationDetailsJson:
+          dataConnectionRuns.automationDetailsJson,
+        startedAt: dataConnectionRuns.startedAt,
+        finishedAt: dataConnectionRuns.finishedAt,
+      }
+      const [
+        latestAttempts,
+        latestSuccessfulChanged,
+        latestSuccessful,
+        rowCounts,
+      ] =
+        await Promise.all([
+          database
+            .select(runSelection)
+            .from(dataConnectionRuns)
+            .where(
+              eq(
+                dataConnectionRuns.connectionId,
+                connection.id,
+              ),
+            )
+            .orderBy(desc(dataConnectionRuns.startedAt))
+            .limit(1),
+          database
+            .select(runSelection)
+            .from(dataConnectionRuns)
+            .where(
+              and(
+                eq(
+                  dataConnectionRuns.connectionId,
+                  connection.id,
+                ),
+                eq(dataConnectionRuns.status, 'COMPLETED'),
+                sql`${dataConnectionRuns.changedItemCount} > 0`,
+              ),
+            )
+            .orderBy(desc(dataConnectionRuns.startedAt))
+            .limit(1),
+          database
+            .select(runSelection)
+            .from(dataConnectionRuns)
+            .where(
+              and(
+                eq(
+                  dataConnectionRuns.connectionId,
+                  connection.id,
+                ),
+                eq(dataConnectionRuns.status, 'COMPLETED'),
+              ),
+            )
+            .orderBy(desc(dataConnectionRuns.startedAt))
+            .limit(1),
+          database
+            .select({ count: count(catalogSourceItems.id) })
+            .from(catalogSourceItems)
+            .where(
+              eq(
+                catalogSourceItems.connectionId,
+                connection.id,
+              ),
+            ),
+        ])
+      const toPublicRun = (
+        run: (typeof latestAttempts)[number] | undefined,
+      ) => {
+        if (!run) return null
+        const { automationDetailsJson, ...fields } = run
+        return {
+          ...fields,
+          automationDetails: parseCatalogAutomationDetails(
+            automationDetailsJson,
+          ),
+        }
+      }
+
+      return context.json({
+        status: 'ok',
+        connection: {
+          id: connection.id,
+          name: connection.name,
+          status: connection.status,
+          lastSuccessfulAt: connection.lastSuccessfulAt,
+          lastError: connection.lastError,
+          updatedAt: connection.updatedAt,
+        },
+        currentRowCount: Number(rowCounts[0]?.count ?? 0),
+        latestAttempt: toPublicRun(latestAttempts[0]),
+        latestSuccessfulAttempt: toPublicRun(
+          latestSuccessful[0],
+        ),
+        latestSuccessfulChangedAttempt: toPublicRun(
+          latestSuccessfulChanged[0],
+        ),
+      })
+    } catch (error) {
+      return catalogRefreshErrorResponse(context, error)
     }
   },
 )
@@ -7563,6 +8061,7 @@ async function buildCatalogFeedOutput(
 
 type FeedGenerationTrigger =
   | 'MANUAL'
+  | 'CATALOG_SYNC'
   | 'PRICING_SYNC'
   | 'INVENTORY_SYNC'
   | 'CHANNEL_ACTIVATION'
@@ -7666,7 +8165,8 @@ function shouldDeduplicateFeedGeneration(input: {
   completedSourceRevision: string | null
 }) {
   return (
-    (input.triggerType === 'PRICING_SYNC' ||
+    (input.triggerType === 'CATALOG_SYNC' ||
+      input.triggerType === 'PRICING_SYNC' ||
       input.triggerType === 'INVENTORY_SYNC') &&
     input.completedSourceRevision ===
       input.currentSourceRevision
@@ -8221,9 +8721,12 @@ function createKeyedSerialExecutor() {
 const runSerialFeedGeneration =
   createKeyedSerialExecutor()
 
-async function withFeedGenerationLease<T>(input: {
+async function withRenewingSchedulerLease<T>(input: {
   database: ReturnType<typeof requireDatabase>
-  channelId: string
+  name: string
+  busyError: () => Error
+  lostError: () => Error
+  logLabel: string
   action: (
     lease: {
       name: string
@@ -8232,7 +8735,7 @@ async function withFeedGenerationLease<T>(input: {
     },
   ) => Promise<T>
 }): Promise<T> {
-  const name = `arukereso-feed:${input.channelId}`
+  const name = input.name
   const ownerId = randomUUID()
   const deadline = Date.now() + FEED_GENERATION_WAIT_MS
 
@@ -8265,10 +8768,7 @@ async function withFeedGenerationLease<T>(input: {
     }
 
     if (Date.now() >= deadline) {
-      throw new FeedOutputError(
-        'A feed generálás már folyamatban van; próbáld újra.',
-        'FEED_GENERATION_BUSY',
-      )
+      throw input.busyError()
     }
 
     await delay(FEED_GENERATION_POLL_MS)
@@ -8307,7 +8807,7 @@ async function withFeedGenerationLease<T>(input: {
       .catch((error: unknown) => {
         leaseLost = true
         console.error(
-          'Feed generation lease renewal failed:',
+          `${input.logLabel} lease renewal failed:`,
           error,
         )
       })
@@ -8339,10 +8839,7 @@ async function withFeedGenerationLease<T>(input: {
       !lease.lockedUntil ||
       lease.lockedUntil.getTime() <= Date.now()
     ) {
-      throw new FeedOutputError(
-        'A feed generálási zárolás lejárt vagy másik folyamat vette át.',
-        'FEED_GENERATION_LEASE_LOST',
-      )
+      throw input.lostError()
     }
   }
 
@@ -8369,7 +8866,7 @@ async function withFeedGenerationLease<T>(input: {
       )
       .catch((error: unknown) => {
         console.error(
-          'Feed generation lease release failed:',
+          `${input.logLabel} lease release failed:`,
           error,
         )
       })
@@ -8942,9 +9439,20 @@ async function coordinateCatalogFeedGeneration(input: {
   return runSerialFeedGeneration(
     input.channel.id,
     () =>
-      withFeedGenerationLease({
+      withRenewingSchedulerLease({
         database: input.database,
-        channelId: input.channel.id,
+        name: `arukereso-feed:${input.channel.id}`,
+        logLabel: 'Feed generation',
+        busyError: () =>
+          new FeedOutputError(
+            'A feed generálás már folyamatban van; próbáld újra.',
+            'FEED_GENERATION_BUSY',
+          ),
+        lostError: () =>
+          new FeedOutputError(
+            'A feed generálási zárolás lejárt vagy másik folyamat vette át.',
+            'FEED_GENERATION_LEASE_LOST',
+          ),
         action: async (lease) => {
           for (let attempt = 0; attempt < 2; attempt += 1) {
             let sourceRevision =
@@ -8975,6 +9483,7 @@ async function coordinateCatalogFeedGeneration(input: {
             }
 
             if (
+              input.triggerType === 'CATALOG_SYNC' ||
               input.triggerType === 'PRICING_SYNC' ||
               input.triggerType === 'INVENTORY_SYNC'
             ) {
@@ -11656,6 +12165,14 @@ export {
   collapsePricingItemRows,
   applyPricingItemSearch,
   derivePricingItemFeedState,
+  computeCatalogSnapshotDiff,
+  cmsIdentifierToSku,
+  createCatalogSourceFingerprint,
+  analyzeCatalogCsv,
+  importCatalogSnapshot,
+  refreshArukeresoSourceFeed,
+  runPostCatalogImportFeedHook,
+  withRenewingSchedulerLease,
   requestArukeresoFeedGeneration,
   resolveFeedFreshness,
   hasFeedSourceRevisionChanged,

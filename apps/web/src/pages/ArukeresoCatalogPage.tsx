@@ -57,6 +57,13 @@ type CatalogImportSummary = {
   matchConflicts?: number
   upserted?: number
   staleRemoved?: number
+  totalRows?: number
+  matchedRows?: number
+  added?: number
+  removed?: number
+  changed?: number
+  unchanged?: number
+  changedItemCount?: number
 }
 
 type CatalogImportResult = {
@@ -64,6 +71,41 @@ type CatalogImportResult = {
   importRunId?: string
   summary?: CatalogImportSummary
   message?: string
+  importStatus?: string
+  feedGeneration?: {
+    status?: string
+    runId?: string
+    code?: string
+    error?: string
+  }
+}
+
+type SourceRefreshRun = {
+  id: string
+  triggerType: string
+  status: string
+  importStatus: string | null
+  rowsImported: number
+  changedItemCount: number
+  error: string | null
+  startedAt: string
+  finishedAt: string | null
+  automationDetails: {
+    summary?: CatalogImportSummary
+    feedGeneration?: {
+      status?: string
+      runId?: string
+      code?: string
+      error?: string
+    }
+  } | null
+}
+
+type SourceRefreshStatus = {
+  status: string
+  currentRowCount: number
+  latestAttempt: SourceRefreshRun | null
+  latestSuccessfulAttempt: SourceRefreshRun | null
 }
 
 type PromotionSummary = {
@@ -162,6 +204,15 @@ function ArukeresoCatalogPage() {
     )
 
   const [importMessage, setImportMessage] =
+    useState<string | null>(null)
+
+  const [sourceStatus, setSourceStatus] =
+    useState<SourceRefreshStatus | null>(null)
+
+  const [sourceRefreshing, setSourceRefreshing] =
+    useState(false)
+
+  const [sourceRefreshMessage, setSourceRefreshMessage] =
     useState<string | null>(null)
 
   const [promotion, setPromotion] =
@@ -285,13 +336,132 @@ function ArukeresoCatalogPage() {
     }
   }
 
+  async function loadSourceStatus() {
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/arukereso/catalog/source-status`,
+      )
+      const result = (await response.json()) as
+        | SourceRefreshStatus
+        | { message?: string }
+
+      if (!response.ok) {
+        throw new Error(
+          (result as { message?: string }).message ??
+            'A source feed állapota nem tölthető be.',
+        )
+      }
+
+      setSourceStatus(result as SourceRefreshStatus)
+    } catch (statusError) {
+      console.error(
+        'Source feed status load failed:',
+        statusError,
+      )
+      setSourceRefreshMessage(
+        statusError instanceof Error
+          ? statusError.message
+          : 'A source feed állapota nem tölthető be.',
+      )
+    }
+  }
+
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
       void loadPromotion()
+      void loadSourceStatus()
     }, 0)
 
     return () => window.clearTimeout(timeoutId)
   }, [])
+
+  async function runSourceRefresh() {
+    if (sourceRefreshing) {
+      return
+    }
+
+    const confirmed = window.confirm(
+      'Biztosan frissíted a teljes Kärcher source feedet?\n\n' +
+        'A művelet teljes snapshotot aktivál, ezért a távoli forrásból hiányzó korábbi termékek törlődnek az aktuális katalógusból.',
+    )
+
+    if (!confirmed) {
+      return
+    }
+
+    setSourceRefreshing(true)
+    setSourceRefreshMessage(null)
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/arukereso/catalog/source-refresh`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ confirm: true }),
+        },
+      )
+      const result =
+        (await response.json()) as CatalogImportResult & {
+          code?: string
+        }
+
+      if (!response.ok) {
+        if (result.code === 'FAILED_SAFETY_GUARD') {
+          throw new Error(
+            'Az új source feed szokatlanul kevés terméket tartalmaz. Biztonsági okból nem lett aktiválva. Az előző érvényes snapshot maradt aktív.',
+          )
+        }
+
+        throw new Error(
+          result.message ??
+            'A source feed frissítése sikertelen. Az előző érvényes snapshot változatlan maradt.',
+        )
+      }
+
+      const summary = result.summary ?? {}
+
+      if (result.importStatus === 'NO_CHANGE') {
+        setSourceRefreshMessage(
+          'A source feed naprakész. Nem történt kereskedelmi változás, ezért az Árukereső feed újragenerálása nem volt szükséges.',
+        )
+      } else {
+        const feedStatus =
+          result.feedGeneration?.status === 'ok'
+            ? 'frissítve'
+            : result.feedGeneration?.status === 'skipped'
+              ? 'kihagyva'
+              : 'sikertelen, a korábbi publikus feed maradt elérhető'
+
+        setSourceRefreshMessage(
+          `Source feed frissítve. ${summary.totalRows ?? 0} termék, ` +
+            `+${summary.added ?? 0} új, -${summary.removed ?? 0} törölt, ` +
+            `${summary.changed ?? 0} módosított, ${summary.unchanged ?? 0} változatlan. ` +
+            `Árukereső feed: ${feedStatus}.`,
+        )
+      }
+
+      await Promise.all([
+        loadSourceStatus(),
+        loadPromotion(),
+      ])
+    } catch (refreshError) {
+      console.error(
+        'Source feed refresh failed:',
+        refreshError,
+      )
+      setSourceRefreshMessage(
+        refreshError instanceof Error
+          ? refreshError.message
+          : 'A source feed frissítése sikertelen. Az előző érvényes snapshot változatlan maradt.',
+      )
+      await loadSourceStatus()
+    } finally {
+      setSourceRefreshing(false)
+    }
+  }
 
   const currentFileKey = selectedFile
     ? fileIdentity(selectedFile)
@@ -517,13 +687,112 @@ function ArukeresoCatalogPage() {
           <h2>Katalógus import</h2>
 
           <p className="campaigns-page-description">
-            CMS CSV előnézet, teljes
-            snapshot import és
-            terméktörzs-bővítés. Csak
-            manuális műveletek, ütemezés
-            nélkül.
+            Automatikus Kärcher source feed
+            frissítés, manuális CSV előnézet,
+            teljes snapshot import és
+            terméktörzs-bővítés.
           </p>
         </div>
+      </div>
+
+      <div className="campaign-offers-panel">
+        <div className="campaign-offers-heading">
+          <div>
+            <p className="section-label">
+              KÄRCHER SOURCE FEED
+            </p>
+
+            <h4>Teljes kereskedelmi snapshot</h4>
+          </div>
+
+          <button
+            type="button"
+            className="primary-button"
+            disabled={sourceRefreshing}
+            onClick={() => void runSourceRefresh()}
+          >
+            {sourceRefreshing
+              ? 'Source feed frissítése...'
+              : 'Source feed frissítése'}
+          </button>
+        </div>
+
+        <div className="catalog-kpi-grid">
+          <div className="catalog-kpi">
+            <span className="catalog-kpi-value">
+              {sourceStatus?.currentRowCount ?? '–'}
+            </span>
+            <span className="catalog-kpi-label">
+              Aktív termék
+            </span>
+          </div>
+          <div className="catalog-kpi">
+            <span className="catalog-kpi-value">
+              {sourceStatus?.latestSuccessfulAttempt?.finishedAt
+                ? new Date(
+                    sourceStatus.latestSuccessfulAttempt.finishedAt,
+                  ).toLocaleString('hu-HU')
+                : '–'}
+            </span>
+            <span className="catalog-kpi-label">
+              Utolsó sikeres frissítés
+            </span>
+          </div>
+          <div className="catalog-kpi">
+            <span className="catalog-kpi-value">
+              {sourceStatus?.latestAttempt?.triggerType === 'SCHEDULED'
+                ? 'Automatikus'
+                : sourceStatus?.latestAttempt
+                  ? 'Manuális'
+                  : '–'}
+            </span>
+            <span className="catalog-kpi-label">
+              Utolsó indítás
+            </span>
+          </div>
+          <div className="catalog-kpi">
+            <span className="catalog-kpi-value">
+              {sourceStatus?.latestAttempt?.automationDetails
+                ?.feedGeneration?.status === 'FAILED'
+                ? 'SOURCE OK / FEED HIBA'
+                : sourceStatus?.latestAttempt?.importStatus ?? '–'}
+            </span>
+            <span className="catalog-kpi-label">
+              Utolsó eredmény
+            </span>
+          </div>
+          <div className="catalog-kpi">
+            <span className="catalog-kpi-value">
+              {sourceStatus?.latestAttempt?.automationDetails
+                ?.feedGeneration?.status ?? '–'}
+            </span>
+            <span className="catalog-kpi-label">
+              Feed generálás
+            </span>
+          </div>
+        </div>
+
+        {sourceRefreshMessage && (
+          <div className="campaign-preparation-message">
+            {sourceRefreshMessage}
+          </div>
+        )}
+
+        {sourceStatus?.latestAttempt?.status === 'FAILED' &&
+          sourceStatus.latestAttempt.error && (
+            <div className="campaign-submit-warning">
+              {sourceStatus.latestAttempt.error}
+            </div>
+          )}
+
+        {sourceStatus?.latestAttempt?.automationDetails
+          ?.feedGeneration?.status === 'FAILED' && (
+          <div className="campaign-submit-warning">
+            A source snapshot frissült, de az Árukereső feed generálása
+            sikertelen. A korábbi befejezett publikus feed maradt
+            elérhető.
+          </div>
+        )}
       </div>
 
       <div className="campaign-offers-panel">

@@ -31,7 +31,9 @@ import {
   inArray,
   lt,
   lte,
+  like,
   min,
+  ne,
   or,
 } from 'drizzle-orm'
 import { Hono } from 'hono'
@@ -43,7 +45,13 @@ import {
 import {
   arukeresoApi,
   assertArukeresoConfiguration,
+  refreshArukeresoSourceFeed,
+  withRenewingSchedulerLease,
 } from './arukereso.js'
+import {
+  coordinateScheduledSourceFeedRefresh,
+  SourceFeedRefreshError,
+} from './arukereso-source-feed.js'
 import { arukeresoPerformanceApi } from './arukereso-performance.js'
 import {
   allegroAuth,
@@ -9116,6 +9124,142 @@ export async function runMinuteScheduler() {
   )
 }
 
+export async function runScheduledArukeresoSourceFeedRefresh(
+  now = new Date(),
+) {
+  if (
+    process.env.ARUKERESO_SOURCE_FEED_SCHEDULE_ENABLED
+      ?.trim()
+      .toLowerCase() !== 'true'
+  ) {
+    return
+  }
+
+  if (!db) {
+    console.warn(
+      'Skipping Arukereso source feed refresh: database is not configured',
+    )
+    return
+  }
+
+  const database = db
+  const dailySuccessLeasePrefix =
+    'arukereso-source-feed-daily-success:'
+  const outcome =
+    await coordinateScheduledSourceFeedRefresh<
+      Awaited<
+        ReturnType<typeof refreshArukeresoSourceFeed>
+      >
+    >({
+      now,
+      hasSuccessfulDailyRefresh: async (schedule) => {
+        const dailySuccessLeaseName =
+          `${dailySuccessLeasePrefix}${schedule.date}`
+        const rows = await database
+          .select({ name: schedulerLeases.name })
+          .from(schedulerLeases)
+          .where(
+            and(
+              eq(
+                schedulerLeases.name,
+                dailySuccessLeaseName,
+              ),
+            ),
+          )
+          .limit(1)
+
+        return rows.length > 0
+      },
+      withExecutionLock: (action) =>
+        withRenewingSchedulerLease({
+          database,
+          name: 'arukereso-source-feed-execution',
+          logLabel: 'Arukereso scheduled source refresh',
+          busyError: () =>
+            new SourceFeedRefreshError(
+              'REFRESH_BUSY',
+              'Az ütemezett Árukereső source frissítés már folyamatban van.',
+              409,
+            ),
+          lostError: () =>
+            new SourceFeedRefreshError(
+              'FAILED_IMPORT',
+              'Az ütemezett Árukereső source frissítés zárolása lejárt.',
+              503,
+            ),
+          action: async (lease) =>
+            action(lease.assertOwned),
+        }),
+      refresh: async (schedule) =>
+        refreshArukeresoSourceFeed({
+          triggerType: 'SCHEDULED',
+          sourceMetadata: {
+            kind: 'REMOTE',
+            provider: 'KARCHER',
+            scheduledDate: schedule.date,
+            scheduledTime: schedule.time,
+            timeZone: 'Europe/Budapest',
+          },
+        }),
+      markDailyRefreshSuccessful: async (schedule) => {
+        const completedAt = new Date()
+        const ownerId = randomUUID()
+        const dailySuccessLeaseName =
+          `${dailySuccessLeasePrefix}${schedule.date}`
+        const markerUpsert = database
+          .insert(schedulerLeases)
+          .values({
+            name: dailySuccessLeaseName,
+            ownerId,
+            lockedUntil: new Date(
+              completedAt.getTime() + 22 * 60 * 60 * 1000,
+            ),
+            updatedAt: completedAt,
+          })
+          .onConflictDoUpdate({
+            target: schedulerLeases.name,
+            set: {
+              ownerId,
+              lockedUntil: new Date(
+                completedAt.getTime() + 22 * 60 * 60 * 1000,
+              ),
+              updatedAt: completedAt,
+            },
+          })
+        const removeOldMarkers = database
+          .delete(schedulerLeases)
+          .where(
+            and(
+              like(
+                schedulerLeases.name,
+                `${dailySuccessLeasePrefix}%`,
+              ),
+              ne(
+                schedulerLeases.name,
+                dailySuccessLeaseName,
+              ),
+            ),
+          )
+
+        await database.batch([
+          markerUpsert,
+          removeOldMarkers,
+        ])
+      },
+    })
+
+  if (outcome.status === 'SUCCESS' && outcome.result) {
+    const result = outcome.result
+    console.log('Scheduled Arukereso source feed refresh completed:', {
+      importRunId: result.importRunId,
+      importStatus: result.importStatus,
+      changedItemCount: result.summary.changedItemCount,
+      feedGenerationStatus:
+        result.feedGeneration.status,
+    })
+  }
+}
+
 async function runMinuteSchedulerJobs() {
   const isEnabled = (name: string) =>
     process.env[name]?.trim().toLowerCase() === 'true'
@@ -9144,6 +9288,7 @@ async function runMinuteSchedulerJobs() {
 
   const jobs = [
     ['token refresh', refreshAllegroSessionIfNeeded],
+    ['Arukereso source feed refresh', runScheduledArukeresoSourceFeedRefresh],
     ...(isEnabled('COMMERCE_HUB_PRICE_SCHEDULES_ENABLED')
       ? [['price schedules', processPriceSchedulesAutomatically] as const]
       : []),
