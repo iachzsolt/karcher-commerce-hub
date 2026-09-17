@@ -203,6 +203,8 @@ function reasonLabel(item: PreviewItem) {
       return 'Nincs feedben – nincs PriceKit adat'
     case 'FEED_BLOCKED_PARTIAL_MARKET_DATA':
       return 'Letiltva – a piaci adat hiányos'
+    case 'FEED_BLOCKED_INVALID_CATALOG_PRICE':
+      return 'Letiltva – érvénytelen forrásár (Price=0)'
     case 'FEED_ELIGIBLE_MANUAL_OVERRIDE':
       return 'Manuálisan hozzáadva – globális szabályok figyelmen kívül hagyva'
     case 'FEED_BLOCKED_MANUAL_OVERRIDE':

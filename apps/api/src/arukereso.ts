@@ -500,6 +500,8 @@ function parseMoneyMinor(
   return Math.round(value * 100)
 }
 
+const POSTGRES_INTEGER_MAX = 2147483647
+
 function parseDeliveryTimeDays(
   rawValue: string,
 ): number | null {
@@ -519,16 +521,12 @@ function parseDeliveryTimeDays(
     return null
   }
 
-  const value =
-    Number.parseInt(
-      match[1],
-      10,
-    )
+  const value = Number(match[1])
 
   if (
     !Number.isInteger(value) ||
     value < 0 ||
-    value > 365
+    value > POSTGRES_INTEGER_MAX
   ) {
     return null
   }
@@ -572,6 +570,17 @@ function countDuplicates(
 
 async function analyzeCatalogCsv(
   csvText: string,
+  deps?: {
+    hubProducts?: Array<{
+      id: string
+      sku: string
+    }>
+    hubIdentifiers?: Array<{
+      productId: string
+      type: string
+      value: string
+    }>
+  },
 ) {
   const csvRows =
     parseSemicolonCsv(csvText)
@@ -635,31 +644,39 @@ async function analyzeCatalogCsv(
     return row[index] ?? ''
   }
 
-  const database =
-    requireDatabase()
+  const hasInjectedHubData =
+    deps?.hubProducts !== undefined &&
+    deps?.hubIdentifiers !== undefined
 
-  const [
-    hubProducts,
-    hubIdentifiers,
-  ] = await Promise.all([
-    database
-      .select({
-        id: products.id,
-        sku: products.sku,
-      })
-      .from(products),
+  const database = hasInjectedHubData
+    ? null
+    : requireDatabase()
 
-    database
-      .select({
-        productId:
-          productIdentifiers.productId,
-        type:
-          productIdentifiers.type,
-        value:
-          productIdentifiers.value,
-      })
-      .from(productIdentifiers),
-  ])
+  const [hubProducts, hubIdentifiers] =
+    hasInjectedHubData
+      ? [
+          deps?.hubProducts ?? [],
+          deps?.hubIdentifiers ?? [],
+        ]
+      : await Promise.all([
+          database!
+            .select({
+              id: products.id,
+              sku: products.sku,
+            })
+            .from(products),
+
+          database!
+            .select({
+              productId:
+                productIdentifiers.productId,
+              type:
+                productIdentifiers.type,
+              value:
+                productIdentifiers.value,
+            })
+            .from(productIdentifiers),
+        ])
 
   const productBySku =
     new Map(
@@ -910,16 +927,14 @@ async function analyzeCatalogCsv(
       errors.push('MISSING_IMAGE')
     }
 
-    if (
-      priceMinor === null ||
-      priceMinor <= 0
-    ) {
+    if (priceMinor === null) {
       errors.push('INVALID_PRICE')
       invalidPriceRows += 1
-
-      if (priceMinor === 0) {
-        zeroPriceRows += 1
-      }
+    } else if (priceMinor === 0) {
+      // Structurally valid source row, but never
+      // publishable. Persist it in the authoritative
+      // snapshot; feed eligibility blocks it below.
+      zeroPriceRows += 1
     }
 
     if (
@@ -6987,6 +7002,7 @@ type FeedEligibilityReasonCode =
   | 'FEED_ELIGIBLE_NO_CURRENT_PRICEKIT'
   | 'FEED_BLOCKED_NO_CURRENT_PRICEKIT'
   | 'FEED_BLOCKED_PARTIAL_MARKET_DATA'
+  | 'FEED_BLOCKED_INVALID_CATALOG_PRICE'
 
 type FeedEligibilityOverride =
   | 'INHERIT'
@@ -7054,6 +7070,7 @@ type FeedEligibilityReasonDetails = {
   observedAt: string | null
   pricingAgeHours: number | null
   priceKitStatus: PriceKitStatus
+  catalogPriceMinor: number | null
 }
 
 function evaluateFeedEligibility(input: {
@@ -7062,6 +7079,7 @@ function evaluateFeedEligibility(input: {
   override: FeedEligibilityOverride | null
   settings: FeedEligibilitySettings
   now: Date
+  catalogPriceMinor: number | null
 }): {
   included: boolean
   decision: 'INCLUDED' | 'EXCLUDED'
@@ -7126,7 +7144,26 @@ function evaluateFeedEligibility(input: {
       observedAt: observedAtIso,
       pricingAgeHours,
       priceKitStatus,
+      catalogPriceMinor:
+        input.catalogPriceMinor,
     }
+
+  if (
+    input.catalogPriceMinor === null ||
+    input.catalogPriceMinor <= 0
+  ) {
+    // Hard commercial safety: a zero or missing
+    // source price is never publishable, not even
+    // with FORCE_INCLUDE. Pricing and inventory
+    // cannot replace the source Price.
+    return {
+      included: false,
+      decision: 'EXCLUDED',
+      reasonCode:
+        'FEED_BLOCKED_INVALID_CATALOG_PRICE',
+      reasonDetails,
+    }
+  }
 
   if (
     inclusionMode === 'FORCE_EXCLUDE'
@@ -7143,10 +7180,10 @@ function evaluateFeedEligibility(input: {
   if (
     inclusionMode === 'FORCE_INCLUDE'
   ) {
-    // Absolute manual include: bypasses the current
-    // PriceKit requirement, all index rules, the
-    // no-competitor rule and the stock rule.
-    // "Mindig feedben" truly means always active.
+    // Manual include bypasses the PriceKit
+    // requirement, all index rules, the
+    // no-competitor rule and the stock rule, but
+    // never the invalid source price block above.
     return {
       included: true,
       decision: 'INCLUDED',
@@ -7838,6 +7875,7 @@ async function buildCatalogFeedOutput(
       override: inclusionMode,
       settings,
       now,
+      catalogPriceMinor: row.priceMinor,
     })
 
     items.push({
@@ -10928,6 +10966,8 @@ arukeresoApi.get(
                 .select({
                   productId:
                     catalogSourceItems.productId,
+                  priceMinor:
+                    catalogSourceItems.priceMinor,
                 })
                 .from(catalogSourceItems)
                 .where(
@@ -11006,6 +11046,13 @@ arukeresoApi.get(
           item.productId ? [item.productId] : [],
         ),
       )
+      const catalogPriceByProduct = new Map(
+        catalogProductRows.flatMap((item) =>
+          item.productId
+            ? [[item.productId, item.priceMinor] as const]
+            : [],
+        ),
+      )
 
       const now = new Date()
 
@@ -11066,6 +11113,10 @@ arukeresoApi.get(
               override: inclusionMode,
               settings,
               now,
+              catalogPriceMinor:
+                catalogPriceByProduct.get(
+                  product.id,
+                ) ?? null,
             })
 
           const priceKitStatus =
@@ -12150,6 +12201,7 @@ export {
   createCatalogFeedCsv,
   evaluateFeedEligibility,
   isCatalogFeedItemInV4,
+  parseDeliveryTimeDays,
   parseSemicolonCsv,
   parseCatalogFeedSourceRow,
   parseCatalogFeedOutputRow,

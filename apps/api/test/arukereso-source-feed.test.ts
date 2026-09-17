@@ -16,7 +16,10 @@ import {
   computeCatalogSnapshotDiff,
   createCatalogSourceFingerprint,
   createKeyedSerialExecutor,
+  evaluateFeedEligibility,
+  FEED_ELIGIBILITY_DEFAULT_SETTINGS,
   parseCatalogFeedSourceRow,
+  parseDeliveryTimeDays,
   parseSemicolonCsv,
   runPostCatalogImportFeedHook,
   toCatalogFeedOutputRow,
@@ -719,5 +722,190 @@ void describe('scheduled source refresh retry semantics', () => {
     assert.equal(harness.state.refreshCalls, 1)
     assert.equal(harness.state.promotionCalls, 1)
     assert.equal(harness.state.feedGenerationCalls, 1)
+  })
+})
+
+void describe('commercial validation: delivery parsing and zero-price safety', () => {
+  void it('parses 85, 889 and 1000 munkanap', () => {
+    assert.equal(parseDeliveryTimeDays('85 munkanap'), 85)
+    assert.equal(parseDeliveryTimeDays('889 munkanap'), 889)
+    assert.equal(parseDeliveryTimeDays('1000 munkanap'), 1000)
+    assert.equal(parseDeliveryTimeDays('85'), 85)
+  })
+
+  void it('keeps integer overflow invalid', () => {
+    assert.equal(
+      parseDeliveryTimeDays('2147483648 munkanap'),
+      null,
+    )
+    assert.equal(
+      parseDeliveryTimeDays('99999999999 munkanap'),
+      null,
+    )
+    assert.equal(parseDeliveryTimeDays(''), null)
+    assert.equal(parseDeliveryTimeDays('azonnal'), null)
+  })
+
+  void it('accepts a mixed snapshot with Price=0 without snapshot rejection', async () => {
+    const header =
+      'Identifier;EanCode;Manufacturer;Name;Description;Category;ProductUrl;ImageUrl;ImageUrl2;Price;NetPrice;DeliveryCost;DeliveryTime'
+    const row = (
+      identifier: string,
+      ean: string,
+      price: string,
+      deliveryTime: string,
+    ) =>
+      [
+        identifier,
+        ean,
+        'Kärcher',
+        `Product ${identifier}`,
+        'Description',
+        'Category',
+        `https://example.test/${identifier}`,
+        'https://example.test/image.jpg',
+        '',
+        price,
+        price,
+        'Ingyenes',
+        deliveryTime,
+      ].join(';')
+    const csv = [
+      header,
+      row('26451800', '4054278000001', '0', '85 munkanap'),
+      row('28528027', '4054278000002', '224500', '1000 munkanap'),
+      row('54530500', '4054278000003', '8100', '889 munkanap'),
+    ].join('\n')
+
+    const analysis = await analyzeCatalogCsv(csv, {
+      hubProducts: [],
+      hubIdentifiers: [],
+    })
+
+    assert.equal(analysis.summary.invalidRows, 0)
+    assert.equal(analysis.summary.zeroPriceRows, 1)
+    assert.equal(analysis.summary.validRows, 3)
+
+    const validItems = analysis.allItems.filter(
+      (item) => item.errors.length === 0,
+    )
+    assert.equal(validItems.length, 3)
+
+    const zeroPriceItem = analysis.allItems.find(
+      (item) => item.identifier === '26451800',
+    )
+    assert.ok(zeroPriceItem)
+    assert.deepEqual(zeroPriceItem.errors, [])
+    assert.equal(zeroPriceItem.priceMinor, 0)
+    assert.equal(zeroPriceItem.rawSource.Price, '0')
+    assert.equal(
+      zeroPriceItem.rawSource.DeliveryTime,
+      '85 munkanap',
+    )
+  })
+
+  void it('blocks zero-price rows from active feed, even with FORCE_INCLUDE', () => {
+    const pricingRow = {
+      priceIndexBps: 10000,
+      medianIndexBps: null,
+      averageIndexBps: null,
+      dataStatus: 'HAS_COMPETITOR',
+      observedAt: new Date(),
+    }
+    const now = new Date()
+
+    const blocked = evaluateFeedEligibility({
+      pricingRow,
+      stockQuantity: 5,
+      override: 'INHERIT',
+      settings: FEED_ELIGIBILITY_DEFAULT_SETTINGS,
+      now,
+      catalogPriceMinor: 0,
+    })
+    assert.equal(blocked.included, false)
+    assert.equal(blocked.decision, 'EXCLUDED')
+    assert.equal(
+      blocked.reasonCode,
+      'FEED_BLOCKED_INVALID_CATALOG_PRICE',
+    )
+
+    const forced = evaluateFeedEligibility({
+      pricingRow,
+      stockQuantity: 5,
+      override: 'FORCE_INCLUDE',
+      settings: FEED_ELIGIBILITY_DEFAULT_SETTINGS,
+      now,
+      catalogPriceMinor: 0,
+    })
+    assert.equal(forced.included, false)
+    assert.equal(
+      forced.reasonCode,
+      'FEED_BLOCKED_INVALID_CATALOG_PRICE',
+    )
+
+    const missing = evaluateFeedEligibility({
+      pricingRow,
+      stockQuantity: 5,
+      override: 'FORCE_INCLUDE',
+      settings: FEED_ELIGIBILITY_DEFAULT_SETTINGS,
+      now,
+      catalogPriceMinor: null,
+    })
+    assert.equal(missing.included, false)
+    assert.equal(
+      missing.reasonCode,
+      'FEED_BLOCKED_INVALID_CATALOG_PRICE',
+    )
+  })
+
+  void it('keeps positive-price rows on the existing eligibility path', () => {
+    const now = new Date()
+    const result = evaluateFeedEligibility({
+      pricingRow: {
+        priceIndexBps: 10000,
+        medianIndexBps: null,
+        averageIndexBps: null,
+        dataStatus: 'HAS_COMPETITOR',
+        observedAt: now,
+      },
+      stockQuantity: 5,
+      override: 'INHERIT',
+      settings: FEED_ELIGIBILITY_DEFAULT_SETTINGS,
+      now,
+      catalogPriceMinor: 1299000,
+    })
+
+    assert.equal(result.included, true)
+    assert.equal(
+      result.reasonCode,
+      'FEED_ELIGIBLE_PRICING_RULES',
+    )
+  })
+
+  void it('preserves raw 889 and 1000 munkanap values in outgoing data', () => {
+    for (const deliveryTime of [
+      '889 munkanap',
+      '1000 munkanap',
+    ]) {
+      const source = parseCatalogFeedSourceRow(
+        JSON.stringify({ ...sourceRow, DeliveryTime: deliveryTime }),
+        'catalog-item',
+      )
+      assert.equal(source.DeliveryTime, deliveryTime)
+
+      const active = toCatalogFeedOutputRow({
+        source,
+        sku: '1.004-062.0',
+        result: { included: true },
+      } as never)
+      assert.equal(active.DeliveryTime, deliveryTime)
+
+      const excluded = toCatalogFeedOutputRow({
+        source,
+        sku: '1.004-062.0',
+        result: { included: false },
+      } as never)
+      assert.equal(excluded.DeliveryTime, 'NO')
+    }
   })
 })
