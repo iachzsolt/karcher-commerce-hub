@@ -18,6 +18,9 @@ import {
   createKeyedSerialExecutor,
   evaluateFeedEligibility,
   FEED_ELIGIBILITY_DEFAULT_SETTINGS,
+  indexCatalogSearchEntries,
+  matchesArukeresoProductSearch,
+  normalizeArukeresoSearchNeedle,
   parseCatalogFeedSourceRow,
   parseDeliveryTimeDays,
   parseSemicolonCsv,
@@ -907,5 +910,256 @@ void describe('commercial validation: delivery parsing and zero-price safety', (
       } as never)
       assert.equal(excluded.DeliveryTime, 'NO')
     }
+  })
+})
+
+void describe('arukereso product search', () => {
+  const matchedProduct = {
+    sku: '2.645-180.0',
+    identifier: '26451800',
+    eanCode: '4039784577602',
+    names: ['Kärcher HT 3.400', 'HT 3.400 magasnyomású'],
+  }
+  const otherProduct = {
+    sku: '2.852-802.7',
+    identifier: '28528027',
+    eanCode: '4054278000000',
+    names: ['Kärcher Other'],
+  }
+
+  void it('normalizes empty queries to unfiltered', () => {
+    assert.equal(normalizeArukeresoSearchNeedle(null), null)
+    assert.equal(normalizeArukeresoSearchNeedle(''), null)
+    assert.equal(normalizeArukeresoSearchNeedle('   '), null)
+    assert.equal(
+      normalizeArukeresoSearchNeedle('  HT 3.400 '),
+      'ht 3.400',
+    )
+  })
+
+  void it('finds the product by dotted SKU', () => {
+    assert.equal(
+      matchesArukeresoProductSearch(
+        matchedProduct,
+        normalizeArukeresoSearchNeedle('2.645-180.0'),
+      ),
+      true,
+    )
+  })
+
+  void it('finds the mapped SKU by source Identifier', () => {
+    assert.equal(
+      matchesArukeresoProductSearch(
+        matchedProduct,
+        normalizeArukeresoSearchNeedle('26451800'),
+      ),
+      true,
+    )
+  })
+
+  void it('bridges SKU and Identifier formats in both directions', () => {
+    assert.equal(
+      matchesArukeresoProductSearch(
+        {
+          sku: '2.645-180.0',
+          identifier: null,
+          eanCode: null,
+          names: [],
+        },
+        normalizeArukeresoSearchNeedle('26451800'),
+      ),
+      true,
+    )
+    assert.equal(
+      matchesArukeresoProductSearch(
+        {
+          sku: 'unrelated-sku',
+          identifier: '26451800',
+          eanCode: null,
+          names: [],
+        },
+        normalizeArukeresoSearchNeedle('2.645-180.0'),
+      ),
+      true,
+    )
+  })
+
+  void it('finds the product by EAN', () => {
+    assert.equal(
+      matchesArukeresoProductSearch(
+        matchedProduct,
+        normalizeArukeresoSearchNeedle('4039784577602'),
+      ),
+      true,
+    )
+    assert.equal(
+      matchesArukeresoProductSearch(
+        matchedProduct,
+        normalizeArukeresoSearchNeedle('845776'),
+      ),
+      true,
+    )
+  })
+
+  void it('keeps product and source name search working', () => {
+    assert.equal(
+      matchesArukeresoProductSearch(
+        matchedProduct,
+        normalizeArukeresoSearchNeedle('HT 3.400'),
+      ),
+      true,
+    )
+    assert.equal(
+      matchesArukeresoProductSearch(
+        matchedProduct,
+        normalizeArukeresoSearchNeedle('magasnyomású'),
+      ),
+      true,
+    )
+  })
+
+  void it('leaves empty search unfiltered', () => {
+    for (const query of [null, '', '   '] as const) {
+      assert.equal(
+        matchesArukeresoProductSearch(
+          matchedProduct,
+          normalizeArukeresoSearchNeedle(query),
+        ),
+        true,
+      )
+      assert.equal(
+        matchesArukeresoProductSearch(
+          otherProduct,
+          normalizeArukeresoSearchNeedle(query),
+        ),
+        true,
+      )
+    }
+  })
+
+  void it('returns zero for non-matching search', () => {
+    const needle = normalizeArukeresoSearchNeedle(
+      'zzz-no-such-product',
+    )
+    assert.equal(
+      matchesArukeresoProductSearch(matchedProduct, needle),
+      false,
+    )
+    assert.equal(
+      matchesArukeresoProductSearch(otherProduct, needle),
+      false,
+    )
+  })
+
+  void it('does not cross-match distinct SKU/Identifier pairs', () => {
+    assert.equal(
+      matchesArukeresoProductSearch(
+        otherProduct,
+        normalizeArukeresoSearchNeedle('2.645-180.0'),
+      ),
+      false,
+    )
+    assert.equal(
+      matchesArukeresoProductSearch(
+        otherProduct,
+        normalizeArukeresoSearchNeedle('26451800'),
+      ),
+      false,
+    )
+    assert.equal(
+      matchesArukeresoProductSearch(
+        matchedProduct,
+        normalizeArukeresoSearchNeedle('28528027'),
+      ),
+      false,
+    )
+  })
+
+  void it('drops unmatched catalog rows from the Products search index', () => {
+    const index = indexCatalogSearchEntries([
+      {
+        productId: 'product-1',
+        identifier: '26451800',
+        eanCode: '4039784577602',
+        name: 'HT 3.400',
+      },
+      {
+        productId: null,
+        identifier: '99999999',
+        eanCode: '4999999999999',
+        name: 'Catalog only',
+      },
+    ])
+
+    assert.equal(index.size, 1)
+    assert.deepEqual(index.get('product-1'), {
+      identifier: '26451800',
+      eanCode: '4039784577602',
+      name: 'HT 3.400',
+    })
+  })
+
+  void it('filters before paginating', () => {
+    const rows: Array<{
+      sku: string
+      identifier: string | null
+      eanCode: string | null
+      names: Array<string | null>
+    }> = Array.from({ length: 60 }, (_, position) => ({
+      sku: `1.000-${String(position).padStart(3, '0')}.0`,
+      identifier: `1000000${position}`,
+      eanCode: null,
+      names: [],
+    }))
+    rows.push({
+      sku: '2.645-180.0',
+      identifier: '26451800',
+      eanCode: '4039784577602',
+      names: ['HT 3.400'],
+    })
+
+    const needle =
+      normalizeArukeresoSearchNeedle('26451800')
+    const filtered = rows.filter((row) =>
+      matchesArukeresoProductSearch(row, needle),
+    )
+    assert.equal(filtered.length, 1)
+
+    const firstPage = filtered.slice(0, 50)
+    assert.equal(firstPage.length, 1)
+    assert.equal(firstPage[0]?.sku, '2.645-180.0')
+
+    const sliceFirst = rows
+      .slice(0, 50)
+      .filter((row) =>
+        matchesArukeresoProductSearch(row, needle),
+      )
+    assert.equal(sliceFirst.length, 0)
+  })
+
+  void it('combines search with existing status filters', () => {
+    const needle =
+      normalizeArukeresoSearchNeedle('26451800')
+    const matches = (
+      row: typeof matchedProduct,
+      inFeed: boolean,
+      feedState: string | null,
+    ) =>
+      matchesArukeresoProductSearch(row, needle) &&
+      (feedState === null ||
+        (feedState === 'IN_FEED' ? inFeed : !inFeed))
+
+    assert.equal(
+      matches(matchedProduct, true, 'IN_FEED'),
+      true,
+    )
+    assert.equal(
+      matches(matchedProduct, false, 'IN_FEED'),
+      false,
+    )
+    assert.equal(
+      matches(otherProduct, true, 'IN_FEED'),
+      false,
+    )
   })
 })

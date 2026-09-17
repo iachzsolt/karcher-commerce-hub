@@ -25,6 +25,9 @@ type FeedProductRow = {
   productId: string
   sku: string
   name: string | null
+  identifier: string | null
+  eanCode: string | null
+  catalogName: string | null
   inCurrentCmsCatalog: boolean
   inFeed: boolean
   activeInFeed: boolean
@@ -376,7 +379,7 @@ function ArukeresoProductsPage() {
             <input
               type="search"
               value={filters.search}
-              placeholder="SKU vagy terméknév"
+              placeholder="SKU / Identifier / EAN / terméknév"
               onChange={(event) =>
                 updateFilter('search', event.target.value)
               }
@@ -559,6 +562,26 @@ function ArukeresoProductsPage() {
                     <td>
                       <strong>{row.sku}</strong>
                       <small>{row.name ?? '–'}</small>
+                      {row.identifier !== null ||
+                      row.eanCode !== null ? (
+                        <small>
+                          {[
+                            row.identifier !== null
+                              ? `Azonosító: ${row.identifier}`
+                              : null,
+                            row.eanCode !== null
+                              ? `EAN: ${row.eanCode}`
+                              : null,
+                          ]
+                            .filter(
+                              (
+                                value,
+                              ): value is string =>
+                                value !== null,
+                            )
+                            .join(' · ')}
+                        </small>
+                      ) : null}
                     </td>
                     <td>
                       <span

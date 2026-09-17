@@ -27,6 +27,7 @@ type PreviewItem = {
   productId: string
   sku: string
   identifier: string
+  eanCode: string
   name: string
   inFeed: boolean
   included: boolean
@@ -884,7 +885,7 @@ function ArukeresoFeedPreviewPage() {
             <input
               type="search"
               value={filters.search}
-              placeholder="SKU vagy terméknév"
+              placeholder="SKU / Identifier / EAN / terméknév"
               onChange={(event) =>
                 updateFilter('search', event.target.value)
               }
@@ -1050,6 +1051,9 @@ function ArukeresoFeedPreviewPage() {
                     <td>
                       <strong>{item.sku}</strong>
                       <small>{item.name}</small>
+                      <small>
+                        {`Azonosító: ${item.identifier} · EAN: ${item.eanCode}`}
+                      </small>
                     </td>
                     <td>
                       <span

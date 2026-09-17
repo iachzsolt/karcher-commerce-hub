@@ -5485,6 +5485,138 @@ function collapsePricingItemRows(
   return [...byProduct.values()]
 }
 
+function normalizeArukeresoSearchNeedle(
+  query: string | null | undefined,
+): string | null {
+  const needle =
+    query?.trim().toLowerCase() ?? ''
+
+  return needle === '' ? null : needle
+}
+
+function digitsOnlyArukereso(
+  value: string,
+): string {
+  return value.replace(/\D/g, '')
+}
+
+/**
+ * Shared Árukereső product search predicate for the
+ * Products and Feed Preview endpoints. Matches Hub
+ * SKU, catalog source Identifier, catalog source EAN
+ * and product/source names with case-insensitive
+ * substring semantics. Digit equivalence bridges the
+ * CMS Identifier and Hub SKU formats (26451800 <->
+ * 2.645-180.0, same digit-grouping semantics as
+ * cmsIdentifierToSku) without fuzzy matching. A null
+ * needle matches everything, preserving the
+ * unfiltered empty-search behavior. Filtering always
+ * runs before pagination at the call sites.
+ */
+function matchesArukeresoProductSearch(
+  input: {
+    sku: string | null
+    identifier: string | null
+    eanCode: string | null
+    names: Array<string | null>
+  },
+  needle: string | null,
+): boolean {
+  if (needle === null) {
+    return true
+  }
+
+  const candidates: Array<string | null> = [
+    input.sku,
+    input.identifier,
+    input.eanCode,
+    ...input.names,
+  ]
+
+  for (const candidate of candidates) {
+    if (
+      candidate !== null &&
+      candidate.toLowerCase().includes(needle)
+    ) {
+      return true
+    }
+  }
+
+  const needleDigits =
+    digitsOnlyArukereso(needle)
+
+  if (needleDigits !== '') {
+    const digitCandidates: Array<string | null> =
+      [
+        input.sku,
+        input.identifier,
+        input.eanCode,
+      ]
+
+    for (const candidate of digitCandidates) {
+      if (
+        candidate !== null &&
+        digitsOnlyArukereso(candidate).includes(
+          needleDigits,
+        )
+      ) {
+        return true
+      }
+    }
+  }
+
+  return false
+}
+
+/**
+ * Indexes linked catalog search/display data by Hub
+ * product. Rows without a linked product (unmatched
+ * catalog-only rows) are dropped so they can never
+ * leak into the Products population, which remains
+ * active Hub products.
+ */
+function indexCatalogSearchEntries(
+  rows: Array<{
+    productId: string | null
+    identifier: string | null
+    eanCode: string | null
+    name: string | null
+  }>,
+): Map<
+  string,
+  {
+    identifier: string | null
+    eanCode: string | null
+    name: string | null
+  }
+> {
+  const byProduct = new Map<
+    string,
+    {
+      identifier: string | null
+      eanCode: string | null
+      name: string | null
+    }
+  >()
+
+  for (const row of rows) {
+    if (
+      row.productId === null ||
+      byProduct.has(row.productId)
+    ) {
+      continue
+    }
+
+    byProduct.set(row.productId, {
+      identifier: row.identifier,
+      eanCode: row.eanCode,
+      name: row.name,
+    })
+  }
+
+  return byProduct
+}
+
 function applyPricingItemSearch(
   items: PricingItemRow[],
   query: string,
@@ -6280,6 +6412,8 @@ function toFeedOutputSample(
     productId: item.productId,
     sku: item.sku,
     identifier: item.source.Identifier,
+    eanCode:
+      item.eanCode ?? item.source.EanCode,
     name: item.source.Name,
     inFeed: isCatalogFeedItemInV4(item),
     included: item.result.included,
@@ -6393,11 +6527,20 @@ arukeresoApi.get(
       const filteredItems = output.items.filter(
         (item) => {
           if (
-            search !== null &&
-            !item.sku
-              .toLowerCase()
-              .includes(search) &&
-            !item.source.Name.toLowerCase().includes(
+            !matchesArukeresoProductSearch(
+              {
+                sku: item.sku,
+                identifier:
+                  item.identifier ??
+                  item.source.Identifier,
+                eanCode:
+                  item.eanCode ??
+                  item.source.EanCode,
+                names: [
+                  item.name,
+                  item.source.Name,
+                ],
+              },
               search,
             )
           ) {
@@ -10968,6 +11111,11 @@ arukeresoApi.get(
                     catalogSourceItems.productId,
                   priceMinor:
                     catalogSourceItems.priceMinor,
+                  identifier:
+                    catalogSourceItems.identifier,
+                  eanCode:
+                    catalogSourceItems.eanCode,
+                  name: catalogSourceItems.name,
                 })
                 .from(catalogSourceItems)
                 .where(
@@ -11053,6 +11201,10 @@ arukeresoApi.get(
             : [],
         ),
       )
+      const catalogSearchByProduct =
+        indexCatalogSearchEntries(
+          catalogProductRows,
+        )
 
       const now = new Date()
 
@@ -11257,10 +11409,21 @@ arukeresoApi.get(
             summary.missingEnabledMetric += 1
           }
 
+          const catalogSearch =
+            catalogSearchByProduct.get(
+              product.id,
+            ) ?? null
+
           return {
             productId: product.id,
             sku: product.sku,
             name: product.name,
+            identifier:
+              catalogSearch?.identifier ?? null,
+            eanCode:
+              catalogSearch?.eanCode ?? null,
+            catalogName:
+              catalogSearch?.name ?? null,
             inCurrentCmsCatalog,
             inFeed,
             activeInFeed:
@@ -11309,13 +11472,18 @@ arukeresoApi.get(
       const filteredItems = items.filter(
         (item) => {
           if (
-            searchFilter &&
-            !item.sku
-              .toLowerCase()
-              .includes(searchFilter) &&
-            !(item.name ?? '')
-              .toLowerCase()
-              .includes(searchFilter)
+            !matchesArukeresoProductSearch(
+              {
+                sku: item.sku,
+                identifier: item.identifier,
+                eanCode: item.eanCode,
+                names: [
+                  item.name,
+                  item.catalogName,
+                ],
+              },
+              searchFilter,
+            )
           ) {
             return false
           }
@@ -12216,6 +12384,9 @@ export {
   computePricingDiagnostics,
   collapsePricingItemRows,
   applyPricingItemSearch,
+  normalizeArukeresoSearchNeedle,
+  matchesArukeresoProductSearch,
+  indexCatalogSearchEntries,
   derivePricingItemFeedState,
   computeCatalogSnapshotDiff,
   cmsIdentifierToSku,
