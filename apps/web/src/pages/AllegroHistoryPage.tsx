@@ -3,6 +3,7 @@ import { API_BASE_URL } from '../config/api'
 import {
   aggregateListingStories,
   attachRelatedDayEvents,
+  describeStoryDetail,
   summarizeRefreshRun,
   summarizeStories,
   type ListingStory,
@@ -58,6 +59,17 @@ type CatalogSyncRunsResponse = {
   runs: CatalogSyncRun[]
 }
 
+type RelatedInventoryImport = {
+  id: string
+  status: string
+  rowsRead: number | null
+  rowsImported: number | null
+  changedItemCount: number | null
+  error: string | null
+  startedAt: string
+  finishedAt: string | null
+}
+
 type InventoryRefreshRun = {
   id: string
   connectionName: string
@@ -68,11 +80,13 @@ type InventoryRefreshRun = {
     | 'IMPORT_ONLY'
     | 'SUCCESS'
     | 'FAILED'
+    | 'INTERRUPTED'
   importStatus: string | null
   rowsImported: number
   changedItemCount: number
   error: string | null
   automationDetails: InventoryAutomationDetails | null
+  relatedImport: RelatedInventoryImport | null
   startedAt: string
   finishedAt: string | null
 }
@@ -155,6 +169,13 @@ type SyncMetadata = {
   remoteStock?: number | null
   fromStock?: number | null
   toStock?: number | null
+  confirmedRemoteStock?: number | null
+  confirmedPublicationStatus?: string | null
+  reconciled?: boolean | null
+  taskMessage?: string | null
+  taskStatus?: string | null
+  commandId?: string | null
+  httpStatus?: number | null
 }
 
 type HistoryDayItem =
@@ -433,14 +454,14 @@ function getEventPresentation(event: AllegroHistoryEvent) {
         metadata?.toStock !== null &&
         metadata?.toStock !== undefined &&
         metadata.fromStock !== metadata.toStock
-      const title =
+      const baseTitle =
         status === 'NO_CHANGE'
           ? 'Nem igényelt frissítést'
           : status === 'FAILED'
             ? 'A frissítés sikertelen'
             : status === 'PENDING' ||
                 status === 'REACTIVATION_IN_PROGRESS'
-              ? 'A frissítés feldolgozás alatt van'
+              ? 'Allegro feldolgozás alatt'
               : status === 'SUCCESS' &&
                   (action === 'END' || action === 'ADOPT_AUTO_PAUSE')
                 ? 'Sikeresen inaktiválva'
@@ -451,6 +472,10 @@ function getEventPresentation(event: AllegroHistoryEvent) {
                   : action === 'SKIP'
                     ? 'Kimaradt a frissítésből'
                     : 'Sikeresen frissült'
+      const title =
+        metadata?.reconciled === true
+          ? `${baseTitle} — utólag megerősítve`
+          : baseTitle
 
       return {
         label: hasStockChange ? 'Készlet' : 'Szinkron',
@@ -593,6 +618,22 @@ function toStoryInput(
           fromStock:
             metadata.fromStock ?? null,
           toStock: metadata.toStock ?? null,
+          confirmedRemoteStock:
+            metadata.confirmedRemoteStock ??
+            null,
+          confirmedPublicationStatus:
+            metadata.confirmedPublicationStatus ??
+            null,
+          reconciled:
+            metadata.reconciled ?? null,
+          taskMessage:
+            metadata.taskMessage ?? null,
+          taskStatus:
+            metadata.taskStatus ?? null,
+          commandId:
+            metadata.commandId ?? null,
+          httpStatus:
+            metadata.httpStatus ?? null,
         }
       : null,
   }
@@ -658,6 +699,19 @@ function ListingStoryRow({
         : story.status === 'pending'
           ? 'is-pending'
           : ''
+  const detailLines = describeStoryDetail(story)
+  const failureDetail =
+    story.businessResult === 'FAILED'
+      ? story.events
+          .map(
+            (input) =>
+              input.metadata?.taskMessage ??
+              null,
+          )
+          .find(
+            (message) => message !== null,
+          ) ?? null
+      : null
 
   return (
     <article className="allegro-history-story">
@@ -682,6 +736,12 @@ function ListingStoryRow({
         </span>
         <span className="allegro-history-story-result">
           {story.resultLabel}
+          {detailLines.map((line) => (
+            <small key={line}>{line}</small>
+          ))}
+          {failureDetail !== null && (
+            <small>{failureDetail}</small>
+          )}
         </span>
         <span
           className={`allegro-history-run-status ${statusClass}`}
@@ -816,13 +876,25 @@ function SyncHistoryGroup({
       : summary.pending > 0
         ? 'Függőben'
         : 'Sikeres'
+  /*
+   * Action-oriented counters, each story counted exactly
+   * once by its business result. PENDING means the newest
+   * event is still processing; reconciled or superseded
+   * pendings no longer inflate it.
+   */
   const metrics = [
     ['Érintett ajánlat', summary.affected, 'total'],
-    ['Készlet változott', summary.stockChanged, 'neutral'],
-    ['Aktiválva', summary.activated, 'positive'],
+    [
+      'Készlet frissítve',
+      summary.stockUpdated,
+      'neutral',
+    ],
     ['Lekapcsolva', summary.autoPaused, 'warning'],
+    ['Visszakapcsolva', summary.activated, 'positive'],
+    ['Feldolgozás alatt', summary.pending, 'warning'],
+    ['Nincs teendő', summary.noAction, 'neutral'],
     ['Kihagyva', summary.skipped, 'warning'],
-    ['Sikertelen', summary.failed, 'negative'],
+    ['Hibás', summary.failed, 'negative'],
   ] as const
 
   return (
@@ -1054,7 +1126,9 @@ function InventoryRefreshHistoryGroup({
     importStatus: run.importStatus,
   })
   const tone: HistoryRunTone =
-    isStale || overall.overall === 'failed'
+    isStale ||
+    overall.overall === 'failed' ||
+    overall.overall === 'interrupted'
       ? 'failed'
       : overall.overall === 'success'
         ? 'success'
@@ -1062,19 +1136,20 @@ function InventoryRefreshHistoryGroup({
             overall.overall === 'running'
           ? 'pending'
           : 'neutral'
-  const status = isStale
-    ? 'Megszakadt'
-    : overall.overall === 'success'
-      ? 'Sikeres'
-      : overall.overall === 'partial'
-        ? 'Részben sikeres'
-        : overall.overall === 'failed'
-          ? 'Sikertelen'
-          : overall.overall === 'import-only'
-            ? 'Csak beolvasás'
-            : overall.overall === 'legacy'
-              ? 'Nem ellenőrizhető'
-              : 'Folyamatban'
+  const status =
+    isStale || overall.overall === 'interrupted'
+      ? 'Megszakadt'
+      : overall.overall === 'success'
+        ? 'Sikeres'
+        : overall.overall === 'partial'
+          ? 'Részben sikeres'
+          : overall.overall === 'failed'
+            ? 'Sikertelen'
+            : overall.overall === 'import-only'
+              ? 'Csak beolvasás'
+              : overall.overall === 'legacy'
+                ? 'Nem ellenőrizhető'
+                : 'Folyamatban'
   const allegroSyncNote =
     overall.overall === 'success'
       ? 'Az Allegro szinkron sikeres.'
@@ -1145,6 +1220,40 @@ function InventoryRefreshHistoryGroup({
               <strong>{run.finishedAt ? formatTime(run.finishedAt) : 'nincs rögzítve'}</strong>
             </span>
           </div>
+          {run.relatedImport !== null &&
+            run.relatedImport !== undefined &&
+            (overall.overall === 'interrupted' ||
+              isStale) && (
+              <div className="allegro-history-sync-metrics">
+                <span className="allegro-history-sync-metric">
+                  Hiteles import:{' '}
+                  <strong>
+                    {run.relatedImport.rowsImported ??
+                      '–'}{' '}
+                    sor
+                  </strong>
+                </span>
+                <span className="allegro-history-sync-metric">
+                  Forrásváltozás:{' '}
+                  <strong>
+                    {run.relatedImport
+                      .changedItemCount ?? '–'}
+                  </strong>
+                </span>
+                <span className="allegro-history-sync-metric">
+                  Import befejezve:{' '}
+                  <strong>
+                    {run.relatedImport
+                      .finishedAt !== null
+                      ? formatTime(
+                          run.relatedImport
+                            .finishedAt,
+                        )
+                      : 'nincs rögzítve'}
+                  </strong>
+                </span>
+              </div>
+            )}
         </div>
 
         <div className="allegro-history-stage">

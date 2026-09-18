@@ -4,6 +4,7 @@ import {
   createDatabase,
   allegroChangeEvents,
   dataConnections,
+  inventoryImportRuns,
   inventorySourceItems,
   campaigns,
   catalogSyncRuns,
@@ -41,6 +42,7 @@ import { cors } from 'hono/cors'
 import {
   dataConnectionsApi,
   processDueDataConnectionSchedules,
+  selectRelatedImportForWrapper,
 } from './data-connections.js'
 import {
   arukeresoApi,
@@ -295,6 +297,7 @@ app.get('/allegro/inventory-refresh-runs', async (context) => {
   const runsQuery = db
     .select({
       id: dataConnectionRuns.id,
+      connectionId: dataConnections.id,
       connectionName: dataConnections.name,
       triggerType: dataConnectionRuns.triggerType,
       status: dataConnectionRuns.status,
@@ -336,14 +339,141 @@ app.get('/allegro/inventory-refresh-runs', async (context) => {
   const storedRuns = range.boundaries
     ? await runsQuery
     : await runsQuery.limit(100)
+
+  /*
+   * Authoritative child imports: the scheduler wrapper row
+   * above only mirrors import numbers into its own fields,
+   * and a runtime restart can orphan it as RUNNING with
+   * zeros. The inventoryImportRuns child row holds the
+   * authoritative import result. There is no persisted
+   * parent link, so each wrapper owns the COMPLETED
+   * children inside its own window: same connection,
+   * started at/after the wrapper start, strictly before
+   * the next wrapper start, and within finishedAt when
+   * the wrapper has one. Earliest match wins.
+   */
+  const importRunConnectionIds = [
+    ...new Set(
+      storedRuns.map((run) => run.connectionId),
+    ),
+  ]
+  const earliestWrapperStart =
+    storedRuns.length > 0
+      ? new Date(
+          Math.min(
+            ...storedRuns.map((run) =>
+              run.startedAt.getTime(),
+            ),
+          ),
+        )
+      : null
+  const wrapperStartsByConnection = new Map<
+    string,
+    number[]
+  >()
+
+  for (const run of storedRuns) {
+    const starts =
+      wrapperStartsByConnection.get(
+        run.connectionId,
+      ) ?? []
+    starts.push(run.startedAt.getTime())
+    wrapperStartsByConnection.set(
+      run.connectionId,
+      starts,
+    )
+  }
+
+  for (const starts of wrapperStartsByConnection.values()) {
+    starts.sort((left, right) => left - right)
+  }
+
+  const childImports =
+    importRunConnectionIds.length > 0 &&
+    earliestWrapperStart !== null
+      ? await db
+          .select({
+            id: inventoryImportRuns.id,
+            connectionId:
+              inventoryImportRuns.connectionId,
+            status: inventoryImportRuns.status,
+            rowsRead:
+              inventoryImportRuns.rowsRead,
+            rowsImported:
+              inventoryImportRuns.rowsImported,
+            changedItemCount:
+              inventoryImportRuns.changedItemCount,
+            error: inventoryImportRuns.error,
+            startedAt:
+              inventoryImportRuns.startedAt,
+            finishedAt:
+              inventoryImportRuns.finishedAt,
+          })
+          .from(inventoryImportRuns)
+          .where(
+            and(
+              inArray(
+                inventoryImportRuns.connectionId,
+                importRunConnectionIds,
+              ),
+              eq(
+                inventoryImportRuns.status,
+                'COMPLETED',
+              ),
+              gte(
+                inventoryImportRuns.startedAt,
+                earliestWrapperStart,
+              ),
+            ),
+          )
+          .orderBy(
+            desc(inventoryImportRuns.startedAt),
+          )
+          .limit(200)
+      : []
   const runs = storedRuns.map(
-    ({ automationDetailsJson, ...run }) => ({
-      ...run,
-      automationDetails:
-        parseInventoryAutomationDiagnostics(
-          automationDetailsJson,
-        ),
-    }),
+    ({ automationDetailsJson, ...run }) => {
+      const ownStart = run.startedAt.getTime()
+      const nextWrapperStartedAt =
+        (
+          wrapperStartsByConnection.get(
+            run.connectionId,
+          ) ?? []
+        ).find(
+          (candidate) => candidate > ownStart,
+        ) ?? null
+      const relatedImport =
+        selectRelatedImportForWrapper(
+          {
+            connectionId: run.connectionId,
+            startedAt: run.startedAt,
+            finishedAt: run.finishedAt,
+          },
+          nextWrapperStartedAt !== null
+            ? new Date(nextWrapperStartedAt)
+            : null,
+          childImports,
+        )
+
+      return {
+        ...run,
+        automationDetails:
+          parseInventoryAutomationDiagnostics(
+            automationDetailsJson,
+          ),
+        relatedImport: relatedImport
+          ? {
+              ...relatedImport,
+              startedAt:
+                relatedImport.startedAt.toISOString(),
+              finishedAt:
+                relatedImport.finishedAt
+                  ? relatedImport.finishedAt.toISOString()
+                  : null,
+            }
+          : null,
+      }
+    },
   )
 
   return context.json({

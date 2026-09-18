@@ -1,6 +1,8 @@
 ﻿import {
   and,
+  desc,
   eq,
+  inArray,
 } from 'drizzle-orm'
 
 import {
@@ -597,6 +599,404 @@ export type AllegroInventoryAdapter = {
     }>
 }
 
+export type OpenPendingSyncEvent = {
+  listingId: string
+  action: string
+  status: string
+  publicationStatus: string | null
+  targetStock: number | null
+  remoteStock: number | null
+  fromStock: number | null
+  toStock: number | null
+  occurredAt: string
+}
+
+export type ReconciliationRemoteState = {
+  remoteStock: number | null
+  publicationStatus: string | null
+  targetStock: number | null
+}
+
+/*
+ * A SYNC automation event is terminal unless Allegro is
+ * still processing the accepted command.
+ */
+export function isTerminalInventorySyncStatus(
+  status: string,
+): boolean {
+  return (
+    status !== 'PENDING' &&
+    status !== 'REACTIVATION_IN_PROGRESS'
+  )
+}
+
+function isEndedPublicationStatus(
+  status: string | null,
+): boolean {
+  return (
+    status === 'ENDED' ||
+    status === 'INACTIVE'
+  )
+}
+
+function asFiniteNumber(
+  value: number | null,
+): number | null {
+  return typeof value === 'number' &&
+    Number.isFinite(value)
+    ? value
+    : null
+}
+
+/*
+ * Pure reconciliation decision for one still-open PENDING
+ * automation event.
+ *
+ * Compares the intended target captured at write time with
+ * the current remote state read back through the existing
+ * safe mechanism (listingRemoteStates, refreshed by the
+ * adapter after every automation run). When the remote
+ * state already satisfies the intent, returns a terminal
+ * SUCCESS event insert — never a new Allegro write.
+ *
+ * Returns null while the remote state does not yet match
+ * (genuinely still processing) or when there is no
+ * reliable match evidence. FAILED is never fabricated
+ * here: absence of a match is not failure evidence.
+ */
+export function reconcilePendingSyncEvent(
+  event: OpenPendingSyncEvent,
+  current: ReconciliationRemoteState,
+  nowIso: string,
+): {
+  listingId: string
+  eventType: 'SYNC'
+  source: 'INVENTORY_AUTOMATION'
+  oldValue: string
+  newValue: 'SUCCESS'
+  metadataJson: string
+  occurredAt: Date
+} | null {
+  if (isTerminalInventorySyncStatus(event.status)) {
+    return null
+  }
+
+  const confirm = (
+    action: string,
+    metadata: Record<string, unknown>,
+  ) => ({
+    listingId: event.listingId,
+    eventType: 'SYNC' as const,
+    source: 'INVENTORY_AUTOMATION' as const,
+    oldValue: action,
+    newValue: 'SUCCESS' as const,
+    metadataJson: JSON.stringify({
+      ...metadata,
+      reconciled: true,
+      supersedesOccurredAt: event.occurredAt,
+    }),
+    occurredAt: new Date(nowIso),
+  })
+
+  if (event.action === 'STOCK_UPDATE') {
+    const target =
+      asFiniteNumber(event.toStock) ??
+      asFiniteNumber(event.targetStock)
+    const remote = asFiniteNumber(
+      current.remoteStock,
+    )
+
+    if (
+      target === null ||
+      remote === null ||
+      remote !== target
+    ) {
+      return null
+    }
+
+    return confirm('STOCK_UPDATE', {
+      publicationStatus:
+        current.publicationStatus,
+      targetStock: target,
+      remoteStock: remote,
+      fromStock:
+        asFiniteNumber(event.fromStock) ??
+        asFiniteNumber(event.remoteStock) ??
+        remote,
+      toStock: target,
+      confirmedRemoteStock: remote,
+    })
+  }
+
+  if (event.action === 'END') {
+    if (
+      !isEndedPublicationStatus(
+        current.publicationStatus,
+      )
+    ) {
+      return null
+    }
+
+    return confirm('END', {
+      publicationStatus:
+        current.publicationStatus,
+      targetStock: asFiniteNumber(
+        event.targetStock,
+      ),
+      remoteStock: asFiniteNumber(
+        current.remoteStock,
+      ),
+      fromStock:
+        asFiniteNumber(event.fromStock) ??
+        asFiniteNumber(event.remoteStock),
+      toStock:
+        asFiniteNumber(event.toStock) ??
+        asFiniteNumber(event.targetStock) ??
+        0,
+      confirmedPublicationStatus:
+        current.publicationStatus,
+    })
+  }
+
+  if (event.action === 'ACTIVATE') {
+    if (
+      current.publicationStatus !== 'ACTIVE'
+    ) {
+      return null
+    }
+
+    return confirm('ACTIVATE', {
+      publicationStatus:
+        current.publicationStatus,
+      targetStock: asFiniteNumber(
+        event.targetStock,
+      ),
+      remoteStock: asFiniteNumber(
+        current.remoteStock,
+      ),
+      confirmedPublicationStatus:
+        current.publicationStatus,
+    })
+  }
+
+  if (
+    event.action === 'NONE' &&
+    event.status === 'REACTIVATION_IN_PROGRESS'
+  ) {
+    if (
+      current.publicationStatus !== 'ACTIVE'
+    ) {
+      return null
+    }
+
+    return confirm('REACTIVATION_CONFIRMED', {
+      publicationStatus:
+        current.publicationStatus,
+      confirmedPublicationStatus:
+        current.publicationStatus,
+    })
+  }
+
+  return null
+}
+
+/*
+ * Closes stale PENDING automation events whose intent the
+ * remote state already satisfies. Runs at the start of
+ * every inventory sync using the already-resolved remote
+ * states — no new Allegro reads, no Allegro writes, no
+ * desired-state changes. Insert-only and idempotent: an
+ * event is only reconciled while it is still the latest
+ * SYNC event of its listing, so a repeated run finds the
+ * terminal confirmation and does nothing.
+ */
+export async function reconcileOpenPendingSyncEvents(
+  database: Database,
+  rows: AllegroInventorySyncRow[],
+): Promise<{ reconciled: number }> {
+  const listingIds = [
+    ...new Set(
+      rows.map((row) => row.listingId),
+    ),
+  ]
+
+  if (listingIds.length === 0) {
+    return { reconciled: 0 }
+  }
+
+  const rowByListingId = new Map(
+    rows.map((row) => [row.listingId, row]),
+  )
+
+  let storedEvents: Array<{
+    listingId: string
+    oldValue: string | null
+    newValue: string | null
+    metadataJson: string | null
+    occurredAt: Date
+  }>
+
+  try {
+    storedEvents = await database
+      .select({
+        listingId:
+          allegroChangeEvents.listingId,
+        oldValue:
+          allegroChangeEvents.oldValue,
+        newValue:
+          allegroChangeEvents.newValue,
+        metadataJson:
+          allegroChangeEvents.metadataJson,
+        occurredAt:
+          allegroChangeEvents.occurredAt,
+      })
+      .from(allegroChangeEvents)
+      .where(
+        and(
+          eq(
+            allegroChangeEvents.eventType,
+            'SYNC',
+          ),
+          inArray(
+            allegroChangeEvents.listingId,
+            listingIds,
+          ),
+        ),
+      )
+      .orderBy(
+        desc(allegroChangeEvents.occurredAt),
+      )
+  } catch (error) {
+    console.error(
+      'Allegro pending reconciliation lookup failed:',
+      error,
+    )
+
+    return { reconciled: 0 }
+  }
+
+  const seenListingIds = new Set<string>()
+  const nowIso = new Date().toISOString()
+  const confirmations: Array<{
+    listingId: string
+    eventType: 'SYNC'
+    source: 'INVENTORY_AUTOMATION'
+    oldValue: string
+    newValue: 'SUCCESS'
+    metadataJson: string
+    occurredAt: Date
+  }> = []
+
+  for (const stored of storedEvents) {
+    if (seenListingIds.has(stored.listingId)) {
+      continue
+    }
+
+    seenListingIds.add(stored.listingId)
+
+    const status = stored.newValue ?? ''
+
+    if (isTerminalInventorySyncStatus(status)) {
+      continue
+    }
+
+    const row = rowByListingId.get(
+      stored.listingId,
+    )
+
+    if (!row) {
+      continue
+    }
+
+    let metadata: {
+      publicationStatus?: unknown
+      targetStock?: unknown
+      remoteStock?: unknown
+      fromStock?: unknown
+      toStock?: unknown
+    } | null = null
+
+    try {
+      metadata = stored.metadataJson
+        ? (JSON.parse(
+            stored.metadataJson,
+          ) as Record<string, unknown>)
+        : null
+    } catch {
+      metadata = null
+    }
+
+    const numberOrNull = (
+      value: unknown,
+    ): number | null =>
+      typeof value === 'number' &&
+      Number.isFinite(value)
+        ? value
+        : null
+
+    const textOrNull = (
+      value: unknown,
+    ): string | null =>
+      typeof value === 'string'
+        ? value
+        : null
+
+    const confirmed =
+      reconcilePendingSyncEvent(
+        {
+          listingId: stored.listingId,
+          action: stored.oldValue ?? '',
+          status,
+          publicationStatus: textOrNull(
+            metadata?.publicationStatus,
+          ),
+          targetStock: numberOrNull(
+            metadata?.targetStock,
+          ),
+          remoteStock: numberOrNull(
+            metadata?.remoteStock,
+          ),
+          fromStock: numberOrNull(
+            metadata?.fromStock,
+          ),
+          toStock: numberOrNull(
+            metadata?.toStock,
+          ),
+          occurredAt:
+            stored.occurredAt.toISOString(),
+        },
+        {
+          remoteStock: row.remoteStock,
+          publicationStatus:
+            row.publicationStatus,
+          targetStock: row.targetStock,
+        },
+        nowIso,
+      )
+
+    if (confirmed) {
+      confirmations.push(confirmed)
+    }
+  }
+
+  if (confirmations.length > 0) {
+    try {
+      await database
+        .insert(allegroChangeEvents)
+        .values(confirmations)
+    } catch (error) {
+      console.error(
+        'Allegro pending reconciliation logging failed:',
+        error,
+      )
+
+      return { reconciled: 0 }
+    }
+  }
+
+  return { reconciled: confirmations.length }
+}
+
 export async function syncAllegroInventoryRows(
   database: Database,
   rows: AllegroInventorySyncRow[],
@@ -624,6 +1024,15 @@ export async function syncAllegroInventoryRows(
   const writtenListingIds =
     new Set<string>()
 
+  /*
+   * Close stale PENDING events whose intent the current
+   * remote state already satisfies. Read-only compare
+   * plus terminal event inserts — never resends writes.
+   */
+  await reconcileOpenPendingSyncEvents(
+    database,
+    rows,
+  )
 
   for (const row of rows) {
     if (row.stockLocked) {

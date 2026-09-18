@@ -19,6 +19,7 @@ import {
   and,
   desc,
   eq,
+  lt,
   lte,
   isNull,
   ne,
@@ -34,6 +35,80 @@ import {
   parseInventoryAutomationDiagnostics,
 } from './inventory-automation-diagnostics.js'
 import { requestArukeresoFeedGeneration } from './arukereso.js'
+
+export type RelatedImportChild<TStartedAt = Date> = {
+  connectionId: string
+  startedAt: TStartedAt
+}
+
+/*
+ * Selects the child import belonging to one scheduler
+ * wrapper run without a persisted parent link (no schema
+ * change): same connection, started at/after the wrapper
+ * start, but strictly before the next wrapper start for
+ * that connection, and within the wrapper's own finished
+ * window when it has one. Earliest match wins, because a
+ * wrapper triggers its import synchronously at start.
+ * Returns null when no child falls inside the window.
+ */
+export function selectRelatedImportForWrapper<
+  TChild extends RelatedImportChild,
+>(
+  wrapper: {
+    connectionId: string
+    startedAt: Date
+    finishedAt: Date | null
+  },
+  nextWrapperStartedAt: Date | null,
+  children: TChild[],
+): TChild | null {
+  let best: TChild | null = null
+
+  for (const child of children) {
+    if (
+      child.connectionId !==
+      wrapper.connectionId
+    ) {
+      continue
+    }
+
+    const childStart =
+      child.startedAt.getTime()
+
+    if (
+      childStart <
+      wrapper.startedAt.getTime()
+    ) {
+      continue
+    }
+
+    if (
+      nextWrapperStartedAt !== null &&
+      childStart >=
+        nextWrapperStartedAt.getTime()
+    ) {
+      continue
+    }
+
+    if (
+      wrapper.finishedAt !== null &&
+      childStart >
+        wrapper.finishedAt.getTime()
+    ) {
+      continue
+    }
+
+    if (
+      best === null ||
+      childStart <
+        best.startedAt.getTime()
+    ) {
+      best = child
+    }
+  }
+
+  return best
+}
 
 const dataConnectionsApi = new Hono()
 
@@ -1486,6 +1561,56 @@ export async function processDueDataConnectionSchedules(
               connectionRun.id,
             ),
           )
+
+        /*
+         * Reap orphaned scheduler wrapper rows: an older
+         * run that is still RUNNING when a newer run for
+         * the same connection finalizes can never finish
+         * itself (its runtime is gone). Mark it
+         * INTERRUPTED so History distinguishes it from
+         * the authoritative completed child import.
+         * Self-healing: if the older runtime is somehow
+         * still alive, its own finalize overwrites this.
+         */
+        try {
+          await db
+            .update(dataConnectionRuns)
+            .set({
+              status: 'INTERRUPTED',
+              error:
+                'A futást a runtime leállása szakította meg; egy újabb futás zárta le.',
+              finishedAt,
+            })
+            .where(
+              and(
+                eq(
+                  dataConnectionRuns.connectionId,
+                  item.connection.id,
+                ),
+                eq(
+                  dataConnectionRuns.status,
+                  'RUNNING',
+                ),
+                ne(
+                  dataConnectionRuns.id,
+                  connectionRun.id,
+                ),
+                lt(
+                  dataConnectionRuns.startedAt,
+                  startedAt,
+                ),
+              ),
+            )
+        } catch (reapError) {
+          console.error(
+            'Inventory refresh orphan run reap failed:',
+            {
+              connectionId:
+                item.connection.id,
+              error: reapError,
+            },
+          )
+        }
 
         const nextRunAt =
           calculateNextRunAt(

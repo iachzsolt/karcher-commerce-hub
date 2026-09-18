@@ -24,6 +24,13 @@ export type StoryEventInput = {
     remoteStock?: number | null
     fromStock?: number | null
     toStock?: number | null
+    confirmedRemoteStock?: number | null
+    confirmedPublicationStatus?: string | null
+    reconciled?: boolean | null
+    taskMessage?: string | null
+    taskStatus?: string | null
+    commandId?: string | null
+    httpStatus?: number | null
   } | null
 }
 
@@ -155,11 +162,19 @@ export function aggregateListingStory(
   const failed = ordered.some(
     (event) => event.status === 'FAILED',
   )
+  /*
+   * Only the newest event decides PENDING. Automation
+   * events are insert-only, so an old 202/PENDING row
+   * would otherwise pin the story to "processing"
+   * forever even after the remote state was confirmed
+   * (reconciliation confirmation or a newer terminal
+   * event supersedes it).
+   */
+  const latest = ordered[ordered.length - 1]
   const pending =
     !failed &&
-    ordered.some((event) =>
-      isPendingStatus(event.status),
-    )
+    latest !== undefined &&
+    isPendingStatus(latest.status)
   const endSuccess = ordered.some(
     (event) =>
       isEndAction(event.action) &&
@@ -189,26 +204,27 @@ export function aggregateListingStory(
 
   let businessResult: ListingBusinessResult =
     'NO_ACTION'
-  let resultLabel = 'Nincs teendő'
+  let resultLabel: string
   let status: ListingStoryStatus = 'none'
-  let statusLabel = 'Nincs teendő'
+  let statusLabel: string
   let skipReason: string | null = null
 
   if (failed) {
     businessResult = 'FAILED'
     resultLabel = 'Sikertelen'
     status = 'failed'
-    statusLabel = 'Sikertelen'
+    statusLabel = 'HIBA'
   } else if (pending) {
     businessResult = 'PENDING'
-    resultLabel = 'Feldolgozás alatt'
+    resultLabel = 'Allegro feldolgozás alatt'
     status = 'pending'
-    statusLabel = 'Függőben'
+    statusLabel = 'FELDOLGOZÁS ALATT'
   } else if (manualSkip) {
     businessResult = 'MANUAL_SKIPPED'
     resultLabel = 'Manuálisan inaktív — kihagyva'
     status = 'skipped'
     statusLabel = 'Kihagyva'
+    skipReason = 'Manuálisan inaktív'
   } else if (otherSkip) {
     const reason =
       SKIP_REASONS[otherSkip.status] ??
@@ -220,24 +236,28 @@ export function aggregateListingStory(
     skipReason = reason
   } else if (endSuccess) {
     businessResult = 'AUTO_PAUSED'
-    resultLabel = 'Automatikusan lekapcsolva'
+    resultLabel = 'Ajánlat automatikusan lekapcsolva'
     status = 'success'
-    statusLabel = 'Sikeres'
+    statusLabel = 'LEKAPCSOLVA'
   } else if (activated) {
     businessResult = 'ACTIVATED'
-    resultLabel = 'Automatikusan aktiválva'
+    resultLabel =
+      'Ajánlat automatikusan visszakapcsolva'
     status = 'success'
-    statusLabel = 'Sikeres'
+    statusLabel = 'VISSZAKAPCSOLVA'
   } else if (stockChanged) {
     businessResult = 'STOCK_UPDATED'
     resultLabel = 'Készlet frissítve'
     status = 'success'
-    statusLabel = 'Sikeres'
+    statusLabel = 'KÉSZLET FRISSÍTVE'
   } else if (!noChange) {
     businessResult = 'STOCK_UPDATED'
     resultLabel = 'Készlet frissítve'
     status = 'success'
-    statusLabel = 'Sikeres'
+    statusLabel = 'KÉSZLET FRISSÍTVE'
+  } else {
+    resultLabel = 'Nincs teendő'
+    statusLabel = 'NINCS TEENDŐ'
   }
 
   return {
@@ -282,10 +302,145 @@ export function aggregateListingStories(
   )
 }
 
+/*
+ * Human-readable business detail lines for one story.
+ * PENDING stories use target/intended wording (the values
+ * are requested, not confirmed); SUCCESS stories use
+ * final wording only where the architecture confirms it
+ * (synchronous Allegro task success plus remote readback,
+ * or a reconciliation confirmation).
+ */
+export function describeStoryDetail(
+  story: ListingStory,
+): string[] {
+  const lines: string[] = []
+  const formatCount = (value: number | null) =>
+    value === null ? '–' : `${value} db`
+
+  if (story.businessResult === 'PENDING') {
+    if (
+      story.stockFrom !== null ||
+      story.stockTo !== null
+    ) {
+      if (
+        story.stockFrom !== null &&
+        story.stockTo !== null &&
+        story.stockFrom !== story.stockTo
+      ) {
+        lines.push(
+          `Készletmódosítás: ${story.stockFrom} → ${story.stockTo} db`,
+        )
+      } else if (story.stockTo !== null) {
+        lines.push(
+          `Célkészlet: ${formatCount(story.stockTo)}`,
+        )
+      }
+    }
+
+    let latestPublication: string | null =
+      null
+
+    for (
+      let index = story.events.length - 1;
+      index >= 0;
+      index -= 1
+    ) {
+      const candidate =
+        story.events[index]?.metadata
+          ?.publicationStatus ?? null
+
+      if (candidate !== null) {
+        latestPublication = candidate
+        break
+      }
+    }
+
+    if (latestPublication === 'ACTIVE') {
+      lines.push(
+        'Ajánlat jelenlegi státusza: Aktív',
+      )
+    } else if (latestPublication !== null) {
+      lines.push(
+        `Ajánlat jelenlegi státusza: ${latestPublication}`,
+      )
+    }
+
+    return lines
+  }
+
+  if (
+    story.businessResult === 'STOCK_UPDATED' ||
+    story.businessResult === 'AUTO_PAUSED' ||
+    story.businessResult === 'ACTIVATED'
+  ) {
+    if (
+      story.stockFrom !== null &&
+      story.stockTo !== null
+    ) {
+      lines.push(
+        `Készlet: ${story.stockFrom} → ${story.stockTo} db`,
+      )
+    }
+
+    const firstPublication = story.events
+      .map(
+        (event) =>
+          event.metadata?.publicationStatus ??
+          null,
+      )
+      .find((value) => value !== null)
+
+    if (story.businessResult === 'STOCK_UPDATED') {
+      if (firstPublication === 'ACTIVE') {
+        lines.push('Ajánlat: aktív maradt')
+      }
+    } else if (
+      story.businessResult === 'AUTO_PAUSED'
+    ) {
+      lines.push(
+        firstPublication !== null
+          ? `Ajánlat: ${firstPublication} → INACTIVE`
+          : 'Ajánlat: INACTIVE',
+      )
+    } else if (
+      story.businessResult === 'ACTIVATED'
+    ) {
+      lines.push(
+        firstPublication !== null &&
+          firstPublication !== 'ACTIVE'
+          ? `Ajánlat: ${firstPublication} → ACTIVE`
+          : 'Ajánlat: ACTIVE',
+      )
+    }
+
+    return lines
+  }
+
+  if (story.businessResult === 'NO_ACTION') {
+    if (
+      story.stockFrom !== null &&
+      story.stockTo !== null &&
+      story.stockFrom === story.stockTo
+    ) {
+      lines.push('Készlet már megfelelő')
+      lines.push(
+        `Aktuális készlet: ${formatCount(story.stockFrom)}`,
+      )
+    } else {
+      lines.push('Nem szükséges ajánlatmódosítás')
+    }
+
+    return lines
+  }
+
+  return lines
+}
+
 export type StorySummary = {
   total: number
   affected: number
   stockChanged: number
+  stockUpdated: number
   activated: number
   autoPaused: number
   skipped: number
@@ -301,6 +456,7 @@ export function summarizeStories(
     total: stories.length,
     affected: 0,
     stockChanged: 0,
+    stockUpdated: 0,
     activated: 0,
     autoPaused: 0,
     skipped: 0,
@@ -336,6 +492,7 @@ export function summarizeStories(
       case 'STOCK_UPDATED':
         summary.affected += 1
         summary.stockChanged += 1
+        summary.stockUpdated += 1
         break
       case 'MANUAL_SKIPPED':
       case 'SKIPPED':
@@ -464,6 +621,7 @@ export type RefreshOverall =
   | 'import-only'
   | 'legacy'
   | 'running'
+  | 'interrupted'
 
 export function summarizeRefreshRun(run: {
   status: string
@@ -474,6 +632,14 @@ export function summarizeRefreshRun(run: {
 } {
   if (run.status === 'COMPLETED') {
     return { overall: 'success', helper: null }
+  }
+
+  if (run.status === 'INTERRUPTED') {
+    return {
+      overall: 'interrupted',
+      helper:
+        'A futást a runtime leállása szakította meg. A forrásimport hiteles adatait az alábbi kapcsolt import futás mutatja.',
+    }
   }
 
   if (
