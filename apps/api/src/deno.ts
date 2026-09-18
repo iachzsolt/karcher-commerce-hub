@@ -16,6 +16,7 @@ import {
 } from './index.js'
 import {
   getSourceFeedUtcCronPatterns,
+  isDenoCronEnabled,
 } from './arukereso-source-feed.js'
 
 /*
@@ -31,11 +32,7 @@ import {
 const BUDAPEST_UTC_OFFSET_HOURS = [1, 2]
 
 function isCronEnabled() {
-  return (
-    process.env.COMMERCE_HUB_DENO_CRON_ENABLED
-      ?.trim()
-      .toLowerCase() === 'true'
-  )
+  return isDenoCronEnabled()
 }
 
 async function runCronJob(
@@ -205,23 +202,23 @@ async function registerDataConnectionSchedulerCrons() {
 
 await registerDataConnectionSchedulerCrons()
 
-if (
-  isCronEnabled() &&
-  process.env.ARUKERESO_SOURCE_FEED_SCHEDULE_ENABLED
-    ?.trim()
-    .toLowerCase() === 'true'
-) {
-  for (const pattern of getSourceFeedUtcCronPatterns()) {
-    Deno.cron(
-      `commerce-hub-arukereso-source-${pattern.replace(/[^0-9]/g, '')}`,
-      pattern,
-      () =>
-        runCronJob(
-          `Arukereso source feed refresh (${pattern})`,
-          runScheduledArukeresoSourceFeedRefresh,
-        ),
-    )
-  }
+// Deno Deploy discovers Deno.cron jobs only when they are
+// registered at module top level, so this loop is intentionally
+// unconditional: the jobs always appear in the Cron dashboard.
+// Feature gating lives inside the handler instead — runCronJob
+// checks COMMERCE_HUB_DENO_CRON_ENABLED and
+// runScheduledArukeresoSourceFeedRefresh checks
+// ARUKERESO_SOURCE_FEED_SCHEDULE_ENABLED before doing any work.
+for (const pattern of getSourceFeedUtcCronPatterns()) {
+  Deno.cron(
+    `commerce-hub-arukereso-source-${pattern.replace(/[^0-9]/g, '')}`,
+    pattern,
+    () =>
+      runCronJob(
+        `Arukereso source feed refresh (${pattern})`,
+        runScheduledArukeresoSourceFeedRefresh,
+      ),
+  )
 }
 
 Deno.cron(

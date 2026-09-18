@@ -5,7 +5,10 @@ import {
   downloadArukeresoSourceFeed,
   getBudapestCalendarMinute,
   getSourceFeedUtcCronPatterns,
+  isDenoCronEnabled,
+  isSourceFeedScheduleEnabled,
   resolveSourceFeedConfiguration,
+  shouldHandleSourceFeedCronTick,
   shouldRunScheduledSourceFeedRefresh,
   SourceFeedRefreshError,
 } from '../src/arukereso-source-feed.ts'
@@ -495,6 +498,123 @@ void describe('Budapest source refresh schedule', () => {
       '45 5 * * *',
       '45 6 * * *',
     ])
+  })
+})
+
+void describe('source feed cron registration gating', () => {
+  const enabledEnvironment = {
+    COMMERCE_HUB_DENO_CRON_ENABLED: 'true',
+    ARUKERESO_SOURCE_FEED_SCHEDULE_ENABLED: 'true',
+  }
+
+  void it('keeps the 04:45, 05:45 and 06:45 UTC candidates', () => {
+    assert.deepEqual(
+      getSourceFeedUtcCronPatterns(enabledEnvironment),
+      ['45 4 * * *', '45 5 * * *', '45 6 * * *'],
+    )
+  })
+
+  void it('reads both feature flags case- and whitespace-insensitively', () => {
+    assert.equal(isDenoCronEnabled({}), false)
+    assert.equal(isSourceFeedScheduleEnabled({}), false)
+    assert.equal(
+      isDenoCronEnabled({
+        COMMERCE_HUB_DENO_CRON_ENABLED: ' True ',
+      }),
+      true,
+    )
+    assert.equal(
+      isSourceFeedScheduleEnabled({
+        ARUKERESO_SOURCE_FEED_SCHEDULE_ENABLED: 'TRUE',
+      }),
+      true,
+    )
+  })
+
+  void it('does no source work when the schedule flag is false', () => {
+    assert.equal(
+      shouldHandleSourceFeedCronTick({
+        COMMERCE_HUB_DENO_CRON_ENABLED: 'true',
+      }),
+      false,
+    )
+  })
+
+  void it('does no source work when the global Deno cron flag is false', () => {
+    assert.equal(
+      shouldHandleSourceFeedCronTick({
+        ARUKERESO_SOURCE_FEED_SCHEDULE_ENABLED: 'true',
+      }),
+      false,
+    )
+    assert.equal(shouldHandleSourceFeedCronTick({}), false)
+  })
+
+  void it('handles the tick only when both flags are true', () => {
+    assert.equal(
+      shouldHandleSourceFeedCronTick(enabledEnvironment),
+      true,
+    )
+  })
+
+  void it('never invokes refresh while the tick gate is closed', async () => {
+    let refreshCalls = 0
+    const gatedRefresh = async (
+      environment: Record<string, string | undefined>,
+    ) => {
+      if (!shouldHandleSourceFeedCronTick(environment)) {
+        return 'SKIPPED' as const
+      }
+
+      refreshCalls += 1
+      return 'REFRESHED' as const
+    }
+
+    assert.equal(
+      await gatedRefresh({
+        COMMERCE_HUB_DENO_CRON_ENABLED: 'true',
+      }),
+      'SKIPPED',
+    )
+    assert.equal(
+      await gatedRefresh({
+        ARUKERESO_SOURCE_FEED_SCHEDULE_ENABLED: 'true',
+      }),
+      'SKIPPED',
+    )
+    assert.equal(await gatedRefresh({}), 'SKIPPED')
+    assert.equal(refreshCalls, 0)
+    assert.equal(
+      await gatedRefresh(enabledEnvironment),
+      'REFRESHED',
+    )
+    assert.equal(refreshCalls, 1)
+  })
+
+  void it('runs the scheduled refresh when both flags hold at an eligible time', () => {
+    const now = new Date('2026-07-15T04:45:00.000Z')
+
+    assert.equal(
+      shouldHandleSourceFeedCronTick(enabledEnvironment),
+      true,
+    )
+    assert.equal(
+      shouldRunScheduledSourceFeedRefresh(
+        now,
+        enabledEnvironment,
+      ).shouldRun,
+      true,
+    )
+  })
+
+  void it('stays out of the eligibility window even with both flags true', () => {
+    assert.equal(
+      shouldRunScheduledSourceFeedRefresh(
+        new Date('2026-07-15T04:44:00.000Z'),
+        enabledEnvironment,
+      ).shouldRun,
+      false,
+    )
   })
 })
 

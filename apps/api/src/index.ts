@@ -50,6 +50,7 @@ import {
 } from './arukereso.js'
 import {
   coordinateScheduledSourceFeedRefresh,
+  isSourceFeedScheduleEnabled,
   SourceFeedRefreshError,
 } from './arukereso-source-feed.js'
 import { arukeresoPerformanceApi } from './arukereso-performance.js'
@@ -9127,11 +9128,7 @@ export async function runMinuteScheduler() {
 export async function runScheduledArukeresoSourceFeedRefresh(
   now = new Date(),
 ) {
-  if (
-    process.env.ARUKERESO_SOURCE_FEED_SCHEDULE_ENABLED
-      ?.trim()
-      .toLowerCase() !== 'true'
-  ) {
+  if (!isSourceFeedScheduleEnabled()) {
     return
   }
 

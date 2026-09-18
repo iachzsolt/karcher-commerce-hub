@@ -11,6 +11,10 @@ const SOURCE_FEED_MAX_ATTEMPTS_ENV =
   'ARUKERESO_SOURCE_FEED_MAX_ATTEMPTS'
 const SOURCE_FEED_REFRESH_TIME_ENV =
   'ARUKERESO_SOURCE_FEED_REFRESH_TIME'
+const SOURCE_FEED_SCHEDULE_ENABLED_ENV =
+  'ARUKERESO_SOURCE_FEED_SCHEDULE_ENABLED'
+const DENO_CRON_ENABLED_ENV =
+  'COMMERCE_HUB_DENO_CRON_ENABLED'
 
 const SOURCE_FEED_TIMEOUT_MS_DEFAULT = 30_000
 const SOURCE_FEED_MAX_BYTES_DEFAULT = 25 * 1024 * 1024
@@ -408,6 +412,42 @@ export function shouldRunScheduledSourceFeedRefresh(
     shouldRun: elapsedMinutes <= 120,
     ...calendarMinute,
   }
+}
+
+export function isSourceFeedScheduleEnabled(
+  environment: SourceFeedEnvironment = process.env,
+) {
+  return (
+    environment[SOURCE_FEED_SCHEDULE_ENABLED_ENV]
+      ?.trim()
+      .toLowerCase() === 'true'
+  )
+}
+
+export function isDenoCronEnabled(
+  environment: SourceFeedEnvironment = process.env,
+) {
+  return (
+    environment[DENO_CRON_ENABLED_ENV]
+      ?.trim()
+      .toLowerCase() === 'true'
+  )
+}
+
+/**
+ * In-handler gate for the registered Deno cron ticks.
+ * Registration itself stays unconditional so Deno Deploy
+ * discovers the jobs; a disabled tick returns safely
+ * before any download, mutation, feed generation, or
+ * daily-success marker write.
+ */
+export function shouldHandleSourceFeedCronTick(
+  environment: SourceFeedEnvironment = process.env,
+) {
+  return (
+    isDenoCronEnabled(environment) &&
+    isSourceFeedScheduleEnabled(environment)
+  )
 }
 
 export function getSourceFeedUtcCronPatterns(
