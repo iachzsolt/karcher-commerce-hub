@@ -1,8 +1,16 @@
 ﻿import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Hono } from 'hono'
 import { and, desc, eq } from 'drizzle-orm'
+import { getCommerceHubUser } from './access-auth.js'
 import { decryptSecret, encryptSecret } from './token-crypto.js'
 import { applyAllegroDesiredStock, resolveAllegroInventoryRows, syncAllegroInventoryRows } from './allegro-inventory-sync.js'
+import {
+  ALLEGRO_NOTIFY_SCOPES,
+  buildNotifyAuthorizeUrl,
+  exchangeNotifyCode,
+  getNotifyKvStore,
+  resolveNotifyConfig,
+} from './allegro-notify.js'
 import {
   createDatabase,
   allegroChangeEvents,
@@ -1676,6 +1684,166 @@ allegroAuth.get('/callback', async (context) => {
     ).toISOString(),
   })
 })
+
+/*
+ * Notification-only Allegro OAuth bootstrap (email
+ * bridge). Fully isolated from the primary Commerce Hub
+ * session above: separate scopes, separate tokens, state
+ * persisted encrypted in Deno KV only — never in Neon.
+ * Steady-state notification ticks never touch these
+ * routes; they exist solely for the one-time re-consent.
+ */
+allegroAuth.get(
+  '/notify-connect',
+  async (context) => {
+    // Bootstrap initiation requires an authenticated
+    // administrator (no anonymous authorization starts).
+    // The callback below is intentionally public instead:
+    // Allegro redirects the browser there directly.
+    const user = getCommerceHubUser(context)
+
+    if (!user || user.role !== 'ADMIN') {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Administrator permission is required.',
+        },
+        403,
+      )
+    }
+
+    let config
+
+    try {
+      config = resolveNotifyConfig(
+        process.env,
+      )
+    } catch (error) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Notification configuration is missing.',
+        },
+        503,
+      )
+    }
+
+    let kv
+
+    try {
+      kv = await getNotifyKvStore()
+    } catch {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Notification state store is unavailable in this runtime.',
+        },
+        503,
+      )
+    }
+
+    const authorizeUrl =
+      await buildNotifyAuthorizeUrl(
+        config,
+        kv,
+      )
+
+    if (context.req.query('response') === 'json') {
+      return context.json({
+        status: 'ok',
+        authorizationUrl: authorizeUrl,
+      })
+    }
+
+    return context.redirect(
+      authorizeUrl,
+      302,
+    )
+  },
+)
+
+allegroAuth.get(
+  '/notify-callback',
+  async (context) => {
+    const code = context.req.query('code')
+    const state = context.req.query('state')
+
+    if (!code || !state) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Authorization code or state is missing.',
+        },
+        400,
+      )
+    }
+
+    let config
+
+    try {
+      config = resolveNotifyConfig(
+        process.env,
+      )
+    } catch (error) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Notification configuration is missing.',
+        },
+        503,
+      )
+    }
+
+    let kv
+
+    try {
+      kv = await getNotifyKvStore()
+    } catch {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Notification state store is unavailable in this runtime.',
+        },
+        503,
+      )
+    }
+
+    const result = await exchangeNotifyCode(
+      config,
+      kv,
+      code,
+      state,
+    )
+
+    if (!result.ok) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Notification authorization failed.',
+        },
+        result.status as 400 | 502,
+      )
+    }
+
+    return context.json({
+      status: 'ok',
+      message:
+        'Allegro notification session established. ' +
+        `Scopes: ${ALLEGRO_NOTIFY_SCOPES.join(', ')}.`,
+    })
+  },
+)
 
 export type SubmitAllegroCampaignOfferInput = {
   campaignId: string

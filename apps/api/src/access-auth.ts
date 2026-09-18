@@ -32,6 +32,11 @@ type AuthConfiguration = {
 const PUBLIC_PATHS = new Set([
   '/health',
   '/auth/allegro/callback',
+  // Notification OAuth callback: reached by direct browser
+  // redirect from Allegro, which cannot present Commerce Hub
+  // credentials. Safety comes from the short-lived KV state
+  // + PKCE exchange, exactly like the primary callback above.
+  '/auth/allegro/notify-callback',
   '/arukereso/pricing/reconcile',
   '/arukereso/pricing/sync',
 ])
