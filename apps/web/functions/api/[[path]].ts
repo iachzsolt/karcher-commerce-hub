@@ -11,6 +11,12 @@ const SAFE_METHODS = new Set([
 const PUBLIC_PROXY_PATHS = new Set([
   'health',
   'auth/allegro/callback',
+  // Notification OAuth callback: Allegro redirects the
+  // browser here directly and cannot present a Commerce Hub
+  // Bearer token. Mirrors the primary callback above; the
+  // Deno API still validates code + single-use KV state +
+  // PKCE before issuing any token.
+  'auth/allegro/notify-callback',
 ])
 
 function errorResponse(
