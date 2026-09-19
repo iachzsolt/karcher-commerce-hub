@@ -24,6 +24,17 @@ const PUBLIC_PROXY_PATHS = new Set([
   'auth/allegro/notify-ack',
 ])
 
+// Exact server-to-server mutation paths exempted from the
+// same-origin check WHEN the request carries no Origin
+// header (Apps Script UrlFetchApp). A present foreign
+// Origin is still rejected on these paths; every other
+// mutation route is unaffected. Never add a wildcard or a
+// non-bridge route here.
+const BRIDGE_SERVER_PATHS = new Set([
+  'auth/allegro/notify-pull',
+  'auth/allegro/notify-ack',
+])
+
 function errorResponse(
   status: number,
   message: string,
@@ -106,7 +117,22 @@ export const onRequest:
       const requestOrigin =
         context.request.headers.get('Origin')
 
-      if (requestOrigin !== requestUrl.origin) {
+      // Server-to-server bridge exception: Apps Script
+      // UrlFetchApp sends NO Origin header, so the
+      // same-origin check above would 403 every pull/ack
+      // before the HMAC handler runs. These two exact paths
+      // stay HMAC-gated at the Deno API, so an absent
+      // Origin is accepted here — but a PRESENT foreign
+      // Origin is still rejected, exactly like every other
+      // mutation route. Nothing else is exempted.
+      const bridgeWithoutOrigin =
+        BRIDGE_SERVER_PATHS.has(proxyPath) &&
+        requestOrigin === null
+
+      if (
+        requestOrigin !== requestUrl.origin &&
+        !bridgeWithoutOrigin
+      ) {
         return errorResponse(
           403,
           'Cross-origin changes are not allowed',

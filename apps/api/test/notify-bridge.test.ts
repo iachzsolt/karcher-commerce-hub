@@ -23,6 +23,7 @@ import {
 } from '../src/allegro-notify.ts'
 import { allegroAuth } from '../src/allegro-auth.ts'
 import type { AccessVariables } from '../src/access-auth.ts'
+import { onRequest } from '../../web/functions/api/[[path]].ts'
 
 /*
  * Pull/ack bridge tests (Apps Script -> Commerce Hub).
@@ -1166,6 +1167,280 @@ void describe('message cursor preservation', () => {
       )
       assert.ok(limit >= 1 && limit <= 20)
     }
+  })
+})
+
+const bridgeRepoRoot = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  '..',
+)
+
+function readBridgeSource(relativePath: string) {
+  return readFileSync(
+    join(bridgeRepoRoot, relativePath),
+    'utf8',
+  )
+}
+
+void describe('bridge proxy origin handling', () => {
+  const realFetch = globalThis.fetch
+  const upstream: Array<{
+    url: string
+    method: string
+    headers: Headers
+    body: string | null
+  }> = []
+
+  function stubUpstream() {
+    upstream.length = 0
+    globalThis.fetch = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      const headers = new Headers(
+        init?.headers as HeadersInit | undefined,
+      )
+      // The proxy forwards context.request.body (a stream);
+      // consume it the way an HTTP server would.
+      let body: string | null = null
+
+      if (typeof init?.body === 'string') {
+        body = init.body
+      } else if (init?.body) {
+        body = await new Response(
+          init.body as BodyInit,
+        ).text()
+      }
+
+      upstream.push({
+        url: String(input),
+        method: init?.method ?? 'GET',
+        headers,
+        body,
+      })
+      return new Response(
+        JSON.stringify({ ok: true, action: 'DISABLED' }),
+        {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        },
+      )
+    }) as typeof fetch
+  }
+
+  function bridgeContext(
+    segments: string[],
+    init: {
+      origin?: string | null
+      headers?: Record<string, string>
+      body?: unknown
+    } = {},
+  ) {
+    const headers = new Headers(init.headers)
+
+    // Simulate Apps Script UrlFetchApp: no Origin header
+    // unless the test passes one explicitly.
+    if (init.origin !== undefined && init.origin !== null) {
+      headers.set('Origin', init.origin)
+    }
+
+    return {
+      params: { path: segments },
+      request: new Request(
+        `https://hub.test/api/${segments.join('/')}`,
+        {
+          method: 'POST',
+          headers,
+          body:
+            init.body === undefined
+              ? '{}'
+              : JSON.stringify(init.body),
+        },
+      ),
+      env: {
+        COMMERCE_HUB_API_ORIGIN: 'https://api.test/',
+      },
+    }
+  }
+
+  async function signedProxyBody() {
+    const body = {}
+    const auth = await signedAuth(body)
+
+    return {
+      body,
+      headers: {
+        'X-Allegro-Notify-Timestamp': auth.timestamp,
+        'X-Allegro-Notify-Nonce': auth.nonce,
+        'X-Allegro-Notify-Signature': auth.signature,
+      },
+    }
+  }
+
+  void it('forwards a signed pull without Origin to the bridge', async () => {
+    stubUpstream()
+    const signed = await signedProxyBody()
+
+    try {
+      const response = await onRequest(
+        bridgeContext(
+          ['auth', 'allegro', 'notify-pull'],
+          { headers: signed.headers, body: signed.body },
+        ) as never,
+      )
+
+      assert.equal(response.status, 200)
+      assert.equal(upstream.length, 1)
+      assert.equal(
+        upstream[0]?.url,
+        'https://api.test/auth/allegro/notify-pull',
+      )
+      assert.equal(upstream[0]?.method, 'POST')
+      // Bridge HMAC headers forwarded unchanged.
+      assert.equal(
+        upstream[0]?.headers.get(
+          'X-Allegro-Notify-Timestamp',
+        ),
+        signed.headers['X-Allegro-Notify-Timestamp'],
+      )
+      assert.equal(
+        upstream[0]?.headers.get(
+          'X-Allegro-Notify-Nonce',
+        ),
+        signed.headers['X-Allegro-Notify-Nonce'],
+      )
+      assert.equal(
+        upstream[0]?.headers.get(
+          'X-Allegro-Notify-Signature',
+        ),
+        signed.headers['X-Allegro-Notify-Signature'],
+      )
+      assert.equal(upstream[0]?.body, '{}')
+    } finally {
+      globalThis.fetch = realFetch
+    }
+  })
+
+  void it('forwards a signed ack without Origin to the bridge', async () => {
+    stubUpstream()
+    const signed = await signedProxyBody()
+
+    try {
+      const response = await onRequest(
+        bridgeContext(['auth', 'allegro', 'notify-ack'], {
+          headers: signed.headers,
+          body: signed.body,
+        }) as never,
+      )
+
+      assert.equal(response.status, 200)
+      assert.equal(upstream.length, 1)
+      assert.equal(
+        upstream[0]?.url,
+        'https://api.test/auth/allegro/notify-ack',
+      )
+    } finally {
+      globalThis.fetch = realFetch
+    }
+  })
+
+  void it('still rejects a foreign Origin on bridge paths', async () => {
+    stubUpstream()
+    const signed = await signedProxyBody()
+
+    try {
+      const response = await onRequest(
+        bridgeContext(
+          ['auth', 'allegro', 'notify-pull'],
+          {
+            headers: signed.headers,
+            body: signed.body,
+            origin: 'https://evil.test',
+          },
+        ) as never,
+      )
+
+      assert.equal(response.status, 403)
+      assert.deepEqual(await response.json(), {
+        status: 'error',
+        message: 'Cross-origin changes are not allowed',
+      })
+      assert.deepEqual(upstream, [])
+    } finally {
+      globalThis.fetch = realFetch
+    }
+  })
+
+  void it('still blocks originless mutations outside the bridge', async () => {
+    stubUpstream()
+
+    try {
+      for (const segments of [
+        ['auth', 'allegro', 'notify-reseed-orders'],
+        ['auth', 'allegro', 'status'],
+      ]) {
+        const response = await onRequest(
+          bridgeContext(segments, {
+            body: { confirm: true },
+          }) as never,
+        )
+
+        // Reseed/connect are not transport-public: the
+        // Bearer gate fires first (401). With a Bearer
+        // token but no Origin, the origin gate must fire
+        // (403) — never forwarded.
+        assert.equal(response.status, 401)
+        assert.deepEqual(upstream, [])
+
+        const authed = await onRequest(
+          bridgeContext(segments, {
+            headers: {
+              Authorization: 'Bearer hub-token',
+            },
+            body: { confirm: true },
+          }) as never,
+        )
+        assert.equal(authed.status, 403)
+        assert.deepEqual(await authed.json(), {
+          status: 'error',
+          message:
+            'Cross-origin changes are not allowed',
+        })
+        assert.deepEqual(upstream, [])
+      }
+    } finally {
+      globalThis.fetch = realFetch
+    }
+  })
+
+  void it('keeps the server exemption exact with no CORS wildcard', () => {
+    const source = readBridgeSource(
+      'apps/web/functions/api/[[path]].ts',
+    )
+    const start = source.indexOf(
+      'const BRIDGE_SERVER_PATHS = new Set([',
+    )
+    assert.ok(start >= 0)
+    const block = source.slice(
+      start,
+      source.indexOf('])', start),
+    )
+    assert.ok(
+      block.includes("'auth/allegro/notify-pull'"),
+    )
+    assert.ok(
+      block.includes("'auth/allegro/notify-ack'"),
+    )
+    assert.ok(!block.includes('reseed'))
+    assert.ok(!block.includes('connect'))
+    assert.ok(!block.includes('*'))
+    assert.ok(
+      !source.includes('Access-Control-Allow-Origin'),
+    )
   })
 })
 
