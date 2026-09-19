@@ -927,6 +927,10 @@ export type NotifyOrderEvent = {
   type: string
   occurredAt: string | null
   orderId: string | null
+  /* Best-effort cancellation reason: order events observed
+   * so far carry no reason field, so this stays null and
+   * the email row is omitted unless Allegro provides one. */
+  reason: string | null
 }
 
 export type NotifyMessage = {
@@ -991,6 +995,7 @@ export function parseOrderEvents(
       orderId:
         textOrNull(order?.['id']) ??
         textOrNull(checkoutForm?.['id']),
+      reason: textOrNull(item['reason']),
     })
   }
 
@@ -1145,29 +1150,61 @@ export type NotifyEmail = {
   htmlBody: string
 }
 
+export type NotifyEmailSection = {
+  heading: string
+  rows: Array<[string, string]>
+}
+
+/* A row is rendered only when its value is present.
+ * Absent optional fields are omitted entirely — never
+ * "undefined", "null", or empty placeholders. */
+function rowsIf(
+  label: string,
+  value: string | null,
+): Array<[string, string]> {
+  return value ? [[label, value]] : []
+}
+
 function emailShell(
   title: string,
-  rows: Array<[string, string]>,
+  sections: NotifyEmailSection[],
   freeText: Array<{ label: string; value: string }>,
 ): { textBody: string; htmlBody: string } {
-  const textLines = [
-    title,
-    '',
-    ...rows.map(([label, value]) => `${label}: ${value}`),
+  const visible = sections.filter(
+    (section) => section.rows.length > 0,
+  )
+  const textLines = [title, '']
+
+  for (const section of visible) {
+    textLines.push(section.heading)
+
+    for (const [label, value] of section.rows) {
+      textLines.push(`${label}: ${value}`)
+    }
+
+    textLines.push('')
+  }
+
+  textLines.push(
     ...freeText.flatMap(({ label, value }) => [
-      '',
       `${label}:`,
       value,
+      '',
     ]),
-    '',
     EMAIL_FOOTER_TEXT,
-  ]
+  )
 
-  const htmlRows = rows
+  const htmlSections = visible
     .map(
-      ([label, value]) =>
-        `<tr><th align="left">${escapeNotifyHtml(label)}</th>` +
-        `<td>${escapeNotifyHtml(value)}</td></tr>`,
+      (section) =>
+        `<h3>${escapeNotifyHtml(section.heading)}</h3>` +
+        `<table border="0" cellpadding="4">${section.rows
+          .map(
+            ([label, value]) =>
+              `<tr><th align="left">${escapeNotifyHtml(label)}</th>` +
+              `<td>${escapeNotifyHtml(value)}</td></tr>`,
+          )
+          .join('')}</table>`,
     )
     .join('')
   const htmlFree = freeText
@@ -1182,24 +1219,319 @@ function emailShell(
     textBody: textLines.join('\n'),
     htmlBody:
       `<html><body><h2>${escapeNotifyHtml(title)}</h2>` +
-      `<table border="0" cellpadding="4">${htmlRows}</table>` +
+      htmlSections +
       htmlFree +
       `<hr><p><small>${escapeNotifyHtml(EMAIL_FOOTER_TEXT)}</small></p>` +
       `</body></html>`,
   }
 }
 
+function customerSection(
+  detail: OrderDetail,
+): NotifyEmailSection {
+  return {
+    heading: 'VÁSÁRLÓ',
+    rows: [
+      ...rowsIf('Név', detail.customer.fullName),
+      ...rowsIf(
+        'Cég',
+        detail.customer.companyName,
+      ),
+      ...rowsIf(
+        'Allegro login',
+        detail.customer.login ?? detail.buyerLogin,
+      ),
+      ...rowsIf('Email', detail.customer.email),
+      ...rowsIf('Telefon', detail.customer.phone),
+    ],
+  }
+}
+
+function formatPickupPoint(
+  point: OrderPickupPoint,
+): string | null {
+  const title = [point.name, point.description]
+    .filter((part) => part !== null && part !== '')
+    .join(' – ')
+  const address = [
+    point.street,
+    [point.zipCode, point.city]
+      .filter((part) => part !== null && part !== '')
+      .join(' '),
+    point.countryCode,
+  ]
+    .filter((part) => part !== null && part !== '')
+    .join(', ')
+
+  if (!title && !address) {
+    return null
+  }
+
+  return address ? `${title} (${address})` : title
+}
+
+function shippingSection(
+  detail: OrderDetail,
+): NotifyEmailSection {
+  return {
+    heading: 'SZÁLLÍTÁSI ADATOK',
+    rows: [
+      ...rowsIf(
+        'Címzett',
+        detail.shipping.recipientName,
+      ),
+      ...rowsIf(
+        'Cég',
+        detail.shipping.companyName,
+      ),
+      ...rowsIf('Utca', detail.shipping.street),
+      ...rowsIf(
+        'Irányítószám',
+        detail.shipping.zipCode,
+      ),
+      ...rowsIf('Város', detail.shipping.city),
+      ...rowsIf(
+        'Ország',
+        detail.shipping.countryCode,
+      ),
+      ...rowsIf('Telefon', detail.shipping.phone),
+      ...rowsIf(
+        'Szállítási mód',
+        detail.shipmentMethod,
+      ),
+      ...rowsIf(
+        'Szállítási költség',
+        detail.deliveryCost,
+      ),
+      ...rowsIf(
+        'Átvételi pont',
+        detail.pickupPoint
+          ? formatPickupPoint(detail.pickupPoint)
+          : null,
+      ),
+    ],
+  }
+}
+
+function billingSection(
+  detail: OrderDetail | null,
+): NotifyEmailSection {
+  if (!detail) {
+    return { heading: 'SZÁMLÁZÁSI ADATOK', rows: [] }
+  }
+
+  const billing = detail.billing
+  const hasData =
+    billing.invoiceRequested !== null ||
+    billing.name !== null ||
+    billing.street !== null ||
+    billing.zipCode !== null ||
+    billing.city !== null ||
+    billing.countryCode !== null ||
+    billing.taxId !== null
+
+  if (!hasData) {
+    return {
+      heading: 'SZÁMLÁZÁSI ADATOK',
+      rows: [
+        [
+          'Számlázási adat',
+          'nincs külön megadva',
+        ],
+      ],
+    }
+  }
+
+  return {
+    heading: 'SZÁMLÁZÁSI ADATOK',
+    rows: [
+      ...(billing.invoiceRequested === null
+        ? []
+        : [
+            [
+              'Számla igényelve',
+              billing.invoiceRequested
+                ? 'Igen'
+                : 'Nem',
+            ] as [string, string],
+          ]),
+      ...rowsIf('Név / cégnév', billing.name),
+      ...rowsIf('Utca', billing.street),
+      ...rowsIf(
+        'Irányítószám',
+        billing.zipCode,
+      ),
+      ...rowsIf('Város', billing.city),
+      ...rowsIf('Ország', billing.countryCode),
+      ...rowsIf('Adószám', billing.taxId),
+    ],
+  }
+}
+
+function formatProductLine(
+  line: OrderProductLine,
+): string {
+  const parts = [`${line.name} x${line.quantity}`]
+
+  if (line.unitPrice) {
+    parts.push(line.unitPrice)
+  }
+
+  const reference = line.sku ?? line.offerId
+
+  if (reference) {
+    parts.push(`SKU/ajánlat: ${reference}`)
+  }
+
+  if (line.lineTotal) {
+    parts.push(`Összesen: ${line.lineTotal}`)
+  }
+
+  return `- ${parts.join(' · ')}`
+}
+
+function paymentText(
+  detail: OrderDetail,
+): string | null {
+  if (
+    detail.paymentStatus &&
+    detail.paymentProvider
+  ) {
+    return `${detail.paymentStatus} (${detail.paymentProvider})`
+  }
+
+  return (
+    detail.paymentStatus ?? detail.paymentProvider
+  )
+}
+
+function orderSection(
+  detail: OrderDetail,
+): NotifyEmailSection {
+  return {
+    heading: 'RENDELÉS',
+    rows: [
+      ['Rendelési azonosító', detail.id],
+      ...rowsIf('Időpont', detail.occurredAt),
+      ...rowsIf('Fizetés', paymentText(detail)),
+      ...rowsIf('Végösszeg', detail.total),
+      ...rowsIf('Pénznem', detail.currency),
+    ],
+  }
+}
+
+/* ============================================================
+ * Checkout-form detail model. Field paths below come from
+ * real Allegro checkout-form payloads (buyer, delivery
+ * .address/.method/.pickupPoint/.cost, invoice.required,
+ * lineItems[].offer/.price, summary.totalToPay, payment
+ * .type/.provider). Every field is optional and parsed
+ * defensively: absent or misshaped values become null and
+ * are omitted from the email instead of rendered.
+ * Customer data parsed here lives only in memory and in
+ * the outbound relay email payload — never in KV, Neon,
+ * logs, or diagnostics (see the privacy tests).
+ * ============================================================ */
+
+function moneyText(value: unknown): string | null {
+  if (typeof value === 'string') {
+    return value === '' ? null : value
+  }
+
+  const record = recordOf(value)
+  const amount = textOrNull(record?.['amount'])
+
+  if (!amount) {
+    return null
+  }
+
+  const currency = textOrNull(record?.['currency'])
+
+  return currency ? `${amount} ${currency}` : amount
+}
+
+function moneyCurrency(value: unknown): string | null {
+  if (typeof value === 'string') {
+    return null
+  }
+
+  return textOrNull(recordOf(value)?.['currency'])
+}
+
+function joinName(
+  firstName: string | null,
+  lastName: string | null,
+): string | null {
+  const parts = [firstName, lastName].filter(
+    (part): part is string =>
+      part !== null && part !== '',
+  )
+
+  return parts.length > 0 ? parts.join(' ') : null
+}
+
+export type OrderCustomer = {
+  fullName: string | null
+  companyName: string | null
+  login: string | null
+  email: string | null
+  phone: string | null
+}
+
+export type OrderShipping = {
+  recipientName: string | null
+  companyName: string | null
+  street: string | null
+  zipCode: string | null
+  city: string | null
+  countryCode: string | null
+  phone: string | null
+}
+
+export type OrderBilling = {
+  invoiceRequested: boolean | null
+  name: string | null
+  street: string | null
+  zipCode: string | null
+  city: string | null
+  countryCode: string | null
+  taxId: string | null
+}
+
+export type OrderPickupPoint = {
+  name: string | null
+  description: string | null
+  street: string | null
+  zipCode: string | null
+  city: string | null
+  countryCode: string | null
+}
+
+export type OrderProductLine = {
+  name: string
+  quantity: number
+  offerId: string | null
+  sku: string | null
+  unitPrice: string | null
+  lineTotal: string | null
+  currency: string | null
+}
+
 export type OrderDetail = {
   id: string
   buyerLogin: string | null
+  customer: OrderCustomer
+  shipping: OrderShipping
+  billing: OrderBilling
+  pickupPoint: OrderPickupPoint | null
   occurredAt: string | null
-  productLines: Array<{
-    name: string
-    quantity: number
-  }>
+  productLines: OrderProductLine[]
   total: string | null
+  currency: string | null
   paymentStatus: string | null
+  paymentProvider: string | null
   shipmentMethod: string | null
+  deliveryCost: string | null
   messageToSeller: string | null
 }
 
@@ -1225,33 +1557,211 @@ export function parseCheckoutForm(
       typeof item?.['quantity'] === 'number'
         ? item['quantity']
         : 1
-    productLines.push({ name, quantity })
+    productLines.push({
+      name,
+      quantity,
+      offerId: textOrNull(offer?.['id']),
+      sku: textOrNull(
+        recordOf(offer?.['external'])?.['id'],
+      ),
+      unitPrice: moneyText(
+        item?.['price'] ?? item?.['originalPrice'],
+      ),
+      lineTotal: moneyText(item?.['totalPrice']),
+      currency: moneyCurrency(
+        item?.['price'] ?? item?.['originalPrice'],
+      ),
+    })
   }
 
   const summary = recordOf(root['summary'])
   const payment = recordOf(root['payment'])
   const delivery = recordOf(root['delivery'])
+  const deliveryAddress = recordOf(
+    delivery?.['address'],
+  )
+  const deliveryMethod = recordOf(
+    delivery?.['method'],
+  )
+  const pickupPoint = recordOf(
+    delivery?.['pickupPoint'],
+  )
+  const pickupAddress = recordOf(
+    pickupPoint?.['address'],
+  )
+  const invoice = recordOf(root['invoice'])
+  const invoiceAddress = recordOf(
+    invoice?.['address'],
+  )
+  const invoiceCompany = recordOf(
+    invoiceAddress?.['company'],
+  )
+  const invoicePerson = recordOf(
+    invoiceAddress?.['naturalPerson'],
+  )
+  const invoiceRequired =
+    typeof invoice?.['required'] === 'boolean'
+      ? invoice['required']
+      : null
+  const totalSource =
+    summary?.['totalToPay'] ?? summary?.['total']
 
   return {
     id: orderId,
     buyerLogin: textOrNull(buyer?.['login']),
+    customer: {
+      fullName: joinName(
+        textOrNull(buyer?.['firstName']),
+        textOrNull(buyer?.['lastName']),
+      ),
+      companyName: textOrNull(
+        buyer?.['companyName'],
+      ),
+      login: textOrNull(buyer?.['login']),
+      email: textOrNull(buyer?.['email']),
+      phone: textOrNull(buyer?.['phoneNumber']),
+    },
+    shipping: {
+      recipientName: joinName(
+        textOrNull(deliveryAddress?.['firstName']),
+        textOrNull(deliveryAddress?.['lastName']),
+      ),
+      companyName: textOrNull(
+        deliveryAddress?.['companyName'],
+      ),
+      street: textOrNull(
+        deliveryAddress?.['street'],
+      ),
+      zipCode: textOrNull(
+        deliveryAddress?.['zipCode'],
+      ),
+      city: textOrNull(deliveryAddress?.['city']),
+      countryCode: textOrNull(
+        deliveryAddress?.['countryCode'],
+      ),
+      phone: textOrNull(
+        deliveryAddress?.['phoneNumber'],
+      ),
+    },
+    billing: {
+      invoiceRequested: invoiceRequired,
+      name:
+        textOrNull(invoiceCompany?.['name']) ??
+        joinName(
+          textOrNull(
+            invoicePerson?.['firstName'],
+          ),
+          textOrNull(invoicePerson?.['lastName']),
+        ),
+      street: textOrNull(
+        invoiceAddress?.['street'],
+      ),
+      zipCode: textOrNull(
+        invoiceAddress?.['zipCode'],
+      ),
+      city: textOrNull(invoiceAddress?.['city']),
+      countryCode: textOrNull(
+        invoiceAddress?.['countryCode'],
+      ),
+      taxId: textOrNull(invoiceCompany?.['taxId']),
+    },
+    pickupPoint: pickupPoint
+      ? {
+          name: textOrNull(pickupPoint['name']),
+          description: textOrNull(
+            pickupPoint['description'],
+          ),
+          street: textOrNull(
+            pickupAddress?.['street'],
+          ),
+          zipCode: textOrNull(
+            pickupAddress?.['zipCode'],
+          ),
+          city: textOrNull(
+            pickupAddress?.['city'],
+          ),
+          countryCode: textOrNull(
+            pickupAddress?.['countryCode'],
+          ),
+        }
+      : null,
     occurredAt:
       textOrNull(root['boughtAt']) ??
       textOrNull(root['createdAt']),
     productLines,
-    total:
-      textOrNull(summary?.['totalToPay']) ??
-      textOrNull(summary?.['total']),
+    total: moneyText(totalSource),
+    currency:
+      moneyCurrency(totalSource) ??
+      productLines.find(
+        (line) => line.currency !== null,
+      )?.currency ??
+      null,
     paymentStatus:
       textOrNull(payment?.['status']) ??
       textOrNull(payment?.['type']),
-    shipmentMethod: textOrNull(
-      recordOf(delivery?.['shipment'])?.['name'] ??
-        delivery?.['method'],
+    paymentProvider: textOrNull(
+      payment?.['provider'],
+    ),
+    shipmentMethod:
+      textOrNull(
+        recordOf(delivery?.['shipment'])?.['name'],
+      ) ??
+      textOrNull(deliveryMethod?.['name']) ??
+      textOrNull(delivery?.['method']),
+    deliveryCost: moneyText(
+      recordOf(delivery?.['cost']) ?? delivery?.['cost'],
     ),
     messageToSeller: textOrNull(
       root['messageToSeller'],
     ),
+  }
+}
+
+/* Detail used when the checkout-form fetch fails: every
+ * customer field stays null so nothing is invented and
+ * the email still carries the event-level identifiers. */
+export function emptyOrderDetail(
+  orderId: string,
+  occurredAt: string | null,
+): OrderDetail {
+  return {
+    id: orderId,
+    buyerLogin: null,
+    customer: {
+      fullName: null,
+      companyName: null,
+      login: null,
+      email: null,
+      phone: null,
+    },
+    shipping: {
+      recipientName: null,
+      companyName: null,
+      street: null,
+      zipCode: null,
+      city: null,
+      countryCode: null,
+      phone: null,
+    },
+    billing: {
+      invoiceRequested: null,
+      name: null,
+      street: null,
+      zipCode: null,
+      city: null,
+      countryCode: null,
+      taxId: null,
+    },
+    pickupPoint: null,
+    occurredAt,
+    productLines: [],
+    total: null,
+    currency: null,
+    paymentStatus: null,
+    paymentProvider: null,
+    shipmentMethod: null,
+    deliveryCost: null,
+    messageToSeller: null,
   }
 }
 
@@ -1264,21 +1774,16 @@ export function buildOrderEmail(
   const productText =
     detail.productLines.length > 0
       ? detail.productLines
-          .map(
-            (line) =>
-              `- ${line.name} x${line.quantity}`,
-          )
+          .map(formatProductLine)
           .join('\n')
       : '–'
   const { textBody, htmlBody } = emailShell(
     title,
     [
-      ['Rendelési azonosító', detail.id],
-      ['Vevő', detail.buyerLogin ?? '–'],
-      ['Időpont', detail.occurredAt ?? '–'],
-      ['Végösszeg', detail.total ?? '–'],
-      ['Fizetés', detail.paymentStatus ?? '–'],
-      ['Szállítás', detail.shipmentMethod ?? '–'],
+      customerSection(detail),
+      shippingSection(detail),
+      billingSection(detail),
+      orderSection(detail),
     ],
     [
       { label: 'Termékek', value: productText },
@@ -1304,27 +1809,95 @@ export function buildCancellationEmail(
 ): NotifyEmail {
   const orderId = detail?.id ?? event.orderId ?? event.id
   const title = `[ALLEGRO] TÖRLÉS – ${orderId}`
+  const productText =
+    detail && detail.productLines.length > 0
+      ? detail.productLines
+          .map(formatProductLine)
+          .join('\n')
+      : null
   const { textBody, htmlBody } = emailShell(
     title,
     [
-      ['Típus', kind],
-      ['Rendelési azonosító', orderId],
-      ['Vevő', detail?.buyerLogin ?? '–'],
-      [
-        'Időpont',
-        event.occurredAt ?? detail?.occurredAt ?? '–',
-      ],
-      ['Végösszeg', detail?.total ?? '–'],
+      ...(detail
+        ? [
+            customerSection(detail),
+            shippingSection(detail),
+            billingSection(detail),
+          ]
+        : []),
+      {
+        heading: 'TÖRLÉS',
+        rows: [
+          ['Típus', kind],
+          ['Rendelési azonosító', orderId],
+          ...rowsIf(
+            'Időpont',
+            event.occurredAt ?? detail?.occurredAt ?? null,
+          ),
+          ...rowsIf(
+            'Indok',
+            event.reason ?? null,
+          ),
+          ...rowsIf(
+            'Végösszeg',
+            detail?.total ?? null,
+          ),
+          ...rowsIf(
+            'Pénznem',
+            detail?.currency ?? null,
+          ),
+        ],
+      },
     ],
-    [],
+    productText
+      ? [{ label: 'Termékek', value: productText }]
+      : [],
   )
 
   return { to, subject: title, textBody, htmlBody }
 }
 
+/* Compact customer block for order-related buyer
+ * messages. Deliberately no billing/invoice section: no
+ * billing classification exists in the message payload,
+ * so one is never inferred. */
+function messageCustomerSection(
+  detail: OrderDetail,
+): NotifyEmailSection {
+  const customer = detail.customer
+  const shipping = detail.shipping
+  const addressLine = [
+    shipping.recipientName,
+    shipping.street,
+    [shipping.zipCode, shipping.city]
+      .filter((part) => part !== null && part !== '')
+      .join(' '),
+    shipping.countryCode,
+  ]
+    .filter((part) => part !== null && part !== '')
+    .join(', ')
+
+  return {
+    heading: 'ÜGYFÉL',
+    rows: [
+      ...rowsIf(
+        'Név',
+        customer.fullName ?? customer.login,
+      ),
+      ...rowsIf('Email', customer.email),
+      ...rowsIf('Telefon', customer.phone),
+      ...rowsIf(
+        'Szállítási cím',
+        addressLine === '' ? null : addressLine,
+      ),
+    ],
+  }
+}
+
 export function buildMessageEmail(
   to: string,
   message: NotifyMessage,
+  detail: OrderDetail | null = null,
 ): NotifyEmail {
   const title = message.orderId
     ? `[ALLEGRO] ÜZENET – ${message.orderId}`
@@ -1334,16 +1907,22 @@ export function buildMessageEmail(
   const { textBody, htmlBody } = emailShell(
     title,
     [
-      ['Vevő', message.authorLogin ?? '–'],
-      ['Időpont', message.createdAt ?? '–'],
-      ['Rendelés', message.orderId ?? '–'],
-      ['Ajánlat', message.offerId ?? '–'],
-      [
-        'Csatolmány',
-        message.attachmentNames.length > 0
-          ? message.attachmentNames.join(', ')
-          : 'nincs',
-      ],
+      {
+        heading: 'ÜZENET',
+        rows: [
+          ...rowsIf('Vevő', message.authorLogin),
+          ...rowsIf('Időpont', message.createdAt),
+          ...rowsIf('Rendelés', message.orderId),
+          ...rowsIf('Ajánlat', message.offerId),
+          [
+            'Csatolmány',
+            message.attachmentNames.length > 0
+              ? message.attachmentNames.join(', ')
+              : 'nincs',
+          ],
+        ],
+      },
+      ...(detail ? [messageCustomerSection(detail)] : []),
     ],
     [
       {
@@ -1563,6 +2142,11 @@ export async function postRelayEmail(
  *
  * - No Neon access anywhere on this path by construction.
  * - Lease in KV prevents overlapping executions.
+ * - Checkout-form details are fetched at most once per
+ *   order per tick via an in-memory Map (shared by the
+ *   order and message processors). The cache is never
+ *   persisted: it holds customer PII, which may exist
+ *   only in memory and in the outbound relay payload.
  * - Per event: dedupe check -> one email -> one relay POST
  *   -> mark delivered only on relay success.
  * - Cursor advances over the leading delivered run only, so
@@ -1706,6 +2290,10 @@ export async function runAllegroNotifyTick(
     }
 
     const { tokens } = session
+    const orderDetailCache = new Map<
+      string,
+      OrderDetail | null
+    >()
 
     await processOrderEvents(
       config,
@@ -1715,6 +2303,7 @@ export async function runAllegroNotifyTick(
       nowMs,
       deps.nonce,
       summary,
+      orderDetailCache,
     )
     await processBuyerMessages(
       config,
@@ -1724,6 +2313,7 @@ export async function runAllegroNotifyTick(
       nowMs,
       deps.nonce,
       summary,
+      orderDetailCache,
     )
   } finally {
     await kv.delete(NOTIFY_KV_KEYS.lease).catch(() => undefined)
@@ -1794,6 +2384,49 @@ async function deliverOneEmail(
   return 'SENT'
 }
 
+/* Checkout-form fetch shared by the order and message
+ * processors. At most one fetch per order per tick; the
+ * Map is created fresh in runAllegroNotifyTick and never
+ * persisted. Only technical identifiers reach the logs. */
+async function getCachedOrderDetail(
+  config: NotifyConfig,
+  tokens: NotifyOAuthTokens,
+  fetchImpl: FetchImpl,
+  cache: Map<string, OrderDetail | null>,
+  orderId: string,
+  eventRef: { type: string; id: string },
+): Promise<OrderDetail | null> {
+  if (cache.has(orderId)) {
+    return cache.get(orderId) ?? null
+  }
+
+  const detailFetched = await fetchJson(
+    `${config.apiUrl}/order/checkout-forms/${encodeURIComponent(orderId)}`,
+    tokens,
+    config,
+    fetchImpl,
+  )
+
+  if (!detailFetched.ok) {
+    notifyWarn('notify order detail failed', {
+      eventType: eventRef.type,
+      eventId: eventRef.id,
+      httpStatus: detailFetched.status,
+    })
+    cache.set(orderId, null)
+
+    return null
+  }
+
+  const detail = parseCheckoutForm(
+    orderId,
+    detailFetched.data,
+  )
+  cache.set(orderId, detail)
+
+  return detail
+}
+
 async function processOrderEvents(
   config: NotifyConfig,
   kv: NotifyKv,
@@ -1802,6 +2435,7 @@ async function processOrderEvents(
   nowMs: number,
   nonce: string | undefined,
   summary: NotifyTickSummary,
+  orderDetailCache: Map<string, OrderDetail | null>,
 ): Promise<void> {
   const cursor =
     await kv.get<StoredCursor>(NOTIFY_KV_KEYS.orderCursor)
@@ -1879,25 +2513,14 @@ async function processOrderEvents(
     let detail: OrderDetail | null = null
 
     if (event.orderId) {
-      const detailFetched = await fetchJson(
-        `${config.apiUrl}/order/checkout-forms/${encodeURIComponent(event.orderId)}`,
-        tokens,
+      detail = await getCachedOrderDetail(
         config,
+        tokens,
         fetchImpl,
+        orderDetailCache,
+        event.orderId,
+        { type: event.type, id: event.id },
       )
-
-      if (detailFetched.ok) {
-        detail = parseCheckoutForm(
-          event.orderId,
-          detailFetched.data,
-        )
-      } else {
-        notifyWarn('notify order detail failed', {
-          eventType: event.type,
-          eventId: event.id,
-          httpStatus: detailFetched.status,
-        })
-      }
     }
 
     const email =
@@ -1905,16 +2528,11 @@ async function processOrderEvents(
         ? buildOrderEmail(
             recipient,
             event,
-            detail ?? {
-              id: event.orderId ?? event.id,
-              buyerLogin: null,
-              occurredAt: event.occurredAt,
-              productLines: [],
-              total: null,
-              paymentStatus: null,
-              shipmentMethod: null,
-              messageToSeller: null,
-            },
+            detail ??
+              emptyOrderDetail(
+                event.orderId ?? event.id,
+                event.occurredAt,
+              ),
           )
         : buildCancellationEmail(
             recipient,
@@ -1969,6 +2587,7 @@ async function processBuyerMessages(
   nowMs: number,
   nonce: string | undefined,
   summary: NotifyTickSummary,
+  orderDetailCache: Map<string, OrderDetail | null>,
 ): Promise<void> {
   const cursor = await kv.get<StoredCursor>(
     NOTIFY_KV_KEYS.messageCursor,
@@ -2055,9 +2674,28 @@ async function processBuyerMessages(
       continue
     }
 
+    // Order-related messages reuse the per-tick
+    // checkout-form cache. A failed enrichment fetch only
+    // drops the customer block — the message itself is
+    // still delivered. Messages without a related order
+    // never trigger enrichment.
+    let detail: OrderDetail | null = null
+
+    if (message.orderId) {
+      detail = await getCachedOrderDetail(
+        config,
+        tokens,
+        fetchImpl,
+        orderDetailCache,
+        message.orderId,
+        { type: 'MESSAGE', id: message.id },
+      )
+    }
+
     const email = buildMessageEmail(
       config.messageEmail,
       message,
+      detail,
     )
     const outcome = await deliverOneEmail(
       kv,

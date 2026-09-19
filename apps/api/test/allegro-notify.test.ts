@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import {
   ALLEGRO_NOTIFY_SCOPES,
+  buildCancellationEmail,
   buildMessageEmail,
   buildNotifyAuthorizeUrl,
   buildOrderEmail,
@@ -9,6 +10,7 @@ import {
   classifyOrderEvent,
   createMemoryNotifyKv,
   decryptNotifyToken,
+  emptyOrderDetail,
   encryptNotifyToken,
   escapeNotifyHtml,
   exchangeNotifyCode,
@@ -159,21 +161,62 @@ const ORDER_EVENTS_FIXTURE = {
   ],
 }
 
+/* Field paths mirror real Allegro checkout-form
+ * payloads (buyer, delivery.address/.method/.cost,
+ * invoice.required/.address.company, lineItems[].offer
+ * .external/.price, summary.totalToPay, payment
+ * .type/.provider). All values are synthetic. */
 function checkoutFormFixture(orderId: string) {
   return {
     id: orderId,
     boughtAt: '2026-09-19T07:02:00.000Z',
-    buyer: { login: 'buyer42' },
+    buyer: {
+      login: 'buyer42',
+      firstName: 'Teszt',
+      lastName: 'Vevő',
+      email: 'buyer42@example.com',
+      phoneNumber: '+3612345678',
+    },
     lineItems: [
       {
         quantity: 2,
-        offer: { name: 'Karcher WD 5' },
+        offer: {
+          id: 'off-5',
+          name: 'Karcher WD 5',
+          external: { id: '26451800' },
+        },
+        price: { amount: '64950', currency: 'HUF' },
       },
     ],
-    summary: { totalToPay: '129900 HUF' },
-    payment: { status: 'PAID' },
+    summary: {
+      totalToPay: { amount: '129900', currency: 'HUF' },
+    },
+    payment: { type: 'ONLINE', provider: 'PAYU' },
     delivery: {
-      shipment: { name: 'GLS futár' },
+      address: {
+        firstName: 'Teszt',
+        lastName: 'Vevő',
+        street: 'Fő utca 1.',
+        zipCode: '1051',
+        city: 'Budapest',
+        countryCode: 'HU',
+        phoneNumber: '+3612345678',
+      },
+      method: { id: 'method-1', name: 'GLS futár' },
+      cost: { amount: '1990', currency: 'HUF' },
+    },
+    invoice: {
+      required: true,
+      address: {
+        street: 'Cég utca 2.',
+        zipCode: '1134',
+        city: 'Budapest',
+        countryCode: 'HU',
+        company: {
+          name: 'Teszt Kft.',
+          taxId: '12345678-2-41',
+        },
+      },
     },
     messageToSeller: 'Kérem óvatosan csomagolni.',
   }
@@ -1079,6 +1122,14 @@ void describe('notification tick', () => {
 
     for (const forbidden of [
       'buyer42',
+      'buyer42@example.com',
+      '+3612345678',
+      'Teszt Vevő',
+      'Teszt Kft.',
+      '12345678-2-41',
+      'Fő utca 1.',
+      'Cég utca 2.',
+      '26451800',
       'Kérem óvatosan',
       'Hello',
       'szamla.pdf',
@@ -1122,6 +1173,14 @@ void describe('notification tick', () => {
 
     for (const forbidden of [
       'buyer42',
+      'buyer42@example.com',
+      '+3612345678',
+      'Teszt Vevő',
+      'Teszt Kft.',
+      '12345678-2-41',
+      'Fő utca 1.',
+      'Cég utca 2.',
+      '26451800',
       'Kérem óvatosan',
       'Hello',
       'orders@example.com',
@@ -1272,5 +1331,470 @@ void describe('notification tick', () => {
     const empty = parseCheckoutForm('ord-9', null)
     assert.equal(empty.productLines.length, 0)
     assert.equal(empty.buyerLogin, null)
+  })
+})
+
+void describe('notification email enrichment', () => {
+  const orderEvent = {
+    id: 'ev-9',
+    type: 'READY_FOR_PROCESSING',
+    occurredAt: '2026-09-19T07:02:00.000Z',
+    orderId: 'ord-9',
+    reason: null,
+  }
+
+  void it('builds a new-order email with customer, shipping and billing sections', () => {
+    const detail = parseCheckoutForm(
+      'ord-9',
+      checkoutFormFixture('ord-9'),
+    )
+    const email = buildOrderEmail(
+      'orders@example.com',
+      orderEvent,
+      detail,
+    )
+
+    assert.equal(
+      email.subject,
+      '[ALLEGRO] ÚJ RENDELÉS – ord-9',
+    )
+
+    for (const part of [
+      'VÁSÁRLÓ',
+      'Teszt Vevő',
+      'buyer42',
+      'buyer42@example.com',
+      '+3612345678',
+      'SZÁLLÍTÁSI ADATOK',
+      'Fő utca 1.',
+      '1051',
+      'Budapest',
+      'GLS futár',
+      '1990 HUF',
+      'SZÁMLÁZÁSI ADATOK',
+      'Számla igényelve',
+      'Igen',
+      'Teszt Kft.',
+      'Cég utca 2.',
+      '12345678-2-41',
+      'RENDELÉS',
+      'ONLINE (PAYU)',
+      '129900 HUF',
+      'Karcher WD 5 x2',
+      '64950 HUF',
+      'SKU/ajánlat: 26451800',
+      'Kérem óvatosan csomagolni.',
+    ]) {
+      assert.ok(
+        email.textBody.includes(part),
+        `order email must contain: ${part}`,
+      )
+    }
+  })
+
+  void it('renders an order without billing data cleanly', () => {
+    const detail = parseCheckoutForm('ord-9', {
+      id: 'ord-9',
+      boughtAt: '2026-09-19T07:02:00.000Z',
+      buyer: { login: 'buyer42' },
+      lineItems: [],
+    })
+    const email = buildOrderEmail(
+      'orders@example.com',
+      orderEvent,
+      detail,
+    )
+
+    assert.ok(
+      email.textBody.includes(
+        'Számlázási adat: nincs külön megadva',
+      ),
+    )
+    assert.ok(!email.textBody.includes('Adószám'))
+    assert.ok(
+      !email.textBody.includes('undefined'),
+    )
+    assert.ok(
+      !email.htmlBody.includes('undefined'),
+    )
+
+    const declined = buildOrderEmail(
+      'orders@example.com',
+      orderEvent,
+      parseCheckoutForm('ord-9', {
+        id: 'ord-9',
+        invoice: { required: false },
+      }),
+    )
+
+    assert.ok(
+      declined.textBody.includes('Számla igényelve: Nem'),
+    )
+    assert.ok(
+      !declined.textBody.includes(
+        'Számlázási adat: nincs külön megadva',
+      ),
+    )
+  })
+
+  void it('builds a cancellation email with customer, shipping and billing details', () => {
+    const detail = parseCheckoutForm(
+      'ord-9',
+      checkoutFormFixture('ord-9'),
+    )
+    const email = buildCancellationEmail(
+      'cancellations@example.com',
+      'BUYER_CANCELLED',
+      {
+        ...orderEvent,
+        type: 'BUYER_CANCELLED',
+      },
+      detail,
+    )
+
+    assert.equal(
+      email.subject,
+      '[ALLEGRO] TÖRLÉS – ord-9',
+    )
+
+    for (const part of [
+      'VÁSÁRLÓ',
+      'Teszt Vevő',
+      'buyer42@example.com',
+      '+3612345678',
+      'SZÁLLÍTÁSI ADATOK',
+      'Fő utca 1.',
+      'Budapest',
+      'SZÁMLÁZÁSI ADATOK',
+      'Teszt Kft.',
+      '12345678-2-41',
+      'TÖRLÉS',
+      'BUYER_CANCELLED',
+      'Karcher WD 5 x2',
+      '129900 HUF',
+    ]) {
+      assert.ok(
+        email.textBody.includes(part),
+        `cancellation email must contain: ${part}`,
+      )
+    }
+
+    assert.ok(
+      !email.textBody.includes('Indok'),
+    )
+  })
+
+  void it('builds a cancellation email without detail from event data only', () => {
+    const email = buildCancellationEmail(
+      'cancellations@example.com',
+      'AUTO_CANCELLED',
+      {
+        ...orderEvent,
+        type: 'AUTO_CANCELLED',
+      },
+      null,
+    )
+
+    assert.equal(
+      email.subject,
+      '[ALLEGRO] TÖRLÉS – ord-9',
+    )
+    assert.ok(
+      email.textBody.includes('AUTO_CANCELLED'),
+    )
+    assert.ok(
+      !email.textBody.includes('VÁSÁRLÓ'),
+    )
+    assert.ok(
+      !email.textBody.includes('undefined'),
+    )
+  })
+
+  void it('adds a compact customer block to order-related buyer messages', () => {
+    const detail = parseCheckoutForm(
+      'ord-2',
+      checkoutFormFixture('ord-2'),
+    )
+    const email = buildMessageEmail(
+      'customerservice@example.com',
+      {
+        id: 'm-9',
+        threadId: 'th-1',
+        createdAt: '2026-09-19T07:11:00.000Z',
+        authorIsInterlocutor: true,
+        authorLogin: 'buyer42',
+        text: 'Hol a csomagom?',
+        attachmentNames: [],
+        orderId: 'ord-2',
+        offerId: null,
+      },
+      detail,
+    )
+
+    assert.equal(
+      email.subject,
+      '[ALLEGRO] ÜZENET – ord-2',
+    )
+    assert.ok(email.textBody.includes('ÜGYFÉL'))
+    assert.ok(
+      email.textBody.includes('Teszt Vevő'),
+    )
+    assert.ok(
+      email.textBody.includes(
+        'buyer42@example.com',
+      ),
+    )
+    assert.ok(
+      email.textBody.includes('+3612345678'),
+    )
+    assert.ok(
+      email.textBody.includes('Fő utca 1.'),
+    )
+    assert.ok(
+      !email.textBody.includes('SZÁMLÁZÁSI ADATOK'),
+    )
+    assert.ok(
+      !email.textBody.includes('Adószám'),
+    )
+  })
+
+  void it('adds no customer block to messages without a related order', () => {
+    const email = buildMessageEmail(
+      'customerservice@example.com',
+      {
+        id: 'm-9',
+        threadId: 'th-1',
+        createdAt: '2026-09-19T07:11:00.000Z',
+        authorIsInterlocutor: true,
+        authorLogin: 'buyer42',
+        text: 'Általános kérdés.',
+        attachmentNames: [],
+        orderId: null,
+        offerId: 'off-9',
+      },
+    )
+
+    assert.equal(
+      email.subject,
+      '[ALLEGRO] ÜZENET – off-9',
+    )
+    assert.ok(!email.textBody.includes('ÜGYFÉL'))
+    assert.ok(
+      !email.textBody.includes('Teszt Vevő'),
+    )
+  })
+
+  void it('omits missing optional fields without placeholders', () => {
+    const email = buildOrderEmail(
+      'orders@example.com',
+      orderEvent,
+      emptyOrderDetail('ord-9', null),
+    )
+
+    assert.ok(
+      !email.textBody.includes('undefined'),
+    )
+    assert.ok(
+      !email.textBody.includes(': null'),
+    )
+    assert.ok(
+      !email.htmlBody.includes('undefined'),
+    )
+    assert.ok(
+      email.textBody.includes(
+        'Számlázási adat: nincs külön megadva',
+      ),
+    )
+  })
+
+  void it('escapes customer-derived fields in HTML only', () => {
+    const detail = parseCheckoutForm('ord-9', {
+      id: 'ord-9',
+      buyer: {
+        login: 'buyer42',
+        firstName: '<b>Teszt</b>',
+        lastName: 'Vevő',
+        email: 'buyer42@example.com',
+        phoneNumber: '+3612345678',
+      },
+      delivery: {
+        address: {
+          street: '"Fő" utca & társa',
+          city: 'Budapest',
+        },
+      },
+      invoice: {
+        required: true,
+        address: {
+          company: {
+            name: 'Teszt <Kft.>',
+            taxId: '123<x>',
+          },
+        },
+      },
+      lineItems: [],
+    })
+    const email = buildOrderEmail(
+      'orders@example.com',
+      orderEvent,
+      detail,
+    )
+
+    for (const escaped of [
+      '&lt;b&gt;Teszt&lt;/b&gt;',
+      '&quot;Fő&quot; utca &amp; társa',
+      'Teszt &lt;Kft.&gt;',
+      '123&lt;x&gt;',
+    ]) {
+      assert.ok(
+        email.htmlBody.includes(escaped),
+        `HTML must escape: ${escaped}`,
+      )
+    }
+
+    assert.ok(
+      email.textBody.includes('<b>Teszt</b> Vevő'),
+    )
+    assert.ok(
+      !email.htmlBody.includes('<b>Teszt</b>'),
+    )
+  })
+
+  void it('fetches checkout-form details once per order per tick', async () => {
+    const kv = createMemoryNotifyKv()
+    await seedSession(kv)
+    await seedCursors(kv)
+    let detailCalls = 0
+    const inner = stubFetch([
+      {
+        match: (url) =>
+          url.startsWith(
+            'https://api.test/order/events',
+          ),
+        respond: () =>
+          jsonResponse({
+            events: [
+              {
+                id: 'ev-1',
+                type: 'READY_FOR_PROCESSING',
+                occurredAt:
+                  '2026-09-19T07:02:00.000Z',
+                order: { id: 'ord-9' },
+              },
+              {
+                id: 'ev-2',
+                type: 'BUYER_CANCELLED',
+                occurredAt:
+                  '2026-09-19T07:03:00.000Z',
+                order: { id: 'ord-9' },
+              },
+            ],
+          }),
+      },
+      {
+        match: (url) =>
+          url.startsWith(
+            'https://api.test/order/checkout-forms/',
+          ),
+        respond: (url) => {
+          detailCalls += 1
+          return jsonResponse(
+            checkoutFormFixture(
+              url.split('/').pop() ?? 'ord-x',
+            ),
+          )
+        },
+      },
+      {
+        match: (url) =>
+          url.startsWith(
+            'https://api.test/messaging/threads',
+          ),
+        respond: () =>
+          jsonResponse({ threads: [] }),
+      },
+      {
+        match: (url) =>
+          url === 'https://relay.test/exec',
+        respond: () => jsonResponse({ ok: true }),
+      },
+    ])
+    const summary = await runAllegroNotifyTick({
+      environment: baseEnvironment(),
+      kv,
+      fetchImpl: inner.fetchImpl,
+      nowMs: NOW_MS,
+    })
+
+    assert.equal(detailCalls, 1)
+    assert.equal(summary.orderEmailsSent, 2)
+    assert.equal(summary.orderEmailsFailed, 0)
+  })
+
+  void it('does not fetch order details for messages without a related order', async () => {
+    const kv = createMemoryNotifyKv()
+    await seedSession(kv)
+    await seedCursors(kv)
+    let detailCalls = 0
+    const inner = stubFetch([
+      {
+        match: (url) =>
+          url.startsWith(
+            'https://api.test/order/events',
+          ),
+        respond: () => jsonResponse({ events: [] }),
+      },
+      {
+        match: (url) =>
+          url.startsWith(
+            'https://api.test/order/checkout-forms/',
+          ),
+        respond: () => {
+          detailCalls += 1
+          return jsonResponse({})
+        },
+      },
+      {
+        match: (url) =>
+          url.startsWith(
+            'https://api.test/messaging/threads',
+          ) && !url.includes('/messages'),
+        respond: () =>
+          jsonResponse({ threads: [{ id: 'th-9' }] }),
+      },
+      {
+        match: (url) => url.includes('/messages'),
+        respond: () =>
+          jsonResponse({
+            messages: [
+              {
+                id: 'm-9',
+                createdAt:
+                  '2026-09-19T07:11:00.000Z',
+                author: {
+                  isInterlocutor: true,
+                  login: 'buyer42',
+                },
+                text: 'Általános kérdés.',
+              },
+            ],
+          }),
+      },
+      {
+        match: (url) =>
+          url === 'https://relay.test/exec',
+        respond: () => jsonResponse({ ok: true }),
+      },
+    ])
+    const summary = await runAllegroNotifyTick({
+      environment: baseEnvironment(),
+      kv,
+      fetchImpl: inner.fetchImpl,
+      nowMs: NOW_MS,
+    })
+
+    assert.equal(detailCalls, 0)
+    assert.equal(summary.messageEmailsSent, 1)
+    assert.equal(summary.messageEmailsFailed, 0)
   })
 })
