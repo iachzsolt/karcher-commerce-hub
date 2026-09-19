@@ -2579,6 +2579,118 @@ async function processOrderEvents(
   }
 }
 
+/* public.v1 page size: /messaging/threads and
+ * /messaging/threads/{id}/messages both accept limit
+ * 1..20. A larger limit is rejected with HTTP 422, so
+ * both endpoints are paged with limit=20 + offset and
+ * no other list filters (after/before are not sent to
+ * the thread list). */
+const MESSAGING_PAGE_LIMIT = 20
+
+async function fetchAllThreadIds(
+  config: NotifyConfig,
+  tokens: NotifyOAuthTokens,
+  fetchImpl: FetchImpl,
+): Promise<{
+  ok: boolean
+  status: number
+  threadIds: string[]
+}> {
+  const threadIds: string[] = []
+  let offset = 0
+
+  while (true) {
+    const fetched = await fetchJson(
+      `${config.apiUrl}/messaging/threads` +
+        `?limit=${MESSAGING_PAGE_LIMIT}&offset=${offset}`,
+      tokens,
+      config,
+      fetchImpl,
+    )
+
+    if (!fetched.ok) {
+      return {
+        ok: false,
+        status: fetched.status,
+        threadIds: [],
+      }
+    }
+
+    const page = parseThreadList(fetched.data)
+
+    for (const thread of page) {
+      threadIds.push(thread.id)
+    }
+
+    if (page.length < MESSAGING_PAGE_LIMIT) {
+      return {
+        ok: true,
+        status: fetched.status,
+        threadIds,
+      }
+    }
+
+    offset += MESSAGING_PAGE_LIMIT
+  }
+}
+
+async function fetchAllThreadMessages(
+  config: NotifyConfig,
+  tokens: NotifyOAuthTokens,
+  fetchImpl: FetchImpl,
+  threadId: string,
+): Promise<{
+  ok: boolean
+  status: number
+  messages: NotifyMessage[]
+}> {
+  const messages: NotifyMessage[] = []
+  let offset = 0
+
+  while (true) {
+    const fetched = await fetchJson(
+      `${config.apiUrl}/messaging/threads/${encodeURIComponent(threadId)}/messages` +
+        `?limit=${MESSAGING_PAGE_LIMIT}&offset=${offset}`,
+      tokens,
+      config,
+      fetchImpl,
+    )
+
+    if (!fetched.ok) {
+      return {
+        ok: false,
+        status: fetched.status,
+        messages: [],
+      }
+    }
+
+    const page = parseThreadMessages(
+      threadId,
+      fetched.data,
+    )
+    messages.push(...page)
+
+    if (page.length < MESSAGING_PAGE_LIMIT) {
+      return {
+        ok: true,
+        status: fetched.status,
+        messages,
+      }
+    }
+
+    offset += MESSAGING_PAGE_LIMIT
+  }
+}
+
+/* Message polling has no Allegro-side global cursor, so
+ * each tick scans every thread (paginated) and keeps
+ * interlocutor messages with id > stored message cursor.
+ * Misses are impossible: any message newer than the
+ * cursor is fetched on the next tick. Resends are
+ * impossible: delivered IDs carry per-message dedupe keys
+ * (60-day TTL) and the cursor advances only over the
+ * leading delivered run. Message failures never touch
+ * the order cursor. */
 async function processBuyerMessages(
   config: NotifyConfig,
   kv: NotifyKv,
@@ -2592,10 +2704,9 @@ async function processBuyerMessages(
   const cursor = await kv.get<StoredCursor>(
     NOTIFY_KV_KEYS.messageCursor,
   )
-  const threadsFetched = await fetchJson(
-    `${config.apiUrl}/messaging/threads?limit=50`,
-    tokens,
+  const threadsFetched = await fetchAllThreadIds(
     config,
+    tokens,
     fetchImpl,
   )
 
@@ -2606,29 +2717,26 @@ async function processBuyerMessages(
     return
   }
 
-  const threads = parseThreadList(threadsFetched.data)
   const candidates: NotifyMessage[] = []
 
-  for (const thread of threads) {
-    const messagesFetched = await fetchJson(
-      `${config.apiUrl}/messaging/threads/${encodeURIComponent(thread.id)}/messages?limit=50`,
-      tokens,
-      config,
-      fetchImpl,
-    )
+  for (const threadId of threadsFetched.threadIds) {
+    const messagesFetched =
+      await fetchAllThreadMessages(
+        config,
+        tokens,
+        fetchImpl,
+        threadId,
+      )
 
     if (!messagesFetched.ok) {
       notifyWarn('notify message poll failed', {
         httpStatus: messagesFetched.status,
-        threadId: thread.id,
+        threadId,
       })
       continue
     }
 
-    for (const message of parseThreadMessages(
-      thread.id,
-      messagesFetched.data,
-    )) {
+    for (const message of messagesFetched.messages) {
       if (
         isNotifiableMessage(message) &&
         (!cursor || message.id > cursor.lastId)

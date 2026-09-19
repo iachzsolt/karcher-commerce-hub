@@ -1730,6 +1730,431 @@ void describe('notification email enrichment', () => {
     assert.equal(summary.orderEmailsSent, 2)
     assert.equal(summary.orderEmailsFailed, 0)
   })
+})
+
+void describe('notification messaging pagination', () => {
+  /* public.v1 allows limit 1..20 on both messaging
+   * endpoints; larger limits are rejected with 422. IDs
+   * are zero-padded because the cursor comparison is a
+   * plain string comparison. */
+  type PageMessage = {
+    id: string
+    orderId?: string
+  }
+
+  function buyerMessagePayload(message: PageMessage) {
+    return {
+      id: message.id,
+      createdAt: '2026-09-19T07:11:00.000Z',
+      author: {
+        isInterlocutor: true,
+        login: 'buyer42',
+      },
+      text: `Üzenet ${message.id}`,
+      ...(message.orderId
+        ? { orderId: message.orderId }
+        : {}),
+    }
+  }
+
+  async function runMessagingTick(options: {
+    threadIds: string[]
+    messagesByThread?: Record<string, PageMessage[]>
+    threadStatus?: number
+    seedCursors?: boolean
+    seedMessageCursor?: string
+  }) {
+    const messagesByThread =
+      options.messagesByThread ?? {}
+    const threadStatus = options.threadStatus ?? 200
+    const kv = createMemoryNotifyKv()
+    await seedSession(kv)
+
+    if (options.seedCursors !== false) {
+      await seedCursors(kv)
+    }
+
+    if (options.seedMessageCursor) {
+      await kv.set(NOTIFY_KV_KEYS.messageCursor, {
+        lastId: options.seedMessageCursor,
+        updatedAt: new Date(NOW_MS).toISOString(),
+      })
+    }
+
+    const requests: Array<{
+      url: string
+      accept: string | null
+    }> = []
+    let relayCalls = 0
+    const fetchImpl = async (
+      input: string,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      requests.push({
+        url: input,
+        accept: new Headers(
+          init?.headers,
+        ).get('Accept'),
+      })
+
+      if (
+        input.startsWith(
+          'https://api.test/messaging/threads',
+        ) &&
+        !input.includes('/messages')
+      ) {
+        if (threadStatus !== 200) {
+          return new Response('error', {
+            status: threadStatus,
+          })
+        }
+
+        const offset = Number(
+          new URL(input).searchParams.get('offset') ??
+            '0',
+        )
+
+        return jsonResponse({
+          threads: options.threadIds
+            .slice(offset, offset + 20)
+            .map((id) => ({ id })),
+        })
+      }
+
+      if (input.includes('/messages')) {
+        const threadId = decodeURIComponent(
+          input.match(
+            /threads\/([^/]+)\/messages/,
+          )?.[1] ?? '',
+        )
+        const offset = Number(
+          new URL(input).searchParams.get('offset') ??
+            '0',
+        )
+        const page = (
+          messagesByThread[threadId] ?? []
+        ).slice(offset, offset + 20)
+
+        return jsonResponse({
+          messages: page.map((message) =>
+            buyerMessagePayload(message),
+          ),
+        })
+      }
+
+      if (input === 'https://relay.test/exec') {
+        relayCalls += 1
+        return jsonResponse({ ok: true })
+      }
+
+      if (
+        input.startsWith(
+          'https://api.test/order/events',
+        )
+      ) {
+        return jsonResponse({ events: [] })
+      }
+
+      if (
+        input.startsWith(
+          'https://api.test/order/checkout-forms/',
+        )
+      ) {
+        return jsonResponse(
+          checkoutFormFixture(
+            input.split('/').pop() ?? 'ord-x',
+          ),
+        )
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`)
+    }
+    const summary = await runAllegroNotifyTick({
+      environment: baseEnvironment(),
+      kv,
+      fetchImpl,
+      nowMs: NOW_MS,
+    })
+
+    return { summary, requests, relayCalls, kv }
+  }
+
+  function messagingUrls(
+    requests: Array<{ url: string }>,
+    segment: string,
+  ) {
+    return requests
+      .map((request) => request.url)
+      .filter((url) => url.includes(segment))
+  }
+
+  void it('uses the public.v1 Accept header on both messaging endpoints', async () => {
+    const { requests } = await runMessagingTick({
+      threadIds: ['th-1'],
+      messagesByThread: {
+        'th-1': [{ id: 'm-01' }],
+      },
+    })
+    const threadUrls = messagingUrls(
+      requests,
+      '/messaging/threads?',
+    )
+    const messageUrls = messagingUrls(
+      requests,
+      '/messages?',
+    )
+
+    assert.ok(threadUrls.length > 0)
+    assert.ok(messageUrls.length > 0)
+
+    for (const url of [...threadUrls, ...messageUrls]) {
+      assert.equal(
+        requests.find(
+          (request) => request.url === url,
+        )?.accept,
+        'application/vnd.allegro.public.v1+json',
+      )
+    }
+  })
+
+  void it('keeps thread and message limits at or below 20 with supported params only', async () => {
+    const { requests } = await runMessagingTick({
+      threadIds: ['th-1'],
+      messagesByThread: {
+        'th-1': [{ id: 'm-01' }],
+      },
+    })
+
+    for (const url of messagingUrls(
+      requests,
+      '/messaging/threads?',
+    )) {
+      const params = new URL(url).searchParams
+      assert.ok(Number(params.get('limit')) <= 20)
+      assert.deepEqual(
+        [...params.keys()].sort(),
+        ['limit', 'offset'],
+      )
+    }
+
+    for (const url of messagingUrls(
+      requests,
+      '/messages?',
+    )) {
+      const params = new URL(url).searchParams
+      assert.ok(Number(params.get('limit')) <= 20)
+    }
+  })
+
+  void it('paginates across more than 20 threads', async () => {
+    const threadIds = Array.from(
+      { length: 25 },
+      (_, index) =>
+        `th-${String(index).padStart(2, '0')}`,
+    )
+    const { requests, summary } =
+      await runMessagingTick({ threadIds })
+    const threadUrls = messagingUrls(
+      requests,
+      '/messaging/threads?',
+    )
+    const offsets = threadUrls.map(
+      (url) =>
+        new URL(url).searchParams.get('offset'),
+    )
+
+    assert.deepEqual(offsets, ['0', '20'])
+    assert.ok(
+      requests.some((request) =>
+        request.url.includes(
+          '/threads/th-24/messages',
+        ),
+      ),
+      'page-2 threads must be scanned',
+    )
+    assert.equal(summary.messagesSeen, 0)
+    assert.equal(summary.messageEmailsSent, 0)
+  })
+
+  void it('paginates messages within one thread', async () => {
+    const messages = Array.from(
+      { length: 25 },
+      (_, index) => ({
+        id: `m-${String(index + 1).padStart(2, '0')}`,
+      }),
+    )
+    const { requests, summary } =
+      await runMessagingTick({
+        threadIds: ['th-1'],
+        messagesByThread: { 'th-1': messages },
+      })
+    const messageUrls = messagingUrls(
+      requests,
+      '/messages?',
+    )
+    const offsets = messageUrls.map(
+      (url) =>
+        new URL(url).searchParams.get('offset'),
+    )
+
+    assert.deepEqual(offsets, ['0', '20'])
+    assert.equal(summary.messagesSeen, 25)
+    assert.equal(summary.messageEmailsSent, 25)
+  })
+
+  void it('seeds the first successful message run without sending history', async () => {
+    const { summary, kv } = await runMessagingTick({
+      threadIds: ['th-1'],
+      messagesByThread: {
+        'th-1': [{ id: 'm-01' }, { id: 'm-02' }],
+      },
+      seedCursors: false,
+    })
+
+    assert.equal(summary.messageEmailsSent, 0)
+    assert.equal(summary.messageEmailsFailed, 0)
+    assert.deepEqual(
+      await kv.get(NOTIFY_KV_KEYS.messageCursor),
+      {
+        lastId: 'm-02',
+        updatedAt: new Date(NOW_MS).toISOString(),
+      },
+    )
+    assert.equal(
+      await kv.get(NOTIFY_KV_KEYS.orderCursor),
+      null,
+    )
+  })
+
+  void it('keeps the order cursor untouched when the thread poll fails', async () => {
+    const kv = createMemoryNotifyKv()
+    await seedSession(kv)
+    await seedCursors(kv)
+    await kv.set(NOTIFY_KV_KEYS.orderCursor, {
+      lastId: 'ev-9',
+      updatedAt: new Date(NOW_MS).toISOString(),
+    })
+    const fetchImpl = async (
+      input: string,
+    ): Promise<Response> => {
+      if (
+        input.startsWith(
+          'https://api.test/messaging/threads',
+        )
+      ) {
+        return new Response('error', { status: 422 })
+      }
+
+      if (
+        input.startsWith(
+          'https://api.test/order/events',
+        )
+      ) {
+        return jsonResponse({ events: [] })
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`)
+    }
+    const summary = await runAllegroNotifyTick({
+      environment: baseEnvironment(),
+      kv,
+      fetchImpl,
+      nowMs: NOW_MS,
+    })
+
+    assert.equal(summary.status, 'OK')
+    assert.equal(summary.messagesSeen, 0)
+    assert.equal(summary.messageEmailsSent, 0)
+    assert.equal(summary.messageEmailsFailed, 0)
+    assert.deepEqual(
+      await kv.get(NOTIFY_KV_KEYS.orderCursor),
+      {
+        lastId: 'ev-9',
+        updatedAt: new Date(NOW_MS).toISOString(),
+      },
+    )
+    assert.deepEqual(
+      await kv.get(NOTIFY_KV_KEYS.messageCursor),
+      {
+        lastId: 'm-0',
+        updatedAt: new Date(NOW_MS).toISOString(),
+      },
+    )
+  })
+
+  void it('sends a post-seed buyer message exactly once', async () => {
+    const options = {
+      threadIds: ['th-1'],
+      messagesByThread: {
+        'th-1': [{ id: 'm-01' }, { id: 'm-02' }],
+      },
+      seedMessageCursor: 'm-01',
+    }
+    const first = await runMessagingTick(options)
+
+    assert.equal(first.summary.messageEmailsSent, 1)
+    assert.equal(first.relayCalls, 1)
+
+    const kv = createMemoryNotifyKv()
+    await seedSession(kv)
+    await seedCursors(kv)
+    await kv.set(NOTIFY_KV_KEYS.messageCursor, {
+      lastId: 'm-02',
+      updatedAt: new Date(NOW_MS).toISOString(),
+    })
+    const requests: string[] = []
+    const second = await runAllegroNotifyTick({
+      environment: baseEnvironment(),
+      kv,
+      fetchImpl: (async (input: string) => {
+        requests.push(input)
+
+        if (
+          input.startsWith(
+            'https://api.test/messaging/threads',
+          ) &&
+          !input.includes('/messages')
+        ) {
+          return jsonResponse({
+            threads: [{ id: 'th-1' }],
+          })
+        }
+
+        if (input.includes('/messages')) {
+          return jsonResponse({
+            messages: [
+              buyerMessagePayload({ id: 'm-01' }),
+              buyerMessagePayload({ id: 'm-02' }),
+            ],
+          })
+        }
+
+        if (
+          input.startsWith(
+            'https://api.test/order/events',
+          )
+        ) {
+          return jsonResponse({ events: [] })
+        }
+
+        throw new Error(
+          `relay must not be called: ${input}`,
+        )
+      }) as (
+        input: string,
+        init?: RequestInit,
+      ) => Promise<Response>,
+      nowMs: NOW_MS,
+    })
+
+    assert.equal(second.messageEmailsSent, 0)
+    assert.equal(second.messageEmailsFailed, 0)
+    assert.ok(
+      !requests.some((url) =>
+        url.includes('relay.test'),
+      ),
+    )
+  })
 
   void it('does not fetch order details for messages without a related order', async () => {
     const kv = createMemoryNotifyKv()
