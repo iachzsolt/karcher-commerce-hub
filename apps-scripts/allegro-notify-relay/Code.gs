@@ -124,7 +124,8 @@ function doPost(e) {
     var message = envelope.timestamp + '\n' + envelope.nonce + '\n' +
       canonicalJson(payload);
     var expected = bytesToHex(
-      Utilities.computeHmacSha256Signature(message, secret)
+      Utilities.computeHmacSha256Signature(
+        message, secret, Utilities.Charset.UTF_8)
     );
 
     if (!constantTimeEqual(expected, envelope.signature)) {
@@ -145,7 +146,7 @@ function doPost(e) {
 
     GmailApp.sendEmail(payload.to, payload.subject, payload.textBody, {
       htmlBody: payload.htmlBody,
-      name: 'Kärcher Allegro értesítés',
+      name: 'Allegro értesítés',
       noReply: true
     });
 
@@ -186,7 +187,8 @@ function testHmacCompatibility() {
   var message = timestamp + '\n' + nonce + '\n' +
     canonicalJson(payload);
   var actual = bytesToHex(
-    Utilities.computeHmacSha256Signature(message, secret)
+    Utilities.computeHmacSha256Signature(
+      message, secret, Utilities.Charset.UTF_8)
   );
 
   // The vector uses the fixed test secret; recompute with
@@ -195,7 +197,7 @@ function testHmacCompatibility() {
   // secret, so report both outcomes explicitly.
   var literal = bytesToHex(
     Utilities.computeHmacSha256Signature(
-      message, 'test-relay-secret-123')
+      message, 'test-relay-secret-123', Utilities.Charset.UTF_8)
   );
   var result = (literal === expected) ? 'PASS' : 'FAIL';
   Logger.log(result + ': cross-runtime HMAC vector match = ' + result +
@@ -216,13 +218,13 @@ function testNoReplySupport(recipient) {
   }
   GmailApp.sendEmail(
     recipient,
-    '[Allegro][TESZT] noReply kézbesítés ellenőrzése',
+    '[ALLEGRO] TESZT – noReply kézbesítés ellenőrzése',
     'Automatikus Allegro értesítés. Erre az emailre ne válaszolj; ' +
     'az ügyfélnek az Allegro felületén válaszolj.',
     {
       htmlBody: '<p>Automatikus Allegro értesítés. Erre az emailre ' +
         'ne válaszolj; az ügyfélnek az Allegro felületén válaszolj.</p>',
-      name: 'Kärcher Allegro értesítés',
+      name: 'Allegro értesítés',
       noReply: true
     }
   );

@@ -291,7 +291,7 @@ void describe('email building', () => {
 
     assert.equal(
       email.subject,
-      '[Allegro][ÚJ RENDELÉS] ord-2',
+      '[ALLEGRO] ÚJ RENDELÉS – ord-2',
     )
     assert.ok(email.textBody.includes('buyer42'))
     assert.ok(
@@ -332,7 +332,7 @@ void describe('email building', () => {
 
     assert.equal(
       email.subject,
-      '[Allegro][ÜZENET] buyer<script>42</script> - th-1',
+      '[ALLEGRO] ÜZENET',
     )
     assert.ok(
       email.htmlBody.includes(
@@ -365,7 +365,7 @@ void describe('relay envelope', () => {
   const nonce = 'fixed-nonce-1'
   const payload = {
     to: 'orders@example.com',
-    subject: '[Allegro][ÚJ RENDELÉS] ord-2',
+    subject: '[ALLEGRO] ÚJ RENDELÉS – ord-2',
     textBody: 'hello',
     htmlBody: '<p>hello</p>',
   }
@@ -410,7 +410,7 @@ void describe('relay envelope', () => {
             ...envelope,
             payload: {
               ...payload,
-              subject: '[Allegro][ÜZENET] x',
+              subject: '[ALLEGRO] ÜZENET – x',
             },
           },
           new Date(timestamp).getTime(),
@@ -743,10 +743,10 @@ void describe('notification tick', () => {
     assert.deepEqual(
       relayPosts.map((post) => post.subject),
       [
-        '[Allegro][ÚJ RENDELÉS] ord-2',
-        '[Allegro][TÖRLÉS] ord-3',
-        '[Allegro][TÖRLÉS] ord-4',
-        '[Allegro][ÜZENET] buyer42 - ord-2',
+        '[ALLEGRO] ÚJ RENDELÉS – ord-2',
+        '[ALLEGRO] TÖRLÉS – ord-3',
+        '[ALLEGRO] TÖRLÉS – ord-4',
+        '[ALLEGRO] ÜZENET – ord-2',
       ],
     )
     assert.deepEqual(
@@ -1008,7 +1008,7 @@ void describe('notification tick', () => {
     assert.equal(summary.messageEmailsSent, 0)
     assert.equal(
       relayPosts.some((post) =>
-        post.subject.startsWith('[Allegro][ÜZENET]'),
+        post.subject.startsWith('[ALLEGRO] ÜZENET'),
       ),
       false,
     )

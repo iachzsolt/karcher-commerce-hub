@@ -35,7 +35,7 @@ const EMAIL_FOOTER_TEXT =
   'Automatikus Allegro értesítés. Erre az emailre ne válaszolj; ' +
   'az ügyfélnek az Allegro felületén válaszolj.'
 
-const EMAIL_SENDER_NAME = 'Kärcher Allegro értesítés'
+const EMAIL_SENDER_NAME = 'Allegro értesítés'
 
 type NotifyEnvironment = Record<
   string,
@@ -1260,7 +1260,7 @@ export function buildOrderEmail(
   event: NotifyOrderEvent,
   detail: OrderDetail,
 ): NotifyEmail {
-  const title = `[Allegro][ÚJ RENDELÉS] ${detail.id}`
+  const title = `[ALLEGRO] ÚJ RENDELÉS – ${detail.id}`
   const productText =
     detail.productLines.length > 0
       ? detail.productLines
@@ -1303,7 +1303,7 @@ export function buildCancellationEmail(
   detail: OrderDetail | null,
 ): NotifyEmail {
   const orderId = detail?.id ?? event.orderId ?? event.id
-  const title = `[Allegro][TÖRLÉS] ${orderId}`
+  const title = `[ALLEGRO] TÖRLÉS – ${orderId}`
   const { textBody, htmlBody } = emailShell(
     title,
     [
@@ -1326,9 +1326,11 @@ export function buildMessageEmail(
   to: string,
   message: NotifyMessage,
 ): NotifyEmail {
-  const reference =
-    message.orderId ?? message.offerId ?? message.threadId
-  const title = `[Allegro][ÜZENET] ${message.authorLogin ?? 'Ismeretlen vevő'} - ${reference}`
+  const title = message.orderId
+    ? `[ALLEGRO] ÜZENET – ${message.orderId}`
+    : message.offerId
+      ? `[ALLEGRO] ÜZENET – ${message.offerId}`
+      : '[ALLEGRO] ÜZENET'
   const { textBody, htmlBody } = emailShell(
     title,
     [
