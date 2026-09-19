@@ -9,6 +9,9 @@ import {
   buildNotifyAuthorizeUrl,
   exchangeNotifyCode,
   getNotifyKvStore,
+  handleNotifyAck,
+  handleNotifyPull,
+  reseedNotifyOrders,
   resolveNotifyConfig,
 } from './allegro-notify.js'
 import {
@@ -1841,6 +1844,211 @@ allegroAuth.get(
       message:
         'Allegro notification session established. ' +
         `Scopes: ${ALLEGRO_NOTIFY_SCOPES.join(', ')}.`,
+    })
+  },
+)
+
+/*
+ * Pull/ack bridge for the scheduled Apps Script client
+ * (Apps Script -> Commerce Hub; no Web App deployment).
+ * Transport-public (Apps Script cannot present Commerce
+ * Hub credentials) but application-private: every request
+ * MUST carry the X-Allegro-Notify-* HMAC headers, verified
+ * in allegro-notify.ts BEFORE any Allegro/OAuth work.
+ * Steady-state requests perform ZERO Neon queries: only
+ * Deno KV + Allegro are touched. Customer PII exists
+ * solely in memory and in the single EMAIL response.
+ */
+function readBridgeAuth(context: {
+  req: { header(name: string): string | undefined }
+}) {
+  return {
+    timestamp: context.req.header(
+      'X-Allegro-Notify-Timestamp',
+    ),
+    nonce: context.req.header(
+      'X-Allegro-Notify-Nonce',
+    ),
+    signature: context.req.header(
+      'X-Allegro-Notify-Signature',
+    ),
+  }
+}
+
+async function readBridgeBody(
+  context: { req: { json(): Promise<unknown> } },
+): Promise<{ ok: true; body: unknown } | { ok: false }> {
+  try {
+    return { ok: true, body: await context.req.json() }
+  } catch {
+    return { ok: false }
+  }
+}
+
+allegroAuth.post('/notify-pull', async (context) => {
+  const parsedBody = await readBridgeBody(context)
+
+  if (!parsedBody.ok) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Request body must be JSON.',
+      },
+      400,
+    )
+  }
+
+  const outcome = await handleNotifyPull(
+    {
+      ...readBridgeAuth(context),
+      body: parsedBody.body,
+    },
+  )
+
+  if (outcome.httpStatus === 401) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Bridge authentication failed.',
+        reason: outcome.reason,
+      },
+      401,
+    )
+  }
+
+  if (outcome.httpStatus === 503) {
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Notification bridge is not configured.',
+      },
+      503,
+    )
+  }
+
+  return context.json({ ok: true, ...outcome.result })
+})
+
+allegroAuth.post('/notify-ack', async (context) => {
+  const parsedBody = await readBridgeBody(context)
+
+  if (!parsedBody.ok) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Request body must be JSON.',
+      },
+      400,
+    )
+  }
+
+  const outcome = await handleNotifyAck(
+    {
+      ...readBridgeAuth(context),
+      body: parsedBody.body,
+    },
+  )
+
+  if (outcome.httpStatus === 401) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'Bridge authentication failed.',
+        reason: outcome.reason,
+      },
+      401,
+    )
+  }
+
+  if (outcome.httpStatus === 503) {
+    return context.json(
+      {
+        status: 'error',
+        message:
+          'Notification bridge is not configured.',
+      },
+      503,
+    )
+  }
+
+  return context.json({ ok: true, ...outcome.result })
+})
+
+/*
+ * ADMIN-only safe order recovery. Deliberately NOT public
+ * (absent from both allowlists): run ONCE manually while
+ * ALLEGRO_NOTIFY_ENABLED=false before enabling the new
+ * bridge. Walks the order journal to the current
+ * high-water mark, writes ONLY the order cursor, drops a
+ * stale ORDER pending claim if present, sends ZERO emails,
+ * creates ZERO delivered markers, never touches message
+ * state. The { confirm: true } body guards accidents.
+ */
+allegroAuth.post(
+  '/notify-reseed-orders',
+  async (context) => {
+    const user = getCommerceHubUser(context)
+
+    if (!user || user.role !== 'ADMIN') {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Administrator permission is required.',
+        },
+        403,
+      )
+    }
+
+    let body: unknown
+
+    try {
+      body = await context.req.json()
+    } catch {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Request body must be JSON.',
+        },
+        400,
+      )
+    }
+
+    if (
+      typeof body !== 'object' ||
+      body === null ||
+      (body as Record<string, unknown>)['confirm'] !==
+        true
+    ) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Reseed requires { "confirm": true }.',
+        },
+        400,
+      )
+    }
+
+    const result = await reseedNotifyOrders()
+
+    if (!result.ok) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Order reseed failed.',
+          reason: result.reason,
+        },
+        result.reason === 'NEEDS_BOOTSTRAP'
+          ? 503
+          : 502,
+      )
+    }
+
+    return context.json({
+      status: 'ok',
+      ...result.reseed,
     })
   },
 )

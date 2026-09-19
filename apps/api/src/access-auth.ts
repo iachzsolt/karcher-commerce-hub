@@ -29,14 +29,20 @@ type AuthConfiguration = {
   allowedEmails: Set<string>
 }
 
+// Transport-public paths (no Commerce Hub credentials
+// expected). Notification OAuth callback: reached by direct
+// browser redirect from Allegro (short-lived KV state +
+// PKCE). Pull/ack bridge: reached by the scheduled Apps
+// Script client; both routes verify the X-Allegro-Notify-*
+// HMAC before any Allegro/KV work. notify-connect and
+// notify-reseed-orders stay behind Commerce Hub auth and
+// must never be added below.
 const PUBLIC_PATHS = new Set([
   '/health',
   '/auth/allegro/callback',
-  // Notification OAuth callback: reached by direct browser
-  // redirect from Allegro, which cannot present Commerce Hub
-  // credentials. Safety comes from the short-lived KV state
-  // + PKCE exchange, exactly like the primary callback above.
   '/auth/allegro/notify-callback',
+  '/auth/allegro/notify-pull',
+  '/auth/allegro/notify-ack',
   '/arukereso/pricing/reconcile',
   '/arukereso/pricing/sync',
 ])

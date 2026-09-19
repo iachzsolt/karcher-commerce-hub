@@ -1,36 +1,81 @@
 /*
- * Karcher Allegro notification relay (V1).
+ * Karcher Allegro notification bridge client (V1, pull/ack).
  *
- * Minimal authenticated email relay: accepts exactly ONE
- * signed email envelope per request and sends it with
- * GmailApp.sendEmail({ noReply: true }).
+ * Transport direction is Apps Script -> Commerce Hub. A
+ * time-driven trigger calls runAllegroNotificationPoll()
+ * every 10 minutes. Each iteration:
+ *
+ *   1. signed PULL to Commerce Hub (at most ONE pending
+ *      email is returned),
+ *   2. GmailApp.sendEmail({ noReply: true }),
+ *   3. signed ACK only AFTER the Gmail send succeeded.
+ *
+ * Only a valid ACK marks the event delivered and advances
+ * the cursor in Deno KV. One Allegro event still means
+ * exactly ONE separate email.
+ *
+ * No Web App deployment is required (the old Deno ->
+ * Web App relay is retired: Workspace only allows
+ * "Anyone within KARCHER", so Deno received HTTP 401
+ * before doPost() ever ran). This file needs only time
+ * triggers + Gmail + UrlFetchApp on the sending account.
  *
  * Security properties:
- * - Shared secret lives in Script Properties (RELAY_SECRET).
- * - Signature is HMAC-SHA256 over:
- *     timestamp + "\n" + nonce + "\n" + canonicalJson(payload)
+ * - Shared secret lives in Script Properties (RELAY_SECRET,
+ *   same value as ALLEGRO_NOTIFY_RELAY_SECRET in Deno).
+ * - Every request carries X-Allegro-Notify-Timestamp,
+ *   X-Allegro-Notify-Nonce, X-Allegro-Notify-Signature with
+ *   signature = HMAC-SHA256 over:
+ *     timestamp + "\n" + nonce + "\n" + canonicalJson(body)
  *   with canonicalJson = sorted keys, JSON string encoding.
- *   This MUST match canonicalJson() in apps/api/src/allegro-notify.ts.
- * - Timestamp skew beyond 5 minutes is rejected.
- * - Constant-time signature comparison.
- * - Optional nonce replay window via CacheService (6 min).
- * - No Sheets, no event history, no persistence of mail content.
+ *   This MUST match canonicalJson()/bridgeCanonicalMessage()
+ *   in apps/api/src/allegro-notify.ts.
+ * - Nonce is 16 cryptographically random bytes (hex).
+ * - No email payload or customer PII is ever logged or
+ *   persisted (no Sheets, no CacheService mail content,
+ *   no Script Properties writes at runtime).
+ *
+ * Crash window (documented, unavoidable without event
+ * loss): if Gmail send succeeds but the ACK request fails
+ * (network crash in between), the next trigger re-offers
+ * the same event and the email may be sent twice. The
+ * bridge NEVER trades this for silently losing an event:
+ * no ACK is sent unless GmailApp.sendEmail succeeded.
  *
  * Setup:
  * 1. Create a Google Apps Script project on the Workspace
  *    sending account, paste this file as Code.gs.
- * 2. Set Script Properties: RELAY_SECRET = <same value as
- *    ALLEGRO_NOTIFY_RELAY_SECRET in Deno Deploy>.
- * 3. Run testNoReplySupport() once (sends ONE test email to
- *    the address you pass) before rollout.
- * 4. Deploy > New deployment > Web app, Execute as: Me,
- *    Who has access: Anyone (authenticated by signature).
- * 5. Copy the Web App URL to ALLEGRO_NOTIFY_RELAY_URL.
+ * 2. Set Script Properties:
+ *      RELAY_SECRET = <same as ALLEGRO_NOTIFY_RELAY_SECRET>
+ *      COMMERCE_HUB_NOTIFY_BASE_URL =
+ *        https://<hub-host>/api/auth/allegro
+ *    (no production URL is hardcoded below).
+ * 3. Run testHmacCompatibility() (no email is sent).
+ * 4. Run testBridgeConnection() (signed PING: no Allegro
+ *    poll, no cursor change, no email).
+ * 5. Run testNoReplySupportToMe() once and verify the test
+ *    mail arrives non-replyable.
+ * 6. Run setupAllegroNotificationTrigger() once (creates
+ *    the 10-minute trigger; repeated runs do not
+ *    duplicate it).
  */
 
-var MAX_SKEW_MS = 5 * 60 * 1000;
-var MAX_BODY_CHARS = 200000;
-var NONCE_CACHE_SECONDS = 6 * 60;
+var MAX_EMAILS_PER_RUN = 20;
+var TRIGGER_MINUTES = 10;
+
+function getRequiredProperty_(name) {
+  var value = PropertiesService
+    .getScriptProperties()
+    .getProperty(name);
+
+  if (!value) {
+    throw new Error(
+      'Missing Script Property: ' + name + '.'
+    );
+  }
+
+  return value;
+}
 
 function canonicalJson(value) {
   if (value === null || value === undefined) {
@@ -55,105 +100,221 @@ function bytesToHex(bytes) {
   }).join('');
 }
 
-function constantTimeEqual(left, right) {
-  if (left.length !== right.length) {
-    return false;
+function randomNonce_() {
+  var bytes = [];
+  for (var i = 0; i < 16; i++) {
+    bytes.push(Math.floor(Math.random() * 256));
   }
-  var difference = 0;
-  for (var i = 0; i < left.length; i++) {
-    difference |= left.charCodeAt(i) ^ right.charCodeAt(i);
-  }
-  return difference === 0;
+  return bytesToHex(bytes);
 }
 
-function jsonResponse(payload) {
-  return ContentService
-    .createTextOutput(JSON.stringify(payload))
-    .setMimeType(ContentService.MimeType.JSON);
-}
+function signedBridgeRequest_(path, body) {
+  var secret = getRequiredProperty_('RELAY_SECRET');
+  var baseUrl = getRequiredProperty_(
+    'COMMERCE_HUB_NOTIFY_BASE_URL'
+  ).replace(/\/+$/, '');
+  var timestamp = new Date().toISOString();
+  var nonce = randomNonce_();
+  var message = timestamp + '\n' + nonce + '\n' +
+    canonicalJson(body);
+  var signature = bytesToHex(
+    Utilities.computeHmacSha256Signature(
+      message, secret, Utilities.Charset.UTF_8)
+  );
 
-function doPost(e) {
-  try {
-    var secret = PropertiesService
-      .getScriptProperties()
-      .getProperty('RELAY_SECRET');
-
-    if (!secret) {
-      return jsonResponse({ ok: false, error: 'NOT_CONFIGURED' });
+  var response = UrlFetchApp.fetch(
+    baseUrl + path,
+    {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(body),
+      headers: {
+        'X-Allegro-Notify-Timestamp': timestamp,
+        'X-Allegro-Notify-Nonce': nonce,
+        'X-Allegro-Notify-Signature': signature
+      },
+      muteHttpExceptions: true
     }
+  );
 
-    var envelope;
-    try {
-      envelope = JSON.parse(
-        (e && e.postData && e.postData.contents) || ''
-      );
-    } catch (parseError) {
-      return jsonResponse({ ok: false, error: 'INVALID_JSON' });
-    }
+  var status = response.getResponseCode();
 
-    if (!envelope || typeof envelope !== 'object' ||
-        typeof envelope.timestamp !== 'string' ||
-        typeof envelope.nonce !== 'string' ||
-        typeof envelope.signature !== 'string' ||
-        !envelope.payload || typeof envelope.payload !== 'object') {
-      return jsonResponse({ ok: false, error: 'INVALID_SHAPE' });
-    }
-
-    var payload = envelope.payload;
-    if (typeof payload.to !== 'string' || payload.to === '' ||
-        typeof payload.subject !== 'string' || payload.subject === '' ||
-        typeof payload.textBody !== 'string' ||
-        typeof payload.htmlBody !== 'string') {
-      return jsonResponse({ ok: false, error: 'INVALID_PAYLOAD' });
-    }
-
-    if ((payload.to.length + payload.subject.length +
-         payload.textBody.length + payload.htmlBody.length) >
-        MAX_BODY_CHARS) {
-      return jsonResponse({ ok: false, error: 'PAYLOAD_TOO_LARGE' });
-    }
-
-    var timestampMs = Date.parse(envelope.timestamp);
-    if (isNaN(timestampMs)) {
-      return jsonResponse({ ok: false, error: 'INVALID_TIMESTAMP' });
-    }
-    if (Math.abs(Date.now() - timestampMs) > MAX_SKEW_MS) {
-      return jsonResponse({ ok: false, error: 'STALE_TIMESTAMP' });
-    }
-
-    var message = envelope.timestamp + '\n' + envelope.nonce + '\n' +
-      canonicalJson(payload);
-    var expected = bytesToHex(
-      Utilities.computeHmacSha256Signature(
-        message, secret, Utilities.Charset.UTF_8)
+  if (status === 401) {
+    throw new Error(
+      'Bridge authentication failed (HTTP 401). ' +
+      'Check RELAY_SECRET.'
     );
-
-    if (!constantTimeEqual(expected, envelope.signature)) {
-      return jsonResponse({ ok: false, error: 'BAD_SIGNATURE' });
-    }
-
-    try {
-      var cache = CacheService.getScriptCache();
-      var nonceKey = 'nonce:' + envelope.nonce;
-      if (cache.get(nonceKey)) {
-        return jsonResponse({ ok: false, error: 'REPLAYED_NONCE' });
-      }
-      cache.put(nonceKey, '1', NONCE_CACHE_SECONDS);
-    } catch (cacheError) {
-      // Replay cache is best-effort; the timestamp window
-      // plus per-event nonces already bound reuse.
-    }
-
-    GmailApp.sendEmail(payload.to, payload.subject, payload.textBody, {
-      htmlBody: payload.htmlBody,
-      name: 'Allegro értesítés',
-      noReply: true
-    });
-
-    return jsonResponse({ ok: true });
-  } catch (error) {
-    return jsonResponse({ ok: false, error: 'RELAY_FAILED' });
   }
+
+  if (status < 200 || status >= 300) {
+    throw new Error(
+      'Bridge request failed with HTTP ' + status + '.'
+    );
+  }
+
+  return JSON.parse(response.getContentText() || '{}');
+}
+
+/*
+ * Main scheduled entry point. Bounded: at most
+ * MAX_EMAILS_PER_RUN emails per trigger execution.
+ * Overlapping executions are excluded via ScriptLock.
+ */
+function runAllegroNotificationPoll() {
+  var lock = LockService.getScriptLock();
+  var acquired = lock.tryLock(30 * 1000);
+
+  if (!acquired) {
+    Logger.log('Poll skipped: previous run still holds the lock.');
+    return 'SKIPPED_LOCK';
+  }
+
+  try {
+    var sent = 0;
+
+    for (var i = 0; i < MAX_EMAILS_PER_RUN; i++) {
+      var pull = signedBridgeRequest_(
+        '/notify-pull', {}
+      );
+
+      if (!pull || pull.ok !== true) {
+        Logger.log('Pull returned non-OK payload; stopping.');
+        return 'PULL_ERROR';
+      }
+
+      if (pull.action === 'DISABLED') {
+        Logger.log('Bridge disabled (ALLEGRO_NOTIFY_ENABLED=false).');
+        return 'DISABLED';
+      }
+
+      if (pull.action === 'NEEDS_BOOTSTRAP') {
+        Logger.log('Bridge needs Allegro OAuth bootstrap.');
+        return 'NEEDS_BOOTSTRAP';
+      }
+
+      if (pull.action === 'NOOP' || pull.action === 'SEEDED') {
+        Logger.log(
+          'No email to send (action=' + pull.action + ').'
+        );
+        return pull.action;
+      }
+
+      if (pull.action !== 'EMAIL' || !pull.email ||
+          !pull.deliveryId) {
+        Logger.log('Unexpected pull action; stopping.');
+        return 'PULL_ERROR';
+      }
+
+      // Sanitized progress only: technical delivery id,
+      // never subject/body/recipient.
+      try {
+        GmailApp.sendEmail(
+          pull.email.to,
+          pull.email.subject,
+          pull.email.textBody,
+          {
+            htmlBody: pull.email.htmlBody,
+            name: 'Allegro értesítés',
+            noReply: true
+          }
+        );
+      } catch (sendError) {
+        // NO ACK on send failure: the event stays pending
+        // and the next trigger re-offers the same event.
+        Logger.log(
+          'Gmail send failed for delivery ' +
+          pull.deliveryId + '; will retry next trigger.'
+        );
+        return 'SEND_FAILED';
+      }
+
+      // ACK only after a successful Gmail send.
+      var ack = signedBridgeRequest_(
+        '/notify-ack', { deliveryId: pull.deliveryId }
+      );
+
+      if (!ack || ack.ok !== true ||
+          ack.action !== 'ACKED') {
+        Logger.log(
+          'ACK failed for delivery ' + pull.deliveryId +
+          '; the event will be re-offered (possible duplicate).'
+        );
+        return 'ACK_FAILED';
+      }
+
+      sent++;
+    }
+
+    Logger.log(
+      'Poll run reached the per-run cap (' +
+      MAX_EMAILS_PER_RUN + ' emails sent).'
+    );
+    return 'CAPPED:' + sent;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function setupAllegroNotificationTrigger() {
+  var existing = ScriptApp.getProjectTriggers().filter(
+    function (trigger) {
+      return trigger.getHandlerFunction() ===
+        'runAllegroNotificationPoll';
+    }
+  );
+
+  if (existing.length > 0) {
+    Logger.log(
+      'Trigger already exists; no duplicate created.'
+    );
+    return 'EXISTS';
+  }
+
+  ScriptApp.newTrigger('runAllegroNotificationPoll')
+    .timeBased()
+    .everyMinutes(TRIGGER_MINUTES)
+    .create();
+  Logger.log(
+    'Created 10-minute trigger for runAllegroNotificationPoll.'
+  );
+  return 'CREATED';
+}
+
+function removeAllegroNotificationTriggers() {
+  var triggers = ScriptApp.getProjectTriggers().filter(
+    function (trigger) {
+      return trigger.getHandlerFunction() ===
+        'runAllegroNotificationPoll';
+    }
+  );
+
+  triggers.forEach(function (trigger) {
+    ScriptApp.deleteTrigger(trigger);
+  });
+  Logger.log(
+    'Removed ' + triggers.length + ' notification trigger(s).'
+  );
+  return 'REMOVED:' + triggers.length;
+}
+
+/*
+ * Safe connectivity check: signed PING performs no
+ * Allegro poll, advances no cursors, sends no email.
+ * While ALLEGRO_NOTIFY_ENABLED=false the bridge answers
+ * DISABLED — that still proves HMAC + connectivity work.
+ */
+function testBridgeConnection() {
+  var result = signedBridgeRequest_(
+    '/notify-pull', { mode: 'ping' }
+  );
+  Logger.log(
+    'Bridge connection result: ' +
+    JSON.stringify({
+      ok: result.ok === true,
+      action: result.action
+    })
+  );
+  return result;
 }
 
 /*
@@ -208,12 +369,13 @@ function testHmacCompatibility() {
 /*
  * One-time rollout check: sends a single noReply test email
  * to the address you pass. Verify it arrives from the
- * no-reply sender and has no usable Reply-To.
+ * no-reply sender and has no usable Reply-To. Sends NO
+ * order notification.
  */
-function testNoReplySupport(recipient) {
+function testNoReplySupportToMe(recipient) {
   if (!recipient) {
     throw new Error(
-      'Pass your own address: testNoReplySupport("you@example.com").'
+      'Pass your own address: testNoReplySupportToMe("you@example.com").'
     );
   }
   GmailApp.sendEmail(

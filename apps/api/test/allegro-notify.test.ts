@@ -1268,57 +1268,32 @@ void describe('notification tick', () => {
     }
   })
 
-  void it('routes the notify cron through the lightweight wrapper', async () => {
+  void it('serves notifications via pull/ack with no notify cron', async () => {
     const { readFileSync } = await import('node:fs')
     const denoSource = readFileSync(
       new URL('../src/deno.ts', import.meta.url),
       'utf8',
     )
 
-    // Registration window: the notify Deno.cron call must
-    // invoke the lightweight wrapper, not the shared
-    // runCronJob (which initializes the DB-backed runtime).
-    const cronAt = denoSource.indexOf(
-      'commerce-hub-allegro-notify',
-    )
-    assert.ok(cronAt >= 0)
-    const registration = denoSource.slice(
-      cronAt,
-      cronAt + 500,
+    // Pull/ack architecture: a scheduled Apps Script client
+    // drives delivery, so Deno registers NO notification
+    // cron (the old Deno -> Web App relay got HTTP 401).
+    // The KV store override below still wires Deno KV for
+    // the pull/ack/queue routes served by Deno.serve.
+    assert.ok(
+      !denoSource.includes('commerce-hub-allegro-notify'),
     )
     assert.ok(
-      registration.includes('runAllegroNotifyCron'),
+      !denoSource.includes('runAllegroNotifyCron'),
     )
     assert.ok(
-      !registration.includes('runCronJob('),
+      !denoSource.includes('runAllegroNotifyTick'),
     )
-
-    // Wrapper body: no runtime/DB initialization of any kind.
-    const wrapperAt = denoSource.indexOf(
-      'async function runAllegroNotifyCron',
+    assert.ok(
+      denoSource.includes(
+        'setNotifyKvStore(await openDenoNotifyKv())',
+      ),
     )
-    assert.ok(wrapperAt >= 0)
-    const wrapperEnd = denoSource.indexOf(
-      '\n}\n',
-      wrapperAt,
-    )
-    const wrapper = denoSource.slice(
-      wrapperAt,
-      wrapperEnd,
-    )
-    assert.ok(wrapper.includes('runAllegroNotifyTick'))
-
-    for (const forbidden of [
-      'initializeCommerceHubRuntime',
-      'restoreAllegroSession',
-      'createDatabase',
-      'runCronJob(',
-    ]) {
-      assert.ok(
-        !wrapper.includes(forbidden),
-        `notify wrapper must not reference: ${forbidden}`,
-      )
-    }
   })
 
   void it('parses checkout forms defensively', () => {

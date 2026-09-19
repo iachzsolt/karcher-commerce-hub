@@ -19,7 +19,6 @@ import {
   isDenoCronEnabled,
 } from './arukereso-source-feed.js'
 import {
-  runAllegroNotifyTick,
   setNotifyKvStore,
   openDenoNotifyKv,
 } from './allegro-notify.js'
@@ -53,53 +52,6 @@ async function runCronJob(
 
   await initializeCommerceHubRuntime()
   await job()
-}
-
-/*
- * Lightweight wrapper for the Allegro notification tick
- * ONLY. Unlike runCronJob it deliberately skips
- * initializeCommerceHubRuntime(): restoring the primary
- * Allegro session touches Neon (credential read) and the
- * network on first use, which would violate the
- * zero-Neon steady-state requirement of the 10-minute
- * notification tick. The tick authenticates from its own
- * KV-stored OAuth session instead. Do not reuse this for
- * jobs that need the database-backed runtime.
- */
-async function runAllegroNotifyCron() {
-  if (!isCronEnabled()) {
-    console.log(
-      'Skipping allegro notify: Deno cron is disabled',
-    )
-    return
-  }
-
-  try {
-    const summary = await runAllegroNotifyTick()
-
-    console.log(
-      'Allegro notify tick completed:',
-      {
-        status: summary.status,
-        orderEventsSeen: summary.orderEventsSeen,
-        orderEmailsSent: summary.orderEmailsSent,
-        orderEmailsFailed:
-          summary.orderEmailsFailed,
-        messagesSeen: summary.messagesSeen,
-        messageEmailsSent:
-          summary.messageEmailsSent,
-        messageEmailsFailed:
-          summary.messageEmailsFailed,
-      },
-    )
-  } catch (error) {
-    console.error(
-      'Allegro notify tick failed:',
-      error instanceof Error
-        ? error.message
-        : 'Unknown error',
-    )
-  }
 }
 
 function dailyTimesToCronPatterns(
@@ -282,17 +234,14 @@ Deno.cron(
   ),
 )
 
-// Allegro -> email notification bridge: exactly ONE cron
-// for order events and buyer messages. Registration is
-// unconditional so Deno Deploy discovers it; the handler
-// returns early unless ALLEGRO_NOTIFY_ENABLED is true, and
-// the tick itself performs zero Neon queries (Deno KV only).
-Deno.cron(
-  'commerce-hub-allegro-notify',
-  '*/10 * * * *',
-  () => runAllegroNotifyCron(),
-)
-
+// Allegro -> email notification bridge (pull/ack): NO
+// Deno cron. A scheduled Apps Script client PULLs at most
+// one pending email per request and ACKs after Gmail send,
+// so Deno never pushes outward (the old Deno -> Web App
+// relay got HTTP 401 from Workspace domain policy).
+// ALLEGRO_NOTIFY_ENABLED remains the feature flag for the
+// pull/ack endpoints. Expected cron total: 6 (2 daily
+// scheduler + 3 Arukereso source + 1 maintenance).
 setNotifyKvStore(await openDenoNotifyKv())
 
 await initializeCommerceHubRuntime()

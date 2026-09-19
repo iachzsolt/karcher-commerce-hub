@@ -1,18 +1,28 @@
 /*
- * Allegro -> email notification bridge (V1).
+ * Allegro -> email notification bridge (V1, pull/ack).
  *
- * ONE Allegro event = ONE email, sent through a Google Apps
- * Script relay. This module is intentionally isolated:
+ * ONE Allegro event = ONE email. Transport direction is
+ * Apps Script -> Commerce Hub: a scheduled Apps Script
+ * client PULLs at most one pending notification per
+ * request, sends it with GmailApp.sendEmail({ noReply:
+ * true }), then ACKs. Only a valid ACK marks the event
+ * delivered and advances the cursor.
  *
- * - No Neon/database imports. The steady-state tick performs
- *   ZERO Neon queries; all technical state lives in Deno KV.
+ * This module is intentionally isolated:
+ *
+ * - No Neon/database imports. The steady-state pull/ack
+ *   path performs ZERO Neon queries; all technical state
+ *   lives in Deno KV.
  * - No shared state with the primary Commerce Hub Allegro
  *   OAuth session: the notification session has its own
  *   scopes, its own refresh token, and its own encryption
  *   key (ALLEGRO_NOTIFY_TOKEN_ENCRYPTION_KEY).
  * - No customer/order/message payload is persisted anywhere
  *   or logged. Payloads exist in memory only while the
- *   current email is built and sent.
+ *   current email is built, plus inside the single HTTPS
+ *   EMAIL response to the HMAC-authenticated Apps Script
+ *   client. KV holds technical state only (cursors,
+ *   delivered IDs, one pending claim, replay nonces).
  */
 
 export const ALLEGRO_NOTIFY_SCOPES = [
@@ -30,6 +40,20 @@ const OAUTH_STATE_TTL_MS = 10 * 60 * 1000
 const DEDUPE_TTL_MS = 60 * 24 * 60 * 60 * 1000
 const RELAY_SKEW_MS = 5 * 60 * 1000
 const RELAY_MAX_BODY_CHARS = 200_000
+/* Bridge (Apps Script -> Hub) replay window: one nonce
+ * record per signed request, short TTL. Matches the
+ * 5-minute timestamp skew above. */
+const BRIDGE_NONCE_TTL_MS = 10 * 60 * 1000
+/* Pending-claim TTL: comfortably longer than the
+ * 10-minute Apps Script trigger cadence so a pulled
+ * event survives until its ACK; short enough that a
+ * lost ACK re-offers the event instead of wedging the
+ * bridge behind one stale claim. */
+const PENDING_TTL_MS = 30 * 60 * 1000
+/* Pull-time scan bounds: order journal pages of 100. */
+const ORDER_PAGE_LIMIT = 100
+const ORDER_PULL_MAX_PAGES = 5
+const ORDER_HIGH_WATER_MAX_PAGES = 200
 
 const EMAIL_FOOTER_TEXT =
   'Automatikus Allegro értesítés. Erre az emailre ne válaszolj; ' +
@@ -51,7 +75,11 @@ export type NotifyConfig = {
   clientSecret: string
   redirectUri: string
   userAgent: string
-  relayUrl: string
+  /* Legacy Deno -> Apps Script Web App URL. The pull/ack
+   * bridge never reads it; it stays optional so existing
+   * environments (where it may still be configured) keep
+   * resolving. Do not reintroduce it into active logic. */
+  relayUrl: string | null
   relaySecret: string
   tokenKeyBytes: Uint8Array
   orderEmail: string | null
@@ -143,10 +171,10 @@ export function resolveNotifyConfig(
       environment,
       'ALLEGRO_USER_AGENT',
     ),
-    relayUrl: requiredEnv(
-      environment,
-      'ALLEGRO_NOTIFY_RELAY_URL',
-    ),
+    relayUrl:
+      environment[
+        'ALLEGRO_NOTIFY_RELAY_URL'
+      ]?.trim() || null,
     relaySecret: requiredEnv(
       environment,
       'ALLEGRO_NOTIFY_RELAY_SECRET',
@@ -277,6 +305,20 @@ export const NOTIFY_KV_KEYS = {
       'sent',
       'message',
       messageId,
+    ] as const,
+  /* Single-slot pending claim: technical recreation data
+   * for the one event currently checked out by the Apps
+   * Script client. NEVER customer PII (see BridgePending).
+   * While set, PULL re-offers this same event so a failed
+   * Gmail send is retried before its cursor advances. */
+  pending: ['allegro-notify', 'pending'] as const,
+  /* Short replay-prevention record per bridge request
+   * nonce. Technical value only. */
+  bridgeNonce: (nonce: string) =>
+    [
+      'allegro-notify',
+      'bridge-nonce',
+      nonce,
     ] as const,
   lease: ['allegro-notify', 'lease'] as const,
 } as const
@@ -2137,6 +2179,1204 @@ export async function postRelayEmail(
 }
 
 /* ============================================================
+ * Pull/ack bridge authentication (Apps Script -> Hub).
+ *
+ * The endpoints are transport-public (Apps Script cannot
+ * present Commerce Hub credentials) but application-private:
+ * every request must carry
+ *
+ *   X-Allegro-Notify-Timestamp
+ *   X-Allegro-Notify-Nonce
+ *   X-Allegro-Notify-Signature
+ *
+ * with signature = HMAC-SHA256(secret,
+ *   timestamp + "\n" + nonce + "\n" + canonicalJson(body)).
+ *
+ * Same canonical/HMAC/UTF-8 construction as the legacy
+ * relay envelope, so the existing cross-runtime HMAC
+ * compatibility vector stays valid. Verification runs
+ * BEFORE any Allegro/OAuth/KV-mutating work, and the
+ * secret/signature/body are never logged.
+ * ============================================================ */
+
+export function bridgeCanonicalMessage(
+  timestamp: string,
+  nonce: string,
+  body: unknown,
+): string {
+  return `${timestamp}\n${nonce}\n${canonicalJson(body ?? null)}`
+}
+
+export async function verifyBridgeRequest(
+  secret: string,
+  timestamp: unknown,
+  nonce: unknown,
+  signature: unknown,
+  body: unknown,
+  nowMs: number,
+  maxSkewMs = RELAY_SKEW_MS,
+): Promise<{ ok: boolean; reason: string }> {
+  if (
+    typeof timestamp !== 'string' ||
+    typeof nonce !== 'string' ||
+    typeof signature !== 'string' ||
+    timestamp === '' ||
+    nonce === '' ||
+    signature === ''
+  ) {
+    return { ok: false, reason: 'INVALID_AUTH' }
+  }
+
+  const timestampMs = Date.parse(timestamp)
+
+  if (!Number.isFinite(timestampMs)) {
+    return { ok: false, reason: 'INVALID_TIMESTAMP' }
+  }
+
+  if (Math.abs(nowMs - timestampMs) > maxSkewMs) {
+    return { ok: false, reason: 'STALE_TIMESTAMP' }
+  }
+
+  const expected = await hmacSha256Hex(
+    secret,
+    bridgeCanonicalMessage(timestamp, nonce, body),
+  )
+
+  if (expected.length !== signature.length) {
+    return { ok: false, reason: 'BAD_SIGNATURE' }
+  }
+
+  let difference = 0
+
+  for (
+    let index = 0;
+    index < expected.length;
+    index += 1
+  ) {
+    difference |=
+      expected.charCodeAt(index) ^
+      signature.charCodeAt(index)
+  }
+
+  return difference === 0
+    ? { ok: true, reason: 'OK' }
+    : { ok: false, reason: 'BAD_SIGNATURE' }
+}
+
+/* ============================================================
+ * Order-event journal high-water mark.
+ *
+ * Allegro /order/events is a journal: responses list
+ * events in journal order (oldest first) and `from=<last
+ * event id>` continues the journal AFTER that event. The
+ * implementation therefore pages forward from the given
+ * start until a short (or empty) page ends the journal and
+ * takes the LAST event of the LAST non-empty page as the
+ * high-water mark. Opaque IDs are never sorted or
+ * compared — position in the journal is the only ordering
+ * signal used.
+ *
+ * This shared helper fixes the historical-flood bootstrap:
+ * one 100-row page is NOT assumed sufficient.
+ * ============================================================ */
+
+export type OrderHighWater = {
+  highWaterId: string | null
+  eventsScanned: number
+  pages: number
+}
+
+export async function fetchOrderHighWater(
+  config: NotifyConfig,
+  tokens: NotifyOAuthTokens,
+  fetchImpl: FetchImpl,
+  startFrom: string | null = null,
+): Promise<
+  | { ok: true; highWater: OrderHighWater }
+  | { ok: false; status: number }
+> {
+  let from = startFrom
+  let highWaterId: string | null = null
+  let eventsScanned = 0
+  let pages = 0
+
+  while (pages < ORDER_HIGH_WATER_MAX_PAGES) {
+    const url =
+      `${config.apiUrl}/order/events?limit=${ORDER_PAGE_LIMIT}` +
+      (from
+        ? `&from=${encodeURIComponent(from)}`
+        : '')
+    const fetched = await fetchJson(
+      url,
+      tokens,
+      config,
+      fetchImpl,
+    )
+
+    if (!fetched.ok) {
+      return { ok: false, status: fetched.status }
+    }
+
+    pages += 1
+    const events = parseOrderEvents(fetched.data)
+    eventsScanned += events.length
+
+    if (events.length === 0) {
+      break
+    }
+
+    highWaterId = events[events.length - 1]!.id
+    from = highWaterId
+
+    if (events.length < ORDER_PAGE_LIMIT) {
+      break
+    }
+  }
+
+  return {
+    ok: true,
+    highWater: { highWaterId, eventsScanned, pages },
+  }
+}
+
+function isValidCursor(
+  cursor: StoredCursor | null,
+): cursor is StoredCursor {
+  return (
+    cursor !== null &&
+    typeof cursor.lastId === 'string' &&
+    cursor.lastId !== ''
+  )
+}
+
+/* ============================================================
+ * Pull/ack bridge state machine.
+ *
+ * KV persists ONLY technical recreation data (see
+ * BridgePending): channel, event/message/thread/order
+ * identifiers, event type, opaque delivery ID, the cursor
+ * value observed at pull time, and technical timestamps.
+ * Rendered subjects/bodies, customer data, and message
+ * text are built in memory per pull and never stored.
+ * ============================================================ */
+
+export type BridgePending = {
+  deliveryId: string
+  channel: 'order' | 'message'
+  eventId: string
+  eventType: string
+  orderId: string | null
+  threadId: string | null
+  offerId: string | null
+  messageId: string | null
+  cursorBefore: string | null
+  createdAt: string
+}
+
+export type BridgeEmail = {
+  to: string
+  subject: string
+  textBody: string
+  htmlBody: string
+}
+
+export type NotifyPullResult =
+  | { action: 'DISABLED' }
+  | { action: 'NEEDS_BOOTSTRAP' }
+  | { action: 'NOOP' }
+  | { action: 'PONG' }
+  | { action: 'SEEDED'; channel: 'ORDER' | 'MESSAGE' }
+  | {
+      action: 'EMAIL'
+      deliveryId: string
+      email: BridgeEmail
+    }
+
+export type NotifyAckResult =
+  | { action: 'DISABLED' }
+  | { action: 'ACKED'; duplicate: boolean }
+  | { action: 'UNKNOWN' }
+
+function orderDeliveryId(eventId: string): string {
+  return `order:${eventId}`
+}
+
+function messageDeliveryId(
+  messageId: string,
+): string {
+  return `message:${messageId}`
+}
+
+function parseDeliveryId(
+  deliveryId: unknown,
+): {
+  channel: 'order' | 'message'
+  eventId: string
+} | null {
+  if (typeof deliveryId !== 'string') {
+    return null
+  }
+
+  if (deliveryId.startsWith('order:') && deliveryId.length > 6) {
+    return {
+      channel: 'order',
+      eventId: deliveryId.slice(6),
+    }
+  }
+
+  if (
+    deliveryId.startsWith('message:') &&
+    deliveryId.length > 8
+  ) {
+    return {
+      channel: 'message',
+      eventId: deliveryId.slice(8),
+    }
+  }
+
+  return null
+}
+
+export type BridgeRequestAuth = {
+  timestamp: unknown
+  nonce: unknown
+  signature: unknown
+  body: unknown
+}
+
+export type BridgeDeps = {
+  environment?: NotifyEnvironment
+  kv?: NotifyKv
+  fetchImpl?: FetchImpl
+  nowMs?: number
+}
+
+async function authenticateBridgeRequest(
+  config: NotifyConfig,
+  kv: NotifyKv,
+  auth: BridgeRequestAuth,
+  nowMs: number,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const verified = await verifyBridgeRequest(
+    config.relaySecret,
+    auth.timestamp,
+    auth.nonce,
+    auth.signature,
+    auth.body,
+    nowMs,
+  )
+
+  if (!verified.ok) {
+    return verified
+  }
+
+  // Nonce replay prevention: first-seen wins inside the
+  // 10-minute window. A repeated nonce is rejected even
+  // with an otherwise valid signature.
+  const claimed = await kv.setIfAbsent(
+    NOTIFY_KV_KEYS.bridgeNonce(auth.nonce as string),
+    {
+      seenAt: new Date(nowMs).toISOString(),
+    },
+    { ttlMs: BRIDGE_NONCE_TTL_MS },
+  )
+
+  if (!claimed) {
+    return { ok: false, reason: 'REPLAYED_NONCE' }
+  }
+
+  return { ok: true }
+}
+
+async function buildOrderEmailForEvent(
+  config: NotifyConfig,
+  tokens: NotifyOAuthTokens,
+  fetchImpl: FetchImpl,
+  event: NotifyOrderEvent,
+): Promise<{ email: BridgeEmail } | { held: true }> {
+  const kind = classifyOrderEvent(event.type)
+
+  if (kind === null) {
+    return { held: true }
+  }
+
+  const recipient =
+    kind === 'NEW_ORDER'
+      ? config.orderEmail
+      : (config.cancellationEmail ?? config.orderEmail)
+
+  if (!recipient) {
+    return { held: true }
+  }
+
+  let detail: OrderDetail | null = null
+
+  if (event.orderId) {
+    const detailFetched = await fetchJson(
+      `${config.apiUrl}/order/checkout-forms/${encodeURIComponent(event.orderId)}`,
+      tokens,
+      config,
+      fetchImpl,
+    )
+
+    if (detailFetched.ok) {
+      detail = parseCheckoutForm(
+        event.orderId,
+        detailFetched.data,
+      )
+    } else {
+      notifyWarn('notify order detail failed', {
+        eventType: event.type,
+        eventId: event.id,
+        httpStatus: detailFetched.status,
+      })
+    }
+  }
+
+  const email =
+    kind === 'NEW_ORDER'
+      ? buildOrderEmail(
+          recipient,
+          event,
+          detail ??
+            emptyOrderDetail(
+              event.orderId ?? event.id,
+              event.occurredAt,
+            ),
+        )
+      : buildCancellationEmail(
+          recipient,
+          event.type,
+          event,
+          detail,
+        )
+
+  return {
+    email: {
+      to: email.to,
+      subject: email.subject,
+      textBody: email.textBody,
+      htmlBody: email.htmlBody,
+    },
+  }
+}
+
+async function buildMessageEmailForMessage(
+  config: NotifyConfig,
+  tokens: NotifyOAuthTokens,
+  fetchImpl: FetchImpl,
+  message: NotifyMessage,
+): Promise<{ email: BridgeEmail } | { held: true }> {
+  if (!config.messageEmail) {
+    return { held: true }
+  }
+
+  let detail: OrderDetail | null = null
+
+  if (message.orderId) {
+    const detailFetched = await fetchJson(
+      `${config.apiUrl}/order/checkout-forms/${encodeURIComponent(message.orderId)}`,
+      tokens,
+      config,
+      fetchImpl,
+    )
+
+    if (detailFetched.ok) {
+      detail = parseCheckoutForm(
+        message.orderId,
+        detailFetched.data,
+      )
+    } else {
+      notifyWarn('notify order detail failed', {
+        eventType: 'MESSAGE',
+        eventId: message.id,
+        httpStatus: detailFetched.status,
+      })
+    }
+  }
+
+  const email = buildMessageEmail(
+    config.messageEmail,
+    message,
+    detail,
+  )
+
+  return {
+    email: {
+      to: email.to,
+      subject: email.subject,
+      textBody: email.textBody,
+      htmlBody: email.htmlBody,
+    },
+  }
+}
+
+/* Recreate the EMAIL payload for an existing pending
+ * claim. Re-fetches Allegro state in memory so the
+ * retried email reflects current data; never reads PII
+ * from KV because none is stored there. Returns null
+ * when the underlying event can no longer be resolved
+ * (caller then drops the stale claim and continues). */
+async function rebuildPendingEmail(
+  config: NotifyConfig,
+  tokens: NotifyOAuthTokens,
+  fetchImpl: FetchImpl,
+  pending: BridgePending,
+): Promise<{ email: BridgeEmail } | null> {
+  if (pending.channel === 'order') {
+    const page = await fetchJson(
+      `${config.apiUrl}/order/events?limit=${ORDER_PAGE_LIMIT}` +
+        (pending.cursorBefore
+          ? `&from=${encodeURIComponent(pending.cursorBefore)}`
+          : ''),
+      tokens,
+      config,
+      fetchImpl,
+    )
+
+    if (!page.ok) {
+      return null
+    }
+
+    // Scan a bounded window for the claimed event. The
+    // claim is normally on the first page; a few extra
+    // pages tolerate concurrent journal growth.
+    let pages = 0
+    let from = pending.cursorBefore
+    let found: NotifyOrderEvent | null = null
+
+    while (pages < ORDER_PULL_MAX_PAGES) {
+      const url =
+        `${config.apiUrl}/order/events?limit=${ORDER_PAGE_LIMIT}` +
+        (from
+          ? `&from=${encodeURIComponent(from)}`
+          : '')
+      const fetched =
+        pages === 0
+          ? page
+          : await fetchJson(
+              url,
+              tokens,
+              config,
+              fetchImpl,
+            )
+
+      if (!fetched.ok) {
+        return null
+      }
+
+      pages += 1
+      const events = parseOrderEvents(fetched.data)
+
+      if (events.length === 0) {
+        break
+      }
+
+      const match = events.find(
+        (event) => event.id === pending.eventId,
+      )
+
+      if (match) {
+        found = match
+        break
+      }
+
+      from = events[events.length - 1]!.id
+
+      if (events.length < ORDER_PAGE_LIMIT) {
+        break
+      }
+    }
+
+    if (!found) {
+      return null
+    }
+
+    const built = await buildOrderEmailForEvent(
+      config,
+      tokens,
+      fetchImpl,
+      found,
+    )
+
+    return 'email' in built ? built : null
+  }
+
+  const fetched = await fetchAllThreadMessages(
+    config,
+    tokens,
+    fetchImpl,
+    pending.threadId ?? '',
+  )
+
+  if (!fetched.ok || !pending.threadId) {
+    return null
+  }
+
+  const match = fetched.messages.find(
+    (message) => message.id === pending.messageId,
+  )
+
+  if (!match || !isNotifiableMessage(match)) {
+    return null
+  }
+
+  const built = await buildMessageEmailForMessage(
+    config,
+    tokens,
+    fetchImpl,
+    match,
+  )
+
+  return 'email' in built ? built : null
+}
+
+/* Next undelivered order event at/after the cursor.
+ * Ignored event types advance the returned cursor but
+ * never produce email. Returns null when the bounded
+ * scan finds no pending event. */
+async function findNextOrderEvent(
+  config: NotifyConfig,
+  kv: NotifyKv,
+  tokens: NotifyOAuthTokens,
+  fetchImpl: FetchImpl,
+  cursor: StoredCursor,
+): Promise<
+  | {
+      event: NotifyOrderEvent
+      advanceCursorTo: string
+    }
+  | { none: true }
+> {
+  let from: string | null = cursor.lastId
+  let advanceCursorTo = cursor.lastId
+
+  for (
+    let page = 0;
+    page < ORDER_PULL_MAX_PAGES;
+    page += 1
+  ) {
+    const fetched = await fetchJson(
+      `${config.apiUrl}/order/events?limit=${ORDER_PAGE_LIMIT}` +
+        (from
+          ? `&from=${encodeURIComponent(from)}`
+          : ''),
+      tokens,
+      config,
+      fetchImpl,
+    )
+
+    if (!fetched.ok) {
+      notifyWarn('notify order poll failed', {
+        httpStatus: fetched.status,
+      })
+      return { none: true }
+    }
+
+    const events = parseOrderEvents(fetched.data)
+
+    if (events.length === 0) {
+      break
+    }
+
+    for (const event of events) {
+      if (classifyOrderEvent(event.type) === null) {
+        advanceCursorTo = event.id
+        continue
+      }
+
+      if (
+        (await kv.get(
+          NOTIFY_KV_KEYS.sentOrder(event.id),
+        )) !== null
+      ) {
+        advanceCursorTo = event.id
+        continue
+      }
+
+      return { event, advanceCursorTo }
+    }
+
+    from = events[events.length - 1]!.id
+
+    if (events.length < ORDER_PAGE_LIMIT) {
+      break
+    }
+  }
+
+  if (advanceCursorTo !== cursor.lastId) {
+    await kv.set(NOTIFY_KV_KEYS.orderCursor, {
+      lastId: advanceCursorTo,
+      updatedAt: new Date().toISOString(),
+    } satisfies StoredCursor)
+  }
+
+  return { none: true }
+}
+
+export async function handleNotifyPull(
+  auth: BridgeRequestAuth,
+  deps: BridgeDeps = {},
+): Promise<
+  | { httpStatus: 401; reason: string }
+  | { httpStatus: 503; reason: string }
+  | { httpStatus: 200; result: NotifyPullResult }
+> {
+  const environment = deps.environment ?? process.env
+  const nowMs = deps.nowMs ?? Date.now()
+  const fetchImpl = deps.fetchImpl ?? defaultFetch()
+
+  let config: NotifyConfig
+
+  try {
+    config = resolveNotifyConfig(environment)
+  } catch {
+    return { httpStatus: 503, reason: 'NOT_CONFIGURED' }
+  }
+
+  const kv = deps.kv ?? (await getNotifyKvStore())
+  const authenticated = await authenticateBridgeRequest(
+    config,
+    kv,
+    auth,
+    nowMs,
+  )
+
+  if (!authenticated.ok) {
+    return { httpStatus: 401, reason: authenticated.reason }
+  }
+
+  const body = (
+    recordOf(auth.body) ?? {}
+  ) as Record<string, unknown>
+
+  // Safe connectivity check: validates HMAC, performs no
+  // Allegro poll, mutates no cursor, sends no email. When
+  // the flag is off it still reports DISABLED (auth already
+  // proved the bridge + secret work).
+  if (body['mode'] === 'ping') {
+    return {
+      httpStatus: 200,
+      result: config.enabled
+        ? { action: 'PONG' }
+        : { action: 'DISABLED' },
+    }
+  }
+
+  if (!config.enabled) {
+    return {
+      httpStatus: 200,
+      result: { action: 'DISABLED' },
+    }
+  }
+
+  const session = await ensureAccessToken(
+    config,
+    kv,
+    nowMs,
+    fetchImpl,
+  )
+
+  if ('missing' in session) {
+    notifyWarn('notify pull needs OAuth bootstrap', {})
+    return {
+      httpStatus: 200,
+      result: { action: 'NEEDS_BOOTSTRAP' },
+    }
+  }
+
+  const { tokens } = session
+
+  // A pending claim wins over everything newer: the
+  // failed email is retried before its cursor advances.
+  const pending =
+    await kv.get<BridgePending>(NOTIFY_KV_KEYS.pending)
+
+  if (pending && typeof pending.deliveryId === 'string') {
+    const rebuilt = await rebuildPendingEmail(
+      config,
+      tokens,
+      fetchImpl,
+      pending,
+    )
+
+    if (rebuilt) {
+      return {
+        httpStatus: 200,
+        result: {
+          action: 'EMAIL',
+          deliveryId: pending.deliveryId,
+          email: rebuilt.email,
+        },
+      }
+    }
+
+    // Stale claim (event no longer resolvable): drop it
+    // and continue selecting fresh work below. Dropping
+    // is loss-free here because the event was never
+    // marked delivered AND can no longer be found — the
+    // next scan re-derives state from the cursors.
+    notifyWarn('notify pending claim dropped', {
+      eventType: pending.eventType,
+      eventId: pending.eventId,
+    })
+    await kv.delete(NOTIFY_KV_KEYS.pending)
+  }
+
+  // Orders first (matches the legacy tick priority).
+  const orderCursor = await kv.get<StoredCursor>(
+    NOTIFY_KV_KEYS.orderCursor,
+  )
+
+  if (!isValidCursor(orderCursor)) {
+    // Historical-flood fix: walk the whole journal to
+    // the true high-water mark, store ONLY the cursor,
+    // send ZERO emails, create ZERO delivered markers.
+    // Only events appearing AFTER this seed may notify.
+    const seeded = await fetchOrderHighWater(
+      config,
+      tokens,
+      fetchImpl,
+      null,
+    )
+
+    if (!seeded.ok) {
+      notifyWarn('notify order seed poll failed', {
+        httpStatus: seeded.status,
+      })
+      return {
+        httpStatus: 200,
+        result: { action: 'NOOP' },
+      }
+    }
+
+    if (seeded.highWater.highWaterId) {
+      await kv.set(NOTIFY_KV_KEYS.orderCursor, {
+        lastId: seeded.highWater.highWaterId,
+        updatedAt: new Date(nowMs).toISOString(),
+      } satisfies StoredCursor)
+      notifyLog('notify order cursor seeded', {
+        eventId: seeded.highWater.highWaterId,
+        eventsSeen: seeded.highWater.eventsScanned,
+      })
+    }
+
+    return {
+      httpStatus: 200,
+      result: { action: 'SEEDED', channel: 'ORDER' },
+    }
+  }
+
+  const nextOrder = await findNextOrderEvent(
+    config,
+    kv,
+    tokens,
+    fetchImpl,
+    orderCursor,
+  )
+
+  if (!('none' in nextOrder)) {
+    const built = await buildOrderEmailForEvent(
+      config,
+      tokens,
+      fetchImpl,
+      nextOrder.event,
+    )
+
+    if ('email' in built) {
+      const deliveryId = orderDeliveryId(
+        nextOrder.event.id,
+      )
+      await kv.set(
+        NOTIFY_KV_KEYS.pending,
+        {
+          deliveryId,
+          channel: 'order',
+          eventId: nextOrder.event.id,
+          eventType: nextOrder.event.type,
+          orderId: nextOrder.event.orderId,
+          threadId: null,
+          offerId: null,
+          messageId: null,
+          cursorBefore: orderCursor.lastId,
+          createdAt: new Date(nowMs).toISOString(),
+        } satisfies BridgePending,
+        { ttlMs: PENDING_TTL_MS },
+      )
+
+      return {
+        httpStatus: 200,
+        result: {
+          action: 'EMAIL',
+          deliveryId,
+          email: built.email,
+        },
+      }
+    }
+  }
+
+  // Buyer messages (cursor preserved across the
+  // migration; a fresh environment seeds silently).
+  const messageCursor = await kv.get<StoredCursor>(
+    NOTIFY_KV_KEYS.messageCursor,
+  )
+  const threadsFetched = await fetchAllThreadIds(
+    config,
+    tokens,
+    fetchImpl,
+  )
+
+  if (!threadsFetched.ok) {
+    notifyWarn('notify thread poll failed', {
+      httpStatus: threadsFetched.status,
+    })
+    return {
+      httpStatus: 200,
+      result: { action: 'NOOP' },
+    }
+  }
+
+  const candidates: NotifyMessage[] = []
+
+  for (const threadId of threadsFetched.threadIds) {
+    const messagesFetched =
+      await fetchAllThreadMessages(
+        config,
+        tokens,
+        fetchImpl,
+        threadId,
+      )
+
+    if (!messagesFetched.ok) {
+      notifyWarn('notify message poll failed', {
+        httpStatus: messagesFetched.status,
+        threadId,
+      })
+      continue
+    }
+
+    for (const message of messagesFetched.messages) {
+      if (
+        isNotifiableMessage(message) &&
+        (!messageCursor ||
+          message.id > messageCursor.lastId)
+      ) {
+        candidates.push(message)
+      }
+    }
+  }
+
+  candidates.sort((left, right) =>
+    left.id < right.id ? -1 : left.id > right.id ? 1 : 0,
+  )
+
+  if (!isValidCursor(messageCursor)) {
+    if (candidates.length > 0) {
+      const newest = candidates[candidates.length - 1]!
+
+      await kv.set(NOTIFY_KV_KEYS.messageCursor, {
+        lastId: newest.id,
+        updatedAt: new Date(nowMs).toISOString(),
+      } satisfies StoredCursor)
+      notifyLog('notify message cursor seeded', {
+        eventId: newest.id,
+        eventsSeen: candidates.length,
+      })
+    }
+
+    return {
+      httpStatus: 200,
+      result: { action: 'SEEDED', channel: 'MESSAGE' },
+    }
+  }
+
+  for (const message of candidates) {
+    if (
+      (await kv.get(
+        NOTIFY_KV_KEYS.sentMessage(message.id),
+      )) !== null
+    ) {
+      continue
+    }
+
+    const built = await buildMessageEmailForMessage(
+      config,
+      tokens,
+      fetchImpl,
+      message,
+    )
+
+    if (!('email' in built)) {
+      continue
+    }
+
+    const deliveryId = messageDeliveryId(message.id)
+    await kv.set(
+      NOTIFY_KV_KEYS.pending,
+      {
+        deliveryId,
+        channel: 'message',
+        eventId: message.id,
+        eventType: 'MESSAGE',
+        orderId: message.orderId,
+        threadId: message.threadId,
+        offerId: message.offerId,
+        messageId: message.id,
+        cursorBefore: messageCursor.lastId,
+        createdAt: new Date(nowMs).toISOString(),
+      } satisfies BridgePending,
+      { ttlMs: PENDING_TTL_MS },
+    )
+
+    return {
+      httpStatus: 200,
+      result: {
+        action: 'EMAIL',
+        deliveryId,
+        email: built.email,
+      },
+    }
+  }
+
+  return {
+    httpStatus: 200,
+    result: { action: 'NOOP' },
+  }
+}
+
+export async function handleNotifyAck(
+  auth: BridgeRequestAuth,
+  deps: BridgeDeps = {},
+): Promise<
+  | { httpStatus: 401; reason: string }
+  | { httpStatus: 503; reason: string }
+  | { httpStatus: 200; result: NotifyAckResult }
+> {
+  const environment = deps.environment ?? process.env
+  const nowMs = deps.nowMs ?? Date.now()
+
+  let config: NotifyConfig
+
+  try {
+    config = resolveNotifyConfig(environment)
+  } catch {
+    return { httpStatus: 503, reason: 'NOT_CONFIGURED' }
+  }
+
+  const kv = deps.kv ?? (await getNotifyKvStore())
+  const authenticated = await authenticateBridgeRequest(
+    config,
+    kv,
+    auth,
+    nowMs,
+  )
+
+  if (!authenticated.ok) {
+    return { httpStatus: 401, reason: authenticated.reason }
+  }
+
+  // Fail closed while disabled: never mutate delivery
+  // state, even for a well-formed ACK.
+  if (!config.enabled) {
+    return {
+      httpStatus: 200,
+      result: { action: 'DISABLED' },
+    }
+  }
+
+  const parsed = parseDeliveryId(
+    recordOf(auth.body)?.['deliveryId'],
+  )
+
+  if (!parsed) {
+    return {
+      httpStatus: 200,
+      result: { action: 'UNKNOWN' },
+    }
+  }
+
+  const deliveryId =
+    parsed.channel === 'order'
+      ? orderDeliveryId(parsed.eventId)
+      : messageDeliveryId(parsed.eventId)
+  const pending =
+    await kv.get<BridgePending>(NOTIFY_KV_KEYS.pending)
+
+  if (
+    pending &&
+    pending.deliveryId === deliveryId &&
+    pending.eventId === parsed.eventId
+  ) {
+    const markerKey =
+      pending.channel === 'order'
+        ? NOTIFY_KV_KEYS.sentOrder(pending.eventId)
+        : NOTIFY_KV_KEYS.sentMessage(pending.eventId)
+
+    await kv.set(
+      markerKey,
+      {
+        deliveredAt: new Date(nowMs).toISOString(),
+        channel:
+          pending.channel === 'order'
+            ? pending.eventType === 'READY_FOR_PROCESSING'
+              ? 'order'
+              : 'cancellation'
+            : 'message',
+      } satisfies StoredDelivery,
+      { ttlMs: DEDUPE_TTL_MS },
+    )
+
+    // Advance the cursor ONLY when it still equals the
+    // value observed at pull time. If an operator
+    // reseeded forward in between, the cursor stays
+    // forward (never moved backward into history).
+    const cursorKey =
+      pending.channel === 'order'
+        ? NOTIFY_KV_KEYS.orderCursor
+        : NOTIFY_KV_KEYS.messageCursor
+    const current =
+      await kv.get<StoredCursor>(cursorKey)
+
+    if (
+      (current === null && pending.cursorBefore === null) ||
+      (current !== null &&
+        current.lastId === pending.cursorBefore)
+    ) {
+      await kv.set(cursorKey, {
+        lastId: pending.eventId,
+        updatedAt: new Date(nowMs).toISOString(),
+      } satisfies StoredCursor)
+    }
+
+    await kv.delete(NOTIFY_KV_KEYS.pending)
+
+    return {
+      httpStatus: 200,
+      result: { action: 'ACKED', duplicate: false },
+    }
+  }
+
+  // Idempotent retry: the claim is gone but the event was
+  // already marked delivered (e.g. the first ACK commit
+  // landed, then the response was lost).
+  const markerKey =
+    parsed.channel === 'order'
+      ? NOTIFY_KV_KEYS.sentOrder(parsed.eventId)
+      : NOTIFY_KV_KEYS.sentMessage(parsed.eventId)
+
+  if ((await kv.get(markerKey)) !== null) {
+    return {
+      httpStatus: 200,
+      result: { action: 'ACKED', duplicate: true },
+    }
+  }
+
+  return {
+    httpStatus: 200,
+    result: { action: 'UNKNOWN' },
+  }
+}
+
+/* ============================================================
+ * ADMIN-only safe order recovery (works while disabled).
+ * Walks the journal to the current high-water mark, writes
+ * ONLY the order cursor, drops a stale ORDER pending claim
+ * if one exists, sends ZERO emails, creates ZERO delivered
+ * markers, and never touches the message cursor/dedupe.
+ * ============================================================ */
+
+export type NotifyReseedResult = {
+  previousCursor: string | null
+  highWaterId: string | null
+  eventsScanned: number
+  pages: number
+  clearedOrderPending: boolean
+}
+
+export async function reseedNotifyOrders(
+  deps: BridgeDeps = {},
+): Promise<
+  | { ok: true; reseed: NotifyReseedResult }
+  | { ok: false; reason: string; status?: number }
+> {
+  const environment = deps.environment ?? process.env
+  const nowMs = deps.nowMs ?? Date.now()
+  const fetchImpl = deps.fetchImpl ?? defaultFetch()
+
+  let config: NotifyConfig
+
+  try {
+    config = resolveNotifyConfig(environment)
+  } catch {
+    return { ok: false, reason: 'NOT_CONFIGURED' }
+  }
+
+  const kv = deps.kv ?? (await getNotifyKvStore())
+  const session = await ensureAccessToken(
+    config,
+    kv,
+    nowMs,
+    fetchImpl,
+  )
+
+  if ('missing' in session) {
+    return { ok: false, reason: 'NEEDS_BOOTSTRAP' }
+  }
+
+  const previous = await kv.get<StoredCursor>(
+    NOTIFY_KV_KEYS.orderCursor,
+  )
+  const highWater = await fetchOrderHighWater(
+    config,
+    session.tokens,
+    fetchImpl,
+    null,
+  )
+
+  if (!highWater.ok) {
+    return {
+      ok: false,
+      reason: 'ORDER_POLL_FAILED',
+      status: highWater.status,
+    }
+  }
+
+  let clearedOrderPending = false
+  const pending =
+    await kv.get<BridgePending>(NOTIFY_KV_KEYS.pending)
+
+  if (pending && pending.channel === 'order') {
+    await kv.delete(NOTIFY_KV_KEYS.pending)
+    clearedOrderPending = true
+  }
+
+  if (highWater.highWater.highWaterId) {
+    await kv.set(NOTIFY_KV_KEYS.orderCursor, {
+      lastId: highWater.highWater.highWaterId,
+      updatedAt: new Date(nowMs).toISOString(),
+    } satisfies StoredCursor)
+  }
+
+  notifyLog('notify orders reseeded', {
+    eventsScanned: highWater.highWater.eventsScanned,
+    clearedOrderPending,
+  })
+
+  return {
+    ok: true,
+    reseed: {
+      previousCursor: previous?.lastId ?? null,
+      highWaterId:
+        highWater.highWater.highWaterId,
+      eventsScanned:
+        highWater.highWater.eventsScanned,
+      pages: highWater.highWater.pages,
+      clearedOrderPending,
+    },
+  }
+}
+
+/* ============================================================
  * Notification tick: ONE cron invocation handles order
  * events and buyer messages with effectively-once delivery.
  *
@@ -2346,6 +3586,17 @@ async function deliverOneEmail(
     return 'DUPLICATE'
   }
 
+  // Legacy Deno -> Web App push path (only the tick
+  // uses it; production uses pull/ack). Without a
+  // configured relay URL the event is held, never lost.
+  if (!config.relayUrl) {
+    notifyWarn('notify relay URL missing, event held', {
+      eventType: eventRef.type,
+      eventId: eventRef.id,
+    })
+    return 'FAILED'
+  }
+
   const envelope = await signRelayEnvelope(
     config.relaySecret,
     new Date(nowMs).toISOString(),
@@ -2439,9 +3690,47 @@ async function processOrderEvents(
 ): Promise<void> {
   const cursor =
     await kv.get<StoredCursor>(NOTIFY_KV_KEYS.orderCursor)
+
+  if (!isValidCursor(cursor)) {
+    // First run: walk the WHOLE journal to the true
+    // high-water mark (one 100-row page is never assumed
+    // sufficient) and store ONLY the cursor. Nothing is
+    // sent on this tick: only events appearing AFTER this
+    // seed may generate emails.
+    const highWater = await fetchOrderHighWater(
+      config,
+      tokens,
+      fetchImpl,
+      null,
+    )
+
+    if (highWater.ok) {
+      summary.orderEventsSeen +=
+        highWater.highWater.eventsScanned
+
+      if (highWater.highWater.highWaterId) {
+        await kv.set(NOTIFY_KV_KEYS.orderCursor, {
+          lastId: highWater.highWater.highWaterId,
+          updatedAt: new Date(nowMs).toISOString(),
+        } satisfies StoredCursor)
+        notifyLog('notify order cursor seeded', {
+          eventId: highWater.highWater.highWaterId,
+          eventsSeen:
+            highWater.highWater.eventsScanned,
+        })
+      }
+    } else {
+      notifyWarn('notify order seed poll failed', {
+        httpStatus: highWater.status,
+      })
+    }
+
+    return
+  }
+
   const eventsUrl =
-    `${config.apiUrl}/order/events?limit=100` +
-    (cursor ? `&from=${encodeURIComponent(cursor.lastId)}` : '')
+    `${config.apiUrl}/order/events?limit=${ORDER_PAGE_LIMIT}` +
+    `&from=${encodeURIComponent(cursor.lastId)}`
   const fetched = await fetchJson(
     eventsUrl,
     tokens,
@@ -2459,31 +3748,15 @@ async function processOrderEvents(
   const events = parseOrderEvents(fetched.data)
   summary.orderEventsSeen += events.length
 
-  if (!cursor && events.length > 0) {
-    // First run: seed the cursor at the newest event so
-    // enabling the bridge does not flood the mailbox with
-    // historic events. Nothing is sent on this tick.
-    const newest = events[events.length - 1]!
-
-    await kv.set(NOTIFY_KV_KEYS.orderCursor, {
-      lastId: newest.id,
-      updatedAt: new Date(nowMs).toISOString(),
-    } satisfies StoredCursor)
-    notifyLog('notify order cursor seeded', {
-      eventId: newest.id,
-      eventsSeen: events.length,
-    })
-
-    return
-  }
-
   // Cursor advances over the leading delivered-or-ignored
   // run only. A failed/held event stops advancement but
   // later independent events are still attempted (their
   // own dedupe keys prevent repeats), so nothing is lost.
+  // (cursor is a valid StoredCursor here: the missing-
+  // cursor branch above always returns early.)
   let stopped = false
   let contiguousDeliveredThrough: string | null =
-    cursor?.lastId ?? null
+    cursor.lastId
 
   for (const event of events) {
     const kind = classifyOrderEvent(event.type)
@@ -2570,7 +3843,7 @@ async function processOrderEvents(
 
   if (
     contiguousDeliveredThrough !== null &&
-    contiguousDeliveredThrough !== cursor?.lastId
+    contiguousDeliveredThrough !== cursor.lastId
   ) {
     await kv.set(NOTIFY_KV_KEYS.orderCursor, {
       lastId: contiguousDeliveredThrough,

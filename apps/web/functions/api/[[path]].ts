@@ -8,15 +8,20 @@ const SAFE_METHODS = new Set([
   'OPTIONS',
 ])
 
+// Transport-public proxy paths (forwarded without a Bearer
+// token). Notification OAuth callback: Allegro redirects the
+// browser here directly (Deno validates code + single-use KV
+// state + PKCE). Pull/ack bridge: Apps Script -> Deno (the
+// Deno -> Web App relay is retired); Deno still requires the
+// X-Allegro-Notify-* HMAC on every request.
+// notify-connect and notify-reseed-orders must never be
+// listed here.
 const PUBLIC_PROXY_PATHS = new Set([
   'health',
   'auth/allegro/callback',
-  // Notification OAuth callback: Allegro redirects the
-  // browser here directly and cannot present a Commerce Hub
-  // Bearer token. Mirrors the primary callback above; the
-  // Deno API still validates code + single-use KV state +
-  // PKCE before issuing any token.
   'auth/allegro/notify-callback',
+  'auth/allegro/notify-pull',
+  'auth/allegro/notify-ack',
 ])
 
 function errorResponse(
