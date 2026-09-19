@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHmac } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { describe, it } from 'node:test'
@@ -1183,6 +1184,237 @@ function readBridgeSource(relativePath: string) {
     'utf8',
   )
 }
+
+void describe('bridge ping cross-runtime vector', () => {
+  /*
+   * NEW bridge-request vector (header format), distinct from
+   * the legacy relay-envelope vector (signature inside the
+   * JSON body). Fixed inputs agreed with Code.gs
+   * testBridgeConnection: body {"mode":"ping"}.
+   *
+   * gasSignBridgeRequest() below is an independent
+   * Apps Script-semantics port: same canonicalJson code
+   * shape as Code.gs, node:crypto standing in for
+   * Utilities.computeHmacSha256Signature(message, secret,
+   * UTF_8). It must agree byte-for-byte with the Deno
+   * implementation, and the pinned hex guards regressions.
+   */
+  const PING_TIMESTAMP = '2026-09-19T14:00:00.000Z'
+  const PING_NONCE = '00112233445566778899aabbccddeeff'
+  const PING_SECRET = 'test-relay-secret-123'
+  const PING_BODY = { mode: 'ping' }
+  const PING_SIGNATURE =
+    'a6400053e2485926fbd6da1012741c9c25ebf48fe8c15d946267521b18f1bbae'
+
+  function gasCanonicalJson(value: unknown): string {
+    if (value === null || value === undefined) {
+      return 'null'
+    }
+
+    if (
+      Object.prototype.toString.call(value) ===
+      '[object Array]'
+    ) {
+      return (
+        '[' +
+        (value as unknown[])
+          .map(gasCanonicalJson)
+          .join(',') +
+        ']'
+      )
+    }
+
+    if (typeof value === 'object') {
+      const keys = Object.keys(
+        value as Record<string, unknown>,
+      ).sort()
+
+      return (
+        '{' +
+        keys
+          .map(
+            (key) =>
+              JSON.stringify(key) +
+              ':' +
+              gasCanonicalJson(
+                (value as Record<string, unknown>)[key],
+              ),
+          )
+          .join(',') +
+        '}'
+      )
+    }
+
+    return JSON.stringify(value)
+  }
+
+  function gasSignBridgeRequest(
+    secret: string,
+    timestamp: string,
+    nonce: string,
+    body: unknown,
+  ) {
+    const message =
+      timestamp + '\n' + nonce + '\n' + gasCanonicalJson(body)
+
+    return {
+      message,
+      signature: createHmac(
+        'sha256',
+        Buffer.from(secret, 'utf8'),
+      )
+        .update(Buffer.from(message, 'utf8'))
+        .digest('hex'),
+    }
+  }
+
+  void it('matches the Apps Script pipeline byte-for-byte', async () => {
+    const independent = gasSignBridgeRequest(
+      PING_SECRET,
+      PING_TIMESTAMP,
+      PING_NONCE,
+      PING_BODY,
+    )
+
+    assert.equal(
+      independent.message,
+      bridgeCanonicalMessage(
+        PING_TIMESTAMP,
+        PING_NONCE,
+        PING_BODY,
+      ),
+    )
+    assert.equal(independent.signature, PING_SIGNATURE)
+    assert.equal(
+      await hmacSha256Hex(
+        PING_SECRET,
+        bridgeCanonicalMessage(
+          PING_TIMESTAMP,
+          PING_NONCE,
+          PING_BODY,
+        ),
+      ),
+      PING_SIGNATURE,
+    )
+  })
+
+  void it('accepts the exact ping vector in the real verifier', async () => {
+    assert.deepEqual(
+      await verifyBridgeRequest(
+        PING_SECRET,
+        PING_TIMESTAMP,
+        PING_NONCE,
+        PING_SIGNATURE,
+        PING_BODY,
+        Date.parse(PING_TIMESTAMP),
+      ),
+      { ok: true, reason: 'OK' },
+    )
+  })
+
+  void it('accepts the exact ping vector in the real pull handler', async () => {
+    const kv = createMemoryNotifyKv()
+    await seedSession(kv)
+
+    const outcome = await handleNotifyPull(
+      {
+        timestamp: PING_TIMESTAMP,
+        nonce: 'ping-vector-pull-1',
+        signature: (
+          await gasSignBridgeRequest(
+            PING_SECRET,
+            PING_TIMESTAMP,
+            'ping-vector-pull-1',
+            PING_BODY,
+          )
+        ).signature,
+        body: PING_BODY,
+      },
+      {
+        environment: baseEnvironment({
+          ALLEGRO_NOTIFY_RELAY_SECRET: PING_SECRET,
+        }),
+        kv,
+        fetchImpl: journalFetch([]),
+        nowMs: Date.parse(PING_TIMESTAMP),
+      },
+    )
+
+    assert.deepEqual(outcome, {
+      httpStatus: 200,
+      result: { action: 'PONG' },
+    })
+  })
+
+  void it('rejects one-byte body/timestamp/nonce/secret changes', async () => {
+    const nowMs = Date.parse(PING_TIMESTAMP)
+    const cases: Array<{
+      name: string
+      secret: string
+      timestamp: string
+      nonce: string
+      body: unknown
+    }> = [
+      {
+        name: 'body',
+        secret: PING_SECRET,
+        timestamp: PING_TIMESTAMP,
+        nonce: PING_NONCE,
+        body: { mode: 'pong' },
+      },
+      {
+        name: 'timestamp',
+        secret: PING_SECRET,
+        timestamp: '2026-09-19T14:00:00.001Z',
+        nonce: PING_NONCE,
+        body: PING_BODY,
+      },
+      {
+        name: 'nonce',
+        secret: PING_SECRET,
+        timestamp: PING_TIMESTAMP,
+        nonce: '00112233445566778899aabbccddeefe',
+        body: PING_BODY,
+      },
+      {
+        name: 'secret',
+        secret: 'test-relay-secret-124',
+        timestamp: PING_TIMESTAMP,
+        nonce: PING_NONCE,
+        body: PING_BODY,
+      },
+    ]
+
+    for (const mutated of cases) {
+      assert.deepEqual(
+        await verifyBridgeRequest(
+          mutated.secret,
+          mutated.timestamp,
+          mutated.nonce,
+          PING_SIGNATURE,
+          mutated.body,
+          nowMs,
+        ),
+        { ok: false, reason: 'BAD_SIGNATURE' },
+        `mutated ${mutated.name} must fail`,
+      )
+    }
+  })
+
+  void it('requires lowercase hex exactly as Apps Script sends it', async () => {
+    assert.deepEqual(
+      await verifyBridgeRequest(
+        PING_SECRET,
+        PING_TIMESTAMP,
+        PING_NONCE,
+        PING_SIGNATURE.toUpperCase(),
+        PING_BODY,
+        Date.parse(PING_TIMESTAMP),
+      ),
+      { ok: false, reason: 'BAD_SIGNATURE' },
+    )
+  })
+})
 
 void describe('bridge proxy origin handling', () => {
   const realFetch = globalThis.fetch

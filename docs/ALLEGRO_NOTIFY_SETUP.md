@@ -173,3 +173,30 @@ the notification cron is gone.
   true journal high-water mark (no historic email flood).
 - Deno logs contain only event types and technical IDs —
   never customer data.
+
+## 8. Troubleshooting BAD_SIGNATURE
+
+The pull/ack HMAC is byte-identical on both sides (pinned
+cross-runtime ping vector in `test/notify-bridge.test.ts`:
+body `{"mode":"ping"}`, timestamp
+`2026-09-19T14:00:00.000Z`, nonce
+`00112233445566778899aabbccddeeff`, signature
+`a64000…1bbae`). If production still answers `BAD_SIGNATURE`
+after setting the same secret on both sides, do NOT rotate
+again — check configuration instead:
+
+1. Deno Deploy deployments are immutable, including their
+   environment variables. Confirm the RUNNING production
+   revision was created AFTER the `ALLEGRO_NOTIFY_RELAY_SECRET`
+   change (dashboard → Deployments → timestamps). If it
+   predates the change, redeploy/promote — no code or secret
+   change is needed. The code reads `process.env` per request
+   and caches nothing.
+2. Compare secret LENGTH only (never values): if the Apps
+   Script `RELAY_SECRET` length differs from the value saved
+   in Deno, one side gained invisible characters while
+   pasting (trailing newline/space). Re-paste carefully,
+   then redeploy Deno per step 1.
+3. Confirm the Apps Script project running
+   `testBridgeConnection()` is the one holding the current
+   `Code.gs` + `RELAY_SECRET` (no stale duplicate project).
