@@ -1859,6 +1859,10 @@ void describe('notify diagnostics', () => {
           `diagnostic leaks: ${forbidden}`,
         )
       }
+      assert.deepEqual(
+        body['lastProcessedOrderEvents'],
+        [],
+      )
     } finally {
       globalThis.fetch = realFetch
       setNotifyKvStore(null)
@@ -1873,10 +1877,13 @@ void describe('notify diagnostics', () => {
 
     // Read-only: cursor/dedupe/pending untouched.
     assert.deepEqual(await kvSnapshot(kv), before)
-    // Only GETs: stats + one bounded events page.
+    // Only GETs: stats + one bounded events page + the
+    // history scan (single short page here; cursor ev-0 is
+    // not a journal event id, so the window is empty).
     assert.deepEqual(stubCalls, [
       'https://api.test/order/event-stats',
       'https://api.test/order/events?from=ev-0&limit=20',
+      'https://api.test/order/events?limit=100',
     ])
   })
 
@@ -1922,6 +1929,147 @@ void describe('notify diagnostics', () => {
         [],
       )
     }
+  })
+
+  void it('returns the last processed events in journal order, max 5', async () => {
+    const kv = createMemoryNotifyKv()
+    await seedSession(kv)
+    await kv.set(NOTIFY_KV_KEYS.orderCursor, {
+      lastId: 'ev-7',
+      updatedAt: new Date(NOW_MS).toISOString(),
+    })
+    const events: OrderStubEvent[] = Array.from(
+      { length: 7 },
+      (_, index) => ({
+        id: `ev-${index + 1}`,
+        type:
+          index % 2 === 0
+            ? 'READY_FOR_PROCESSING'
+            : 'BUYER_CANCELLED',
+        orderId: `ord-${index + 1}`,
+      }),
+    )
+    const before = await kvSnapshot(kv)
+
+    const result = await getNotifyDiagnostics({
+      environment: baseEnvironment(),
+      kv,
+      fetchImpl: journalFetch(events),
+      nowMs: NOW_MS,
+    })
+
+    assert.equal(result.ok, true)
+
+    if (result.ok) {
+      assert.deepEqual(
+        result.diagnostics.lastProcessedOrderEvents.map(
+          (event) => event.id,
+        ),
+        ['ev-3', 'ev-4', 'ev-5', 'ev-6', 'ev-7'],
+      )
+      assert.deepEqual(
+        result.diagnostics.lastProcessedOrderEvents[0],
+        {
+          id: 'ev-3',
+          type: 'READY_FOR_PROCESSING',
+          checkoutFormId: 'ord-3',
+          occurredAt: '2026-09-19T07:00:00.000Z',
+        },
+      )
+
+      for (const event of result.diagnostics
+        .lastProcessedOrderEvents) {
+        assert.deepEqual(Object.keys(event).sort(), [
+          'checkoutFormId',
+          'id',
+          'occurredAt',
+          'type',
+        ])
+      }
+
+      const serialized = JSON.stringify(result.diagnostics)
+      for (const forbidden of [
+        'buyer42',
+        'example.com',
+        'phone',
+      ]) {
+        assert.ok(
+          !serialized.includes(forbidden),
+          `diagnostic leaks: ${forbidden}`,
+        )
+      }
+    }
+
+    assert.deepEqual(await kvSnapshot(kv), before)
+  })
+
+  void it('ends the window at a mid-journal cursor', async () => {
+    const kv = createMemoryNotifyKv()
+    await seedSession(kv)
+    await kv.set(NOTIFY_KV_KEYS.orderCursor, {
+      lastId: 'ev-4',
+      updatedAt: new Date(NOW_MS).toISOString(),
+    })
+    const events: OrderStubEvent[] = Array.from(
+      { length: 7 },
+      (_, index) => ({
+        id: `ev-${index + 1}`,
+        type: 'READY_FOR_PROCESSING',
+        orderId: `ord-${index + 1}`,
+      }),
+    )
+
+    const result = await getNotifyDiagnostics({
+      environment: baseEnvironment(),
+      kv,
+      fetchImpl: journalFetch(events),
+      nowMs: NOW_MS,
+    })
+
+    assert.equal(result.ok, true)
+
+    if (result.ok) {
+      assert.deepEqual(
+        result.diagnostics.lastProcessedOrderEvents.map(
+          (event) => event.id,
+        ),
+        ['ev-1', 'ev-2', 'ev-3', 'ev-4'],
+      )
+    }
+  })
+
+  void it('stays bounded and empty when the cursor is out of scan reach', async () => {
+    const kv = createMemoryNotifyKv()
+    await seedSession(kv)
+    const events = manyHistoricalEvents(5050)
+    await kv.set(NOTIFY_KV_KEYS.orderCursor, {
+      lastId: 'ev-hist-5049',
+      updatedAt: new Date(NOW_MS).toISOString(),
+    })
+    const calls: string[] = []
+
+    const result = await getNotifyDiagnostics({
+      environment: baseEnvironment(),
+      kv,
+      fetchImpl: journalFetch(events, [], calls),
+      nowMs: NOW_MS,
+    })
+
+    assert.equal(result.ok, true)
+
+    if (result.ok) {
+      assert.deepEqual(
+        result.diagnostics.lastProcessedOrderEvents,
+        [],
+      )
+    }
+
+    const scans = calls.filter(
+      (url) =>
+        url.includes('/order/events?') &&
+        !url.includes('from=ev-hist-5049&limit=20'),
+    )
+    assert.equal(scans.length, 50)
   })
 
   void it('is never transport-public', () => {

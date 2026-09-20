@@ -2178,6 +2178,16 @@ export async function postRelayEmail(
     : { ok: false, status: response.status }
 }
 
+/* Diagnostic history scan bound: the order-events journal
+ * pages forward only, so predecessors of the cursor are
+ * found by scanning from the journal start with a flat
+ * 5-record sliding window. 50 pages (5000 events) keeps a
+ * manual ADMIN call bounded; when the cursor is not reached
+ * inside the bound the field is honestly empty instead of
+ * fabricated. */
+const DIAGNOSTIC_HISTORY_MAX_PAGES = 50
+const DIAGNOSTIC_HISTORY_WINDOW = 5
+
 /* ============================================================
  * Pull/ack bridge authentication (Apps Script -> Hub).
  *
@@ -3411,6 +3421,7 @@ export type NotifyDiagnostics = {
     occurredAt: string | null
   } | null
   eventsAfterCursor: NotifyDiagnosticsEvent[]
+  lastProcessedOrderEvents: NotifyDiagnosticsEvent[]
 }
 
 /* /order/event-stats shape is parsed defensively: only a
@@ -3545,6 +3556,87 @@ export async function getNotifyDiagnostics(
     }))
   }
 
+  // Predecessors of the cursor: the journal pages forward
+  // only (`from` continues AFTER an id), so walk from the
+  // journal start with a flat sliding window and stop at
+  // the cursor id itself. Matching is by id equality only
+  // — opaque ids are never ordered or compared. The window
+  // holds whitelisted technical fields; checkout-form
+  // detail is never fetched here, so customer data never
+  // even enters memory on this path.
+  let lastProcessedOrderEvents: NotifyDiagnosticsEvent[] =
+    []
+
+  if (isValidCursor(orderCursor)) {
+    const window: NotifyDiagnosticsEvent[] = []
+    let from: string | null = null
+    let reached = false
+
+    for (
+      let page = 0;
+      page < DIAGNOSTIC_HISTORY_MAX_PAGES;
+      page += 1
+    ) {
+      const historyFetched = await fetchJson(
+        `${config.apiUrl}/order/events?limit=${ORDER_PAGE_LIMIT}` +
+          (from
+            ? `&from=${encodeURIComponent(from)}`
+            : ''),
+        tokens,
+        config,
+        fetchImpl,
+      )
+
+      if (!historyFetched.ok) {
+        return {
+          ok: false,
+          reason: 'DIAGNOSTIC_POLL_FAILED',
+          status: historyFetched.status,
+        }
+      }
+
+      const history = parseOrderEvents(
+        historyFetched.data,
+      )
+
+      if (history.length === 0) {
+        break
+      }
+
+      for (const event of history) {
+        window.push({
+          id: event.id,
+          type: event.type,
+          checkoutFormId: event.orderId,
+          occurredAt: event.occurredAt,
+        })
+
+        if (
+          window.length > DIAGNOSTIC_HISTORY_WINDOW
+        ) {
+          window.shift()
+        }
+
+        if (event.id === orderCursor.lastId) {
+          reached = true
+          break
+        }
+      }
+
+      if (reached) {
+        break
+      }
+
+      from = history[history.length - 1]!.id
+
+      if (history.length < ORDER_PAGE_LIMIT) {
+        break
+      }
+    }
+
+    lastProcessedOrderEvents = reached ? window : []
+  }
+
   return {
     ok: true,
     diagnostics: {
@@ -3564,6 +3656,7 @@ export async function getNotifyDiagnostics(
         statsFetched.data,
       ),
       eventsAfterCursor,
+      lastProcessedOrderEvents,
     },
   }
 }
