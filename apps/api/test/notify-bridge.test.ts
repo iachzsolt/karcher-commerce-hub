@@ -156,6 +156,7 @@ function journalFetch(
       occurredAt: '2026-09-19T07:59:00.000Z',
     },
   },
+  returns: unknown[] = [],
 ) {
   return async (input: string): Promise<Response> => {
     calls.push(input)
@@ -163,6 +164,31 @@ function journalFetch(
 
     if (url.pathname.endsWith('/order/event-stats')) {
       return jsonResponse(stats)
+    }
+
+    if (
+      url.pathname.endsWith('/order/customer-returns')
+    ) {
+      const from = url.searchParams.get('from')
+      const limit = Number(
+        url.searchParams.get('limit') ?? '100',
+      )
+      let start = 0
+
+      if (from) {
+        const index = returns.findIndex(
+          (ret) =>
+            (ret as { id?: unknown }).id === from,
+        )
+        start = index >= 0 ? index + 1 : 0
+      }
+
+      return jsonResponse({
+        customerReturns: returns.slice(
+          start,
+          start + limit,
+        ),
+      })
     }
 
     if (url.pathname.endsWith('/order/events')) {
@@ -1122,6 +1148,10 @@ void describe('message cursor preservation', () => {
     })
     await kv.set(NOTIFY_KV_KEYS.messageCursor, {
       lastId: 'm-0',
+      updatedAt: new Date(NOW_MS).toISOString(),
+    })
+    await kv.set(NOTIFY_KV_KEYS.returnCursor, {
+      lastId: 'ret-0',
       updatedAt: new Date(NOW_MS).toISOString(),
     })
 
@@ -2458,6 +2488,364 @@ void describe('notify preview', () => {
       'apps/web/functions/api/[[path]].ts',
     )
     assert.ok(!proxy.includes('notify-preview'))
+  })
+})
+
+void describe('customer returns', () => {
+  function returnPayload(
+    id: string,
+    overrides: Record<string, unknown> = {},
+  ) {
+    return {
+      id,
+      referenceNumber: `ref-${id}`,
+      order: { id: `ord-${id}` },
+      createdAt: '2026-09-19T07:00:00.000Z',
+      status: 'CREATED',
+      buyer: {
+        login: 'buyer42',
+        email: 'buyer42@example.com',
+      },
+      items: [
+        {
+          offer: { id: 'off-9', name: 'Karcher K 7' },
+          quantity: 1,
+          price: { amount: '129900', currency: 'HUF' },
+          reason: { type: 'DEFECT' },
+          userComment: 'Hibás a motor.',
+        },
+      ],
+      parcels: [
+        { carrier: 'GLS', trackingNumber: 'GLS123' },
+      ],
+      // Banking/refund data must never reach the email.
+      bankAccount: {
+        iban: 'HU00123456780000000000000000',
+        swift: 'BANKHUHB',
+      },
+      refund: { amount: '129900', currency: 'HUF' },
+      ...overrides,
+    }
+  }
+
+  function returnEnv(
+    overrides: Record<string, string | undefined> = {},
+  ) {
+    return baseEnvironment({
+      ALLEGRO_NOTIFY_RETURN_EMAIL: 'info.hu@karcher.com',
+      ...overrides,
+    })
+  }
+
+  async function seedStandardCursors(kv: NotifyKv) {
+    await seedSession(kv)
+    await kv.set(NOTIFY_KV_KEYS.orderCursor, {
+      lastId: 'ev-0',
+      updatedAt: new Date(NOW_MS).toISOString(),
+    })
+    await kv.set(NOTIFY_KV_KEYS.messageCursor, {
+      lastId: 'm-0',
+      updatedAt: new Date(NOW_MS).toISOString(),
+    })
+  }
+
+  void it('seeds the return high-water with zero historical emails', async () => {
+    const kv = createMemoryNotifyKv()
+    await seedStandardCursors(kv)
+    const fetchImpl = journalFetch([], [], [], undefined, [
+      returnPayload('ret-1'),
+      returnPayload('ret-2'),
+      returnPayload('ret-3'),
+    ])
+
+    const outcome = await handleNotifyPull(
+      await signedAuth({}),
+      {
+        environment: returnEnv(),
+        kv,
+        fetchImpl,
+        nowMs: NOW_MS,
+      },
+    )
+
+    assert.deepEqual(outcome, {
+      httpStatus: 200,
+      result: { action: 'SEEDED', channel: 'RETURN' },
+    })
+    assert.equal(
+      (
+        await kv.get<StoredCursor>(
+          NOTIFY_KV_KEYS.returnCursor,
+        )
+      )?.lastId,
+      'ret-3',
+    )
+    assert.equal(
+      await kv.get(NOTIFY_KV_KEYS.sentReturn('ret-1')),
+      null,
+    )
+    assert.equal(
+      await kv.get(NOTIFY_KV_KEYS.pending),
+      null,
+    )
+  })
+
+  void it('emails one new return and advances only on ACK', async () => {
+    const kv = createMemoryNotifyKv()
+    await seedStandardCursors(kv)
+    await kv.set(NOTIFY_KV_KEYS.returnCursor, {
+      lastId: 'ret-0',
+      updatedAt: new Date(NOW_MS).toISOString(),
+    })
+    const returns = [
+      returnPayload('ret-1'),
+      returnPayload('ret-2'),
+    ]
+    const deps = {
+      environment: returnEnv(),
+      kv,
+      fetchImpl: journalFetch([], [], [], undefined, returns),
+      nowMs: NOW_MS,
+    }
+
+    const first = await handleNotifyPull(
+      await signedAuth({}),
+      deps,
+    )
+    assert.equal(first.httpStatus, 200)
+
+    if (
+      first.httpStatus !== 200 ||
+      first.result.action !== 'EMAIL'
+    ) {
+      assert.fail('expected one return EMAIL')
+    }
+
+    assert.equal(
+      first.result.deliveryId,
+      'return:ret-1',
+    )
+    assert.equal(
+      first.result.email.to,
+      'info.hu@karcher.com',
+    )
+    assert.equal(
+      first.result.email.subject,
+      '[ALLEGRO] VISSZAKÜLDÉS – ord-ret-1',
+    )
+
+    // No ACK yet: same pending return re-offered.
+    const retry = await handleNotifyPull(
+      await signedAuth({}),
+      deps,
+    )
+    assert.deepEqual(retry, first)
+
+    const ack = await handleNotifyAck(
+      await signedAuth({ deliveryId: 'return:ret-1' }),
+      deps,
+    )
+    assert.deepEqual(ack, {
+      httpStatus: 200,
+      result: { action: 'ACKED', duplicate: false },
+    })
+    assert.notEqual(
+      await kv.get(NOTIFY_KV_KEYS.sentReturn('ret-1')),
+      null,
+    )
+    assert.equal(
+      (
+        await kv.get<StoredCursor>(
+          NOTIFY_KV_KEYS.returnCursor,
+        )
+      )?.lastId,
+      'ret-1',
+    )
+
+    // Second new return delivered one-by-one.
+    const second = await handleNotifyPull(
+      await signedAuth({}),
+      deps,
+    )
+
+    if (
+      second.httpStatus !== 200 ||
+      second.result.action !== 'EMAIL'
+    ) {
+      assert.fail('expected the second EMAIL')
+    }
+
+    assert.equal(
+      second.result.deliveryId,
+      'return:ret-2',
+    )
+
+    const ackAgain = await handleNotifyAck(
+      await signedAuth({ deliveryId: 'return:ret-1' }),
+      deps,
+    )
+    assert.deepEqual(ackAgain, {
+      httpStatus: 200,
+      result: { action: 'ACKED', duplicate: true },
+    })
+  })
+
+  void it('never re-emails a status change of a delivered return', async () => {
+    const kv = createMemoryNotifyKv()
+    await seedStandardCursors(kv)
+    await kv.set(NOTIFY_KV_KEYS.returnCursor, {
+      lastId: 'ret-1',
+      updatedAt: new Date(NOW_MS).toISOString(),
+    })
+    await kv.set(NOTIFY_KV_KEYS.sentReturn('ret-1'), {
+      deliveredAt: new Date(NOW_MS).toISOString(),
+      channel: 'return',
+    })
+    // Same return entity, later status: journal still
+    // lists it after the cursor.
+    const returns = [
+      returnPayload('ret-0'),
+      returnPayload('ret-1', { status: 'IN_TRANSIT' }),
+    ]
+
+    const outcome = await handleNotifyPull(
+      await signedAuth({}),
+      {
+        environment: returnEnv(),
+        kv,
+        fetchImpl: journalFetch(
+          [],
+          [],
+          [],
+          undefined,
+          returns,
+        ),
+        nowMs: NOW_MS,
+      },
+    )
+
+    assert.deepEqual(outcome, {
+      httpStatus: 200,
+      result: { action: 'NOOP' },
+    })
+  })
+
+  void it('renders return fields, escapes injection, hides banking', async () => {
+    const kv = createMemoryNotifyKv()
+    await seedStandardCursors(kv)
+    await kv.set(NOTIFY_KV_KEYS.returnCursor, {
+      lastId: 'ret-0',
+      updatedAt: new Date(NOW_MS).toISOString(),
+    })
+    const returns = [
+      returnPayload('ret-1', {
+        items: [
+          {
+            offer: {
+              id: 'off-9',
+              name: '<img src=x> Karcher',
+            },
+            quantity: 2,
+            price: { amount: '56980.00', currency: 'HUF' },
+            reason: { type: 'DEFECT' },
+            userComment: 'Első sor\nMásodik <b>sor</b>',
+          },
+        ],
+      }),
+    ]
+
+    const outcome = await handleNotifyPull(
+      await signedAuth({}),
+      {
+        environment: returnEnv(),
+        kv,
+        fetchImpl: journalFetch(
+          [],
+          [],
+          [],
+          undefined,
+          returns,
+        ),
+        nowMs: NOW_MS,
+      },
+    )
+
+    if (
+      outcome.httpStatus !== 200 ||
+      outcome.result.action !== 'EMAIL'
+    ) {
+      assert.fail('expected return EMAIL')
+    }
+
+    const { email } = outcome.result
+
+    for (const part of [
+      'VISSZAKÜLDÉS',
+      'ret-1',
+      'ref-ret-1',
+      'ord-ret-1',
+      'Termékvisszaküldés',
+      'VÁSÁRLÓ',
+      'buyer42',
+      'VISSZAKÜLDÖTT TERMÉKEK',
+      '56 980 Ft',
+      'DEFECT',
+      'VISSZAKÜLDÉSI CSOMAG',
+      'GLS123',
+    ]) {
+      const inText =
+        email.textBody.includes(part) ||
+        email.htmlBody.includes(part)
+      assert.ok(inText, `email must contain: ${part}`)
+    }
+
+    assert.ok(
+      email.htmlBody.includes(
+        'Első sor<br>Második &lt;b&gt;sor&lt;/b&gt;',
+      ),
+    )
+    assert.ok(
+      email.htmlBody.includes(
+        '&lt;img src=x&gt; Karcher',
+      ),
+    )
+
+    const serialized = email.textBody + email.htmlBody
+    for (const forbidden of [
+      'HU00123456780000000000000000',
+      'BANKHUHB',
+      'bankAccount',
+      'iban',
+      'swift',
+    ]) {
+      assert.ok(
+        !serialized.toLowerCase().includes(forbidden),
+        `email must not contain: ${forbidden}`,
+      )
+    }
+
+    // Pending claim holds technical IDs only.
+    const pending = await kv.get<BridgePending>(
+      NOTIFY_KV_KEYS.pending,
+    )
+    assert.deepEqual(
+      Object.keys(pending ?? {}).sort(),
+      [
+        'channel',
+        'createdAt',
+        'cursorBefore',
+        'deliveryId',
+        'eventId',
+        'eventType',
+        'messageId',
+        'offerId',
+        'orderId',
+        'threadId',
+      ].sort(),
+    )
+    assert.ok(
+      !JSON.stringify(pending).includes('buyer42'),
+    )
   })
 })
 

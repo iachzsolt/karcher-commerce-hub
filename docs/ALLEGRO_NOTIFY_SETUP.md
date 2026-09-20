@@ -53,6 +53,9 @@ Set these (values are examples, never commit real ones):
 - `ALLEGRO_NOTIFY_MESSAGE_EMAIL` — customer service mailbox
 - `ALLEGRO_NOTIFY_CANCELLATION_EMAIL` — order mailbox
   (future: `ALLEGRO_NOTIFY_ISSUE_EMAIL`)
+- `ALLEGRO_NOTIFY_RETURN_EMAIL` — customer-return mailbox
+  (`info.hu@karcher.com`; falls back to the message mailbox
+  when unset)
 
 `ALLEGRO_NOTIFY_RELAY_URL` is retired: it may remain
 configured in Deno but is no longer read by any active
@@ -127,6 +130,13 @@ Expected response:
 
 The message cursor (already seeded in production) is left
 untouched — never delete it.
+
+Customer returns (`[ALLEGRO] VISSZAKÜLDÉS`, beta API) need
+no manual reseed: the first pull with no return cursor walks
+the return journal to the current high-water mark, stores
+only the cursor, and sends zero historical emails — only
+new returns after that seed notify `ALLEGRO_NOTIFY_RETURN_EMAIL`,
+one email per return ID, ACK-advanced like orders/messages.
 
 ## 6. Enable and verify
 

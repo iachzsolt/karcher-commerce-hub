@@ -34,6 +34,12 @@ export const ALLEGRO_NOTIFY_SCOPES = [
 const PUBLIC_V1_ACCEPT =
   'application/vnd.allegro.public.v1+json'
 
+/* Customer returns live under the beta API family. Only
+ * the returns calls use this Accept value; everything else
+ * stays on public.v1. */
+const BETA_V1_ACCEPT =
+  'application/vnd.allegro.beta.v1+json'
+
 const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000
 const CRON_LEASE_TTL_MS = 8 * 60 * 1000
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000
@@ -85,6 +91,10 @@ export type NotifyConfig = {
   orderEmail: string | null
   messageEmail: string | null
   cancellationEmail: string | null
+  /* Customer-return mailbox. Falls back to the message
+   * mailbox when unset, mirroring the cancellation ->
+   * order fallback below. */
+  returnEmail: string | null
 }
 
 function requiredEnv(
@@ -197,6 +207,15 @@ export function resolveNotifyConfig(
       environment,
       'ALLEGRO_NOTIFY_CANCELLATION_EMAIL',
     ),
+    returnEmail:
+      optionalEmail(
+        environment,
+        'ALLEGRO_NOTIFY_RETURN_EMAIL',
+      ) ??
+      optionalEmail(
+        environment,
+        'ALLEGRO_NOTIFY_MESSAGE_EMAIL',
+      ),
   }
 }
 
@@ -306,6 +325,18 @@ export const NOTIFY_KV_KEYS = {
       'message',
       messageId,
     ] as const,
+  returnCursor: [
+    'allegro-notify',
+    'cursor',
+    'returns',
+  ] as const,
+  sentReturn: (returnId: string) =>
+    [
+      'allegro-notify',
+      'sent',
+      'return',
+      returnId,
+    ] as const,
   /* Single-slot pending claim: technical recreation data
    * for the one event currently checked out by the Apps
    * Script client. NEVER customer PII (see BridgePending).
@@ -335,7 +366,7 @@ export type StoredCursor = {
 
 export type StoredDelivery = {
   deliveredAt: string
-  channel: 'order' | 'cancellation' | 'message'
+  channel: 'order' | 'cancellation' | 'message' | 'return'
 }
 
 export function createMemoryNotifyKv(): NotifyKv {
@@ -1142,6 +1173,204 @@ export function parseThreadList(
 }
 
 /* ============================================================
+ * Customer returns (GET /order/customer-returns, beta
+ * Accept). Parsed strictly by whitelist: id, reference,
+ * order linkage, timestamps, status, buyer login/email,
+ * item rows, and parcel rows. Banking/refund/account keys
+ * (IBAN, SWIFT, account numbers, refund addresses) are
+ * never read, so they cannot reach an email. Unknown or
+ * misshaped values become null and are omitted.
+ * ============================================================ */
+
+export type NotifyReturnItem = {
+  name: string | null
+  quantity: number
+  unitPrice: string | null
+  offerId: string | null
+  reason: string | null
+  comment: string | null
+}
+
+export type NotifyReturnParcel = {
+  carrier: string | null
+  trackingNumber: string | null
+}
+
+export type NotifyReturn = {
+  id: string
+  reference: string | null
+  orderId: string | null
+  createdAt: string | null
+  status: string | null
+  buyerLogin: string | null
+  buyerEmail: string | null
+  items: NotifyReturnItem[]
+  parcels: NotifyReturnParcel[]
+}
+
+function parseReturnItem(
+  raw: unknown,
+): NotifyReturnItem | null {
+  const item = recordOf(raw)
+
+  if (!item) {
+    return null
+  }
+
+  const offer = recordOf(item['offer'])
+  const reason = recordOf(item['reason'])
+  const quantity =
+    typeof item['quantity'] === 'number'
+      ? item['quantity']
+      : 1
+
+  return {
+    name:
+      textOrNull(offer?.['name']) ??
+      textOrNull(item['name']) ??
+      textOrNull(item['title']),
+    quantity,
+    unitPrice: moneyText(
+      item['price'] ?? item['unitPrice'],
+    ),
+    offerId:
+      textOrNull(offer?.['id']) ??
+      textOrNull(item['offerId']),
+    // Reason codes are shown as received; no invented
+    // translations. The buyer comment carries the detail.
+    reason:
+      textOrNull(reason?.['type']) ??
+      textOrNull(item['reasonType']) ??
+      textOrNull(item['reason']),
+    comment:
+      textOrNull(item['userComment']) ??
+      textOrNull(item['comment']) ??
+      textOrNull(item['buyerComment']) ??
+      textOrNull(item['customerComment']),
+  }
+}
+
+function parseReturnParcel(
+  raw: unknown,
+): NotifyReturnParcel | null {
+  const parcel = recordOf(raw)
+
+  if (!parcel) {
+    return null
+  }
+
+  const carrier = textOrNull(parcel['carrier'])
+
+  if (!carrier && !parcel['trackingNumber']) {
+    const trackingOnly =
+      textOrNull(parcel['number']) ??
+      textOrNull(parcel['waybill'])
+
+    if (!trackingOnly) {
+      return null
+    }
+
+    return { carrier: null, trackingNumber: trackingOnly }
+  }
+
+  return {
+    carrier,
+    trackingNumber:
+      textOrNull(parcel['trackingNumber']) ??
+      textOrNull(parcel['number']) ??
+      textOrNull(parcel['waybill']),
+  }
+}
+
+export function parseCustomerReturns(
+  payload: unknown,
+): NotifyReturn[] {
+  const root = recordOf(payload)
+  const rawList =
+    root?.['customerReturns'] ??
+    root?.['returns'] ??
+    root?.['items']
+
+  if (!Array.isArray(rawList)) {
+    return []
+  }
+
+  const returns: NotifyReturn[] = []
+
+  for (const raw of rawList) {
+    const item = recordOf(raw)
+
+    if (!item) {
+      continue
+    }
+
+    const id = textOrNull(item['id'])
+
+    if (!id) {
+      continue
+    }
+
+    const order = recordOf(item['order'])
+    const checkoutForm = recordOf(
+      item['checkoutForm'],
+    )
+    const buyer = recordOf(item['buyer'])
+    const rawItems = Array.isArray(item['items'])
+      ? item['items']
+      : Array.isArray(item['returnItems'])
+        ? item['returnItems']
+        : Array.isArray(item['lineItems'])
+          ? item['lineItems']
+          : []
+    const items: NotifyReturnItem[] = []
+
+    for (const rawItem of rawItems) {
+      const parsed = parseReturnItem(rawItem)
+
+      if (parsed) {
+        items.push(parsed)
+      }
+    }
+
+    const rawParcels = Array.isArray(item['parcels'])
+      ? item['parcels']
+      : Array.isArray(item['packages'])
+        ? item['packages']
+        : []
+    const parcels: NotifyReturnParcel[] = []
+
+    for (const rawParcel of rawParcels) {
+      const parsed = parseReturnParcel(rawParcel)
+
+      if (parsed) {
+        parcels.push(parsed)
+      }
+    }
+
+    returns.push({
+      id,
+      reference:
+        textOrNull(item['referenceNumber']) ??
+        textOrNull(item['reference']),
+      orderId:
+        textOrNull(order?.['id']) ??
+        textOrNull(checkoutForm?.['id']) ??
+        textOrNull(item['orderId']),
+      createdAt:
+        textOrNull(item['createdAt']) ??
+        textOrNull(item['created']),
+      status: textOrNull(item['status']),
+      buyerLogin: textOrNull(buyer?.['login']),
+      buyerEmail: textOrNull(buyer?.['email']),
+      items,
+      parcels,
+    })
+  }
+
+  return returns
+}
+
+/* ============================================================
  * V1 event filters.
  * ============================================================ */
 
@@ -1367,7 +1596,7 @@ function sectionBoxHtml(
       ([label, value]) =>
         `<tr>` +
         `<td style="${EMAIL_FONT};font-size:13px;color:#6b7280;padding:4px 8px 4px 0;vertical-align:top;white-space:nowrap;">${escapeNotifyHtml(label)}</td>` +
-        `<td style="${EMAIL_FONT};font-size:13px;color:#111827;padding:4px 0;vertical-align:top;">${escapeNotifyHtml(value)}</td>` +
+        `<td style="${EMAIL_FONT};font-size:13px;color:#111827;padding:4px 0;vertical-align:top;">${escapeNotifyHtml(value).replace(/\n/g, '<br>')}</td>` +
         `</tr>`,
     )
     .join('')
@@ -1496,7 +1725,7 @@ function emailShell(
             `<tr>${row
               .map(
                 (cell) =>
-                  `<td style="${EMAIL_FONT};font-size:13px;color:#111827;padding:6px 8px;border-bottom:1px solid #e5e7eb;vertical-align:top;">${escapeNotifyHtml(cell)}</td>`,
+                  `<td style="${EMAIL_FONT};font-size:13px;color:#111827;padding:6px 8px;border-bottom:1px solid #e5e7eb;vertical-align:top;">${escapeNotifyHtml(cell).replace(/\n/g, '<br>')}</td>`,
               )
               .join('')}</tr>`,
         )
@@ -2495,6 +2724,164 @@ export function buildMessageEmail(
   return { to, subject: title, textBody, htmlBody }
 }
 
+export function buildReturnEmail(
+  to: string,
+  ret: NotifyReturn,
+): NotifyEmail {
+  const orderRef = ret.orderId ?? ret.id
+  const title = `[ALLEGRO] VISSZAKÜLDÉS – ${orderRef}`
+  const showUnit = ret.items.some(
+    (item) => item.unitPrice !== null,
+  )
+  const showOffer = ret.items.some(
+    (item) => item.offerId !== null,
+  )
+  const showReason = ret.items.some(
+    (item) => item.reason !== null,
+  )
+  const showComment = ret.items.some(
+    (item) => item.comment !== null,
+  )
+  const headers = ['Termék', 'Mennyiség']
+
+  if (showUnit) {
+    headers.push('Egységár')
+  }
+
+  if (showOffer) {
+    headers.push('Allegro ajánlat ID')
+  }
+
+  if (showReason) {
+    headers.push('Visszaküldés oka')
+  }
+
+  if (showComment) {
+    headers.push('Vásárlói megjegyzés')
+  }
+
+  const productTable: NotifyEmailProductTable | null =
+    ret.items.length > 0
+      ? {
+          caption: 'VISSZAKÜLDÖTT TERMÉKEK',
+          headers,
+          rows: ret.items.map((item) => {
+            const cells = [
+              item.name ?? '–',
+              String(item.quantity),
+            ]
+
+            if (showUnit) {
+              cells.push(
+                formatMoneyDisplay(item.unitPrice) ??
+                  '–',
+              )
+            }
+
+            if (showOffer) {
+              cells.push(item.offerId ?? '–')
+            }
+
+            if (showReason) {
+              cells.push(item.reason ?? '–')
+            }
+
+            if (showComment) {
+              cells.push(item.comment ?? '–')
+            }
+
+            return cells
+          }),
+          textLines: ret.items.map((item) => {
+            const parts = [
+              `${item.name ?? '–'} x${item.quantity}`,
+            ]
+            const unit = formatMoneyDisplay(
+              item.unitPrice,
+            )
+
+            if (unit) {
+              parts.push(unit)
+            }
+
+            if (item.offerId) {
+              parts.push(`Ajánlat: ${item.offerId}`)
+            }
+
+            if (item.reason) {
+              parts.push(`Ok: ${item.reason}`)
+            }
+
+            if (item.comment) {
+              parts.push(
+                `Megjegyzés: ${item.comment}`,
+              )
+            }
+
+            return `- ${parts.join(' · ')}`
+          }),
+        }
+      : null
+  const parcelSection: NotifyEmailSection = {
+    heading: 'VISSZAKÜLDÉSI CSOMAG',
+    rows: ret.parcels.flatMap((parcel, index) => {
+      const suffix =
+        ret.parcels.length > 1 ? ` ${index + 1}` : ''
+
+      return [
+        ...rowsIf(
+          `Fuvarozó${suffix}`,
+          parcel.carrier,
+        ),
+        ...rowsIf(
+          `Csomagszám${suffix}`,
+          parcel.trackingNumber,
+        ),
+      ]
+    }),
+  }
+  const { textBody, htmlBody } = emailShell(
+    title,
+    'Termékvisszaküldés',
+    null,
+    [
+      [
+        {
+          heading: 'VISSZAKÜLDÉS',
+          rows: [
+            ['Visszaküldés azonosító', ret.id],
+            ...rowsIf(
+              'Referenciaszám',
+              ret.reference,
+            ),
+            ...rowsIf(
+              'Kapcsolódó rendelés',
+              ret.orderId,
+            ),
+            ...rowsIf('Létrehozva', ret.createdAt),
+            ...rowsIf('Státusz', ret.status),
+          ],
+        },
+        {
+          heading: 'VÁSÁRLÓ',
+          rows: [
+            ...rowsIf(
+              'Allegro login',
+              ret.buyerLogin,
+            ),
+            ...rowsIf('Email', ret.buyerEmail),
+          ],
+        },
+      ],
+    ],
+    [parcelSection],
+    [],
+    productTable,
+  )
+
+  return { to, subject: title, textBody, htmlBody }
+}
+
 /* ============================================================
  * Apps Script relay envelope (signed JSON, no custom headers).
  * canonical = timestamp + "\n" + nonce + "\n" + canonicalJson.
@@ -2890,7 +3277,7 @@ function isValidCursor(
 
 export type BridgePending = {
   deliveryId: string
-  channel: 'order' | 'message'
+  channel: 'order' | 'message' | 'return'
   eventId: string
   eventType: string
   orderId: string | null
@@ -2913,7 +3300,10 @@ export type NotifyPullResult =
   | { action: 'NEEDS_BOOTSTRAP' }
   | { action: 'NOOP' }
   | { action: 'PONG' }
-  | { action: 'SEEDED'; channel: 'ORDER' | 'MESSAGE' }
+  | {
+      action: 'SEEDED'
+      channel: 'ORDER' | 'MESSAGE' | 'RETURN'
+    }
   | {
       action: 'EMAIL'
       deliveryId: string
@@ -2935,10 +3325,14 @@ function messageDeliveryId(
   return `message:${messageId}`
 }
 
+function returnDeliveryId(returnId: string): string {
+  return `return:${returnId}`
+}
+
 function parseDeliveryId(
   deliveryId: unknown,
 ): {
-  channel: 'order' | 'message'
+  channel: 'order' | 'message' | 'return'
   eventId: string
 } | null {
   if (typeof deliveryId !== 'string') {
@@ -2959,6 +3353,16 @@ function parseDeliveryId(
     return {
       channel: 'message',
       eventId: deliveryId.slice(8),
+    }
+  }
+
+  if (
+    deliveryId.startsWith('return:') &&
+    deliveryId.length > 7
+  ) {
+    return {
+      channel: 'return',
+      eventId: deliveryId.slice(7),
     }
   }
 
@@ -3230,6 +3634,57 @@ async function rebuildPendingEmail(
     return 'email' in built ? built : null
   }
 
+  if (pending.channel === 'return') {
+    let from = pending.cursorBefore
+
+    for (
+      let page = 0;
+      page < ORDER_PULL_MAX_PAGES;
+      page += 1
+    ) {
+      const fetched = await fetchReturnPage(
+        config,
+        tokens,
+        fetchImpl,
+        from,
+      )
+
+      if (!fetched.ok) {
+        return null
+      }
+
+      if (fetched.returns.length === 0) {
+        break
+      }
+
+      const match = fetched.returns.find(
+        (ret) => ret.id === pending.eventId,
+      )
+
+      if (match) {
+        const built = await buildReturnEmailForReturn(
+          config,
+          match,
+        )
+
+        return 'email' in built ? built : null
+      }
+
+      from =
+        fetched.returns[
+          fetched.returns.length - 1
+        ]!.id
+
+      if (
+        fetched.returns.length < RETURN_PAGE_LIMIT
+      ) {
+        break
+      }
+    }
+
+    return null
+  }
+
   const fetched = await fetchAllThreadMessages(
     config,
     tokens,
@@ -3337,6 +3792,177 @@ async function findNextOrderEvent(
       lastId: advanceCursorTo,
       updatedAt: new Date().toISOString(),
     } satisfies StoredCursor)
+  }
+
+  return { none: true }
+}
+
+/* ============================================================
+ * Customer-return journal (beta Accept, `from` continuation
+ * like the order journal: position in the journal is the
+ * ordering signal, ids are matched by equality only).
+ * Notification identity is the return ID, so later status
+ * changes of an already-delivered return never re-notify:
+ * the sentReturn marker skips them.
+ * ============================================================ */
+
+const RETURN_PAGE_LIMIT = 100
+
+async function fetchReturnPage(
+  config: NotifyConfig,
+  tokens: NotifyOAuthTokens,
+  fetchImpl: FetchImpl,
+  from: string | null,
+): Promise<
+  | { ok: true; returns: NotifyReturn[] }
+  | { ok: false; status: number }
+> {
+  const fetched = await fetchJson(
+    `${config.apiUrl}/order/customer-returns?limit=${RETURN_PAGE_LIMIT}` +
+      (from
+        ? `&from=${encodeURIComponent(from)}`
+        : ''),
+    tokens,
+    config,
+    fetchImpl,
+    BETA_V1_ACCEPT,
+  )
+
+  if (!fetched.ok) {
+    return { ok: false, status: fetched.status }
+  }
+
+  return {
+    ok: true,
+    returns: parseCustomerReturns(fetched.data),
+  }
+}
+
+async function fetchReturnHighWater(
+  config: NotifyConfig,
+  tokens: NotifyOAuthTokens,
+  fetchImpl: FetchImpl,
+): Promise<
+  | {
+      ok: true
+      highWaterId: string | null
+      scanned: number
+    }
+  | { ok: false; status: number }
+> {
+  let from: string | null = null
+  let highWaterId: string | null = null
+  let scanned = 0
+
+  for (
+    let page = 0;
+    page < ORDER_HIGH_WATER_MAX_PAGES;
+    page += 1
+  ) {
+    const fetched = await fetchReturnPage(
+      config,
+      tokens,
+      fetchImpl,
+      from,
+    )
+
+    if (!fetched.ok) {
+      return { ok: false, status: fetched.status }
+    }
+
+    if (fetched.returns.length === 0) {
+      break
+    }
+
+    scanned += fetched.returns.length
+    highWaterId =
+      fetched.returns[fetched.returns.length - 1]!.id
+    from = highWaterId
+
+    if (fetched.returns.length < RETURN_PAGE_LIMIT) {
+      break
+    }
+  }
+
+  return { ok: true, highWaterId, scanned }
+}
+
+async function buildReturnEmailForReturn(
+  config: NotifyConfig,
+  ret: NotifyReturn,
+): Promise<{ email: BridgeEmail } | { held: true }> {
+  if (!config.returnEmail) {
+    return { held: true }
+  }
+
+  const email = buildReturnEmail(config.returnEmail, ret)
+
+  return {
+    email: {
+      to: email.to,
+      subject: email.subject,
+      textBody: email.textBody,
+      htmlBody: email.htmlBody,
+    },
+  }
+}
+
+async function findNextReturn(
+  config: NotifyConfig,
+  kv: NotifyKv,
+  tokens: NotifyOAuthTokens,
+  fetchImpl: FetchImpl,
+  cursor: StoredCursor,
+): Promise<
+  | { ret: NotifyReturn }
+  | { none: true }
+> {
+  let from: string | null = cursor.lastId
+
+  for (
+    let page = 0;
+    page < ORDER_PULL_MAX_PAGES;
+    page += 1
+  ) {
+    const fetched = await fetchReturnPage(
+      config,
+      tokens,
+      fetchImpl,
+      from,
+    )
+
+    if (!fetched.ok) {
+      notifyWarn('notify return poll failed', {
+        httpStatus: fetched.status,
+      })
+      return { none: true }
+    }
+
+    if (fetched.returns.length === 0) {
+      break
+    }
+
+    for (const ret of fetched.returns) {
+      // Identity is the return ID: an already-delivered
+      // return that later changes status is skipped here
+      // and never emailed again.
+      if (
+        (await kv.get(
+          NOTIFY_KV_KEYS.sentReturn(ret.id),
+        )) !== null
+      ) {
+        continue
+      }
+
+      return { ret }
+    }
+
+    from =
+      fetched.returns[fetched.returns.length - 1]!.id
+
+    if (fetched.returns.length < RETURN_PAGE_LIMIT) {
+      break
+    }
   }
 
   return { none: true }
@@ -3666,6 +4292,95 @@ export async function handleNotifyPull(
     }
   }
 
+  // Customer returns (newest source, checked last; order
+  // and message behavior above is untouched).
+  const returnCursor = await kv.get<StoredCursor>(
+    NOTIFY_KV_KEYS.returnCursor,
+  )
+
+  if (!isValidCursor(returnCursor)) {
+    // First run: seed to the latest existing return with
+    // ZERO historical emails — only returns appearing
+    // AFTER this seed may notify.
+    const seeded = await fetchReturnHighWater(
+      config,
+      tokens,
+      fetchImpl,
+    )
+
+    if (!seeded.ok) {
+      notifyWarn('notify return seed poll failed', {
+        httpStatus: seeded.status,
+      })
+      return {
+        httpStatus: 200,
+        result: { action: 'NOOP' },
+      }
+    }
+
+    if (seeded.highWaterId) {
+      await kv.set(NOTIFY_KV_KEYS.returnCursor, {
+        lastId: seeded.highWaterId,
+        updatedAt: new Date(nowMs).toISOString(),
+      } satisfies StoredCursor)
+      notifyLog('notify return cursor seeded', {
+        eventId: seeded.highWaterId,
+        eventsSeen: seeded.scanned,
+      })
+    }
+
+    return {
+      httpStatus: 200,
+      result: { action: 'SEEDED', channel: 'RETURN' },
+    }
+  }
+
+  const nextReturn = await findNextReturn(
+    config,
+    kv,
+    tokens,
+    fetchImpl,
+    returnCursor,
+  )
+
+  if (!('none' in nextReturn)) {
+    const built = await buildReturnEmailForReturn(
+      config,
+      nextReturn.ret,
+    )
+
+    if ('email' in built) {
+      const deliveryId = returnDeliveryId(
+        nextReturn.ret.id,
+      )
+      await kv.set(
+        NOTIFY_KV_KEYS.pending,
+        {
+          deliveryId,
+          channel: 'return',
+          eventId: nextReturn.ret.id,
+          eventType: 'CUSTOMER_RETURN',
+          orderId: nextReturn.ret.orderId,
+          threadId: null,
+          offerId: null,
+          messageId: null,
+          cursorBefore: returnCursor.lastId,
+          createdAt: new Date(nowMs).toISOString(),
+        } satisfies BridgePending,
+        { ttlMs: PENDING_TTL_MS },
+      )
+
+      return {
+        httpStatus: 200,
+        result: {
+          action: 'EMAIL',
+          deliveryId,
+          email: built.email,
+        },
+      }
+    }
+  }
+
   return {
     httpStatus: 200,
     result: { action: 'NOOP' },
@@ -3726,7 +4441,9 @@ export async function handleNotifyAck(
   const deliveryId =
     parsed.channel === 'order'
       ? orderDeliveryId(parsed.eventId)
-      : messageDeliveryId(parsed.eventId)
+      : parsed.channel === 'message'
+        ? messageDeliveryId(parsed.eventId)
+        : returnDeliveryId(parsed.eventId)
   const pending =
     await kv.get<BridgePending>(NOTIFY_KV_KEYS.pending)
 
@@ -3738,7 +4455,9 @@ export async function handleNotifyAck(
     const markerKey =
       pending.channel === 'order'
         ? NOTIFY_KV_KEYS.sentOrder(pending.eventId)
-        : NOTIFY_KV_KEYS.sentMessage(pending.eventId)
+        : pending.channel === 'message'
+          ? NOTIFY_KV_KEYS.sentMessage(pending.eventId)
+          : NOTIFY_KV_KEYS.sentReturn(pending.eventId)
 
     await kv.set(
       markerKey,
@@ -3749,7 +4468,9 @@ export async function handleNotifyAck(
             ? pending.eventType === 'READY_FOR_PROCESSING'
               ? 'order'
               : 'cancellation'
-            : 'message',
+            : pending.channel === 'message'
+              ? 'message'
+              : 'return',
       } satisfies StoredDelivery,
       { ttlMs: DEDUPE_TTL_MS },
     )
@@ -3761,7 +4482,9 @@ export async function handleNotifyAck(
     const cursorKey =
       pending.channel === 'order'
         ? NOTIFY_KV_KEYS.orderCursor
-        : NOTIFY_KV_KEYS.messageCursor
+        : pending.channel === 'message'
+          ? NOTIFY_KV_KEYS.messageCursor
+          : NOTIFY_KV_KEYS.returnCursor
     const current =
       await kv.get<StoredCursor>(cursorKey)
 
@@ -3790,7 +4513,9 @@ export async function handleNotifyAck(
   const markerKey =
     parsed.channel === 'order'
       ? NOTIFY_KV_KEYS.sentOrder(parsed.eventId)
-      : NOTIFY_KV_KEYS.sentMessage(parsed.eventId)
+      : parsed.channel === 'message'
+        ? NOTIFY_KV_KEYS.sentMessage(parsed.eventId)
+        : NOTIFY_KV_KEYS.sentReturn(parsed.eventId)
 
   if ((await kv.get(markerKey)) !== null) {
     return {
@@ -4414,11 +5139,12 @@ async function fetchJson(
   tokens: NotifyOAuthTokens,
   config: NotifyConfig,
   fetchImpl: FetchImpl,
+  accept: string = PUBLIC_V1_ACCEPT,
 ): Promise<{ ok: boolean; status: number; data: unknown }> {
   const response = await fetchImpl(url, {
     headers: {
       Authorization: `Bearer ${tokens.accessToken}`,
-      Accept: PUBLIC_V1_ACCEPT,
+      Accept: accept,
       'User-Agent': config.userAgent,
     },
   })
