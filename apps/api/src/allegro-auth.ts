@@ -12,6 +12,7 @@ import {
   getNotifyKvStore,
   handleNotifyAck,
   handleNotifyPull,
+  previewNotifyEmail,
   reseedNotifyOrders,
   resolveNotifyConfig,
 } from './allegro-notify.js'
@@ -2017,6 +2018,73 @@ allegroAuth.get(
     return context.json({
       status: 'ok',
       ...result.diagnostics,
+    })
+  },
+)
+
+/*
+ * ADMIN-only read-only email preview. Deliberately NOT
+ * public (absent from both allowlists): renders the exact
+ * email the bridge would send for one already-processed
+ * order event and returns it (PII included) to the
+ * authenticated ADMIN browser. Nothing is persisted,
+ * logged, marked, claimed, sent, or advanced.
+ */
+allegroAuth.get(
+  '/notify-preview',
+  async (context) => {
+    const user = getCommerceHubUser(context)
+
+    if (!user || user.role !== 'ADMIN') {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Administrator permission is required.',
+        },
+        403,
+      )
+    }
+
+    const eventId =
+      context.req.query('eventId')?.trim()
+
+    if (!eventId) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'The eventId query parameter is required.',
+        },
+        400,
+      )
+    }
+
+    const result = await previewNotifyEmail(eventId)
+
+    if (!result.ok) {
+      const status =
+        result.reason === 'EVENT_NOT_FOUND'
+          ? 404
+          : result.reason === 'NEEDS_BOOTSTRAP'
+            ? 503
+            : result.reason === 'DIAGNOSTIC_POLL_FAILED'
+              ? 502
+              : 400
+
+      return context.json(
+        {
+          status: 'error',
+          message: 'Notification preview failed.',
+          reason: result.reason,
+        },
+        status as 400 | 404 | 502 | 503,
+      )
+    }
+
+    return context.json({
+      status: 'ok',
+      ...result.preview,
     })
   },
 )

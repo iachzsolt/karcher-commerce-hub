@@ -3387,6 +3387,163 @@ export async function reseedNotifyOrders(
 }
 
 /* ============================================================
+ * ADMIN-only read-only email preview. Renders the exact
+ * email the bridge WOULD send for an already-processed
+ * order event, using the same buildOrderEmailForEvent code
+ * as real delivery (no duplicated template logic). The
+ * email is returned to the authenticated ADMIN browser
+ * only: nothing is persisted, logged, marked, claimed,
+ * sent, or advanced. Checkout-form detail lives in memory
+ * for the duration of this call.
+ * ============================================================ */
+
+export type NotifyPreview = {
+  event: {
+    id: string
+    type: string
+    checkoutFormId: string | null
+    occurredAt: string | null
+  }
+  email: BridgeEmail
+}
+
+export async function previewNotifyEmail(
+  eventId: string,
+  deps: BridgeDeps = {},
+): Promise<
+  | { ok: true; preview: NotifyPreview }
+  | { ok: false; reason: string; status?: number }
+> {
+  if (typeof eventId !== 'string' || eventId === '') {
+    return { ok: false, reason: 'INVALID_EVENT_ID' }
+  }
+
+  const environment = deps.environment ?? process.env
+  const nowMs = deps.nowMs ?? Date.now()
+  const fetchImpl = deps.fetchImpl ?? defaultFetch()
+
+  let config: NotifyConfig
+
+  try {
+    config = resolveNotifyConfig(environment)
+  } catch {
+    return { ok: false, reason: 'NOT_CONFIGURED' }
+  }
+
+  const kv = deps.kv ?? (await getNotifyKvStore())
+  const session = await ensureAccessToken(
+    config,
+    kv,
+    nowMs,
+    fetchImpl,
+  )
+
+  if ('missing' in session) {
+    return { ok: false, reason: 'NEEDS_BOOTSTRAP' }
+  }
+
+  // Locate the event by id equality while paging forward
+  // (same bounded journal walk as the diagnostic history;
+  // opaque ids are never ordered). Read-only: no cursor,
+  // pending, or dedupe key is touched.
+  let found: NotifyOrderEvent | null = null
+
+  {
+    let from: string | null = null
+
+    for (
+      let page = 0;
+      page < DIAGNOSTIC_HISTORY_MAX_PAGES;
+      page += 1
+    ) {
+      const fetched = await fetchJson(
+        `${config.apiUrl}/order/events?limit=${ORDER_PAGE_LIMIT}` +
+          (from
+            ? `&from=${encodeURIComponent(from)}`
+            : ''),
+        session.tokens,
+        config,
+        fetchImpl,
+      )
+
+      if (!fetched.ok) {
+        return {
+          ok: false,
+          reason: 'DIAGNOSTIC_POLL_FAILED',
+          status: fetched.status,
+        }
+      }
+
+      const events = parseOrderEvents(fetched.data)
+
+      if (events.length === 0) {
+        break
+      }
+
+      const match = events.find(
+        (event) => event.id === eventId,
+      )
+
+      if (match) {
+        found = match
+        break
+      }
+
+      from = events[events.length - 1]!.id
+
+      if (events.length < ORDER_PAGE_LIMIT) {
+        break
+      }
+    }
+  }
+
+  if (!found) {
+    return { ok: false, reason: 'EVENT_NOT_FOUND' }
+  }
+
+  const kind = classifyOrderEvent(found.type)
+
+  if (kind === null) {
+    return { ok: false, reason: 'EVENT_NOT_NOTIFIABLE' }
+  }
+
+  const recipient =
+    kind === 'NEW_ORDER'
+      ? config.orderEmail
+      : (config.cancellationEmail ?? config.orderEmail)
+
+  if (!recipient) {
+    return { ok: false, reason: 'RECIPIENT_MISSING' }
+  }
+
+  // EXACT same renderer as real delivery (order detail is
+  // fetched in memory only and never stored or logged).
+  const built = await buildOrderEmailForEvent(
+    config,
+    session.tokens,
+    fetchImpl,
+    found,
+  )
+
+  if (!('email' in built)) {
+    return { ok: false, reason: 'RECIPIENT_MISSING' }
+  }
+
+  return {
+    ok: true,
+    preview: {
+      event: {
+        id: found.id,
+        type: found.type,
+        checkoutFormId: found.orderId,
+        occurredAt: found.occurredAt,
+      },
+      email: built.email,
+    },
+  }
+}
+
+/* ============================================================
  * ADMIN-only read-only diagnostic. Strictly observational:
  * KV is only READ (cursors, pending claim), Allegro sees
  * only GETs (event-stats + one bounded events page), and

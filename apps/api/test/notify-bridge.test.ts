@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { Hono } from 'hono'
 import {
   bridgeCanonicalMessage,
+  buildOrderEmail,
   createMemoryNotifyKv,
   fetchOrderHighWater,
   getNotifyDiagnostics,
@@ -14,6 +15,8 @@ import {
   handleNotifyPull,
   hmacSha256Hex,
   NOTIFY_KV_KEYS,
+  parseCheckoutForm,
+  previewNotifyEmail,
   reseedNotifyOrders,
   setNotifyKvStore,
   storeNotifyOAuth,
@@ -2105,6 +2108,356 @@ void describe('notify diagnostics', () => {
       proxy.indexOf('])', bridgeStart),
     )
     assert.ok(!bridgeBlock.includes('notify-diagnostics'))
+  })
+})
+
+void describe('notify preview', () => {
+  const PREVIEW_EVENT_PAYLOAD = {
+    id: 'ev-preview-1',
+    type: 'READY_FOR_PROCESSING',
+    occurredAt: '2026-09-19T07:02:00.000Z',
+    order: { id: 'ord-preview-1' },
+  }
+  const PREVIEW_CHECKOUT = {
+    boughtAt: '2026-09-19T07:02:00.000Z',
+    buyer: {
+      login: 'buyer42',
+      firstName: 'Teszt',
+      lastName: 'Vevo',
+      email: 'buyer42@example.com',
+      phoneNumber: '+3612345678',
+    },
+    lineItems: [
+      {
+        quantity: 1,
+        offer: {
+          id: 'off-9',
+          name: 'Karcher K 7',
+          external: { id: '26451800' },
+        },
+        price: { amount: '129900', currency: 'HUF' },
+      },
+    ],
+    summary: {
+      totalToPay: { amount: '129900', currency: 'HUF' },
+    },
+    delivery: {
+      address: {
+        firstName: 'Teszt',
+        lastName: 'Vevo',
+        street: 'Fo utca 1.',
+        zipCode: '1051',
+        city: 'Budapest',
+        countryCode: 'HU',
+      },
+    },
+    messageToSeller: 'Kerem ovatosan csomagolni.',
+  }
+
+  function previewFetch(
+    events: unknown[],
+    calls: string[] = [],
+  ) {
+    return async (input: string): Promise<Response> => {
+      calls.push(input)
+
+      if (input.includes('/order/events')) {
+        return jsonResponse({ events })
+      }
+
+      if (input.includes('/checkout-forms/')) {
+        return jsonResponse(PREVIEW_CHECKOUT)
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`)
+    }
+  }
+
+  function adminPreviewApp(role: 'ADMIN' | 'VIEWER') {
+    const app = new Hono<{
+      Variables: AccessVariables
+    }>()
+    app.use('*', async (context, next) => {
+      context.set('commerceHubUser', {
+        email: `${role.toLowerCase()}@example.com`,
+        role,
+        subject: null,
+      })
+      await next()
+    })
+    app.route('/auth/allegro', allegroAuth)
+
+    return app
+  }
+
+  void it('rejects anonymous and non-admin callers, requires eventId', async () => {
+    const anonymous = await allegroAuth.request(
+      '/notify-preview?eventId=ev-preview-1',
+    )
+    assert.equal(anonymous.status, 403)
+
+    const viewer = await adminPreviewApp('VIEWER').request(
+      '/auth/allegro/notify-preview?eventId=ev-preview-1',
+    )
+    assert.equal(viewer.status, 403)
+
+    const missing = await adminPreviewApp('ADMIN').request(
+      '/auth/allegro/notify-preview',
+    )
+    assert.equal(missing.status, 400)
+  })
+
+  void it('renders the exact delivery email without mutating state', async () => {
+    const kv = createMemoryNotifyKv()
+    await seedSession(kv)
+    await kv.set(NOTIFY_KV_KEYS.orderCursor, {
+      lastId: 'ev-preview-1',
+      updatedAt: new Date(NOW_MS).toISOString(),
+    })
+    const before = {
+      orderCursor: await kv.get(
+        NOTIFY_KV_KEYS.orderCursor,
+      ),
+      messageCursor: await kv.get(
+        NOTIFY_KV_KEYS.messageCursor,
+      ),
+      pending: await kv.get(NOTIFY_KV_KEYS.pending),
+      sent: await kv.get(
+        NOTIFY_KV_KEYS.sentOrder('ev-preview-1'),
+      ),
+    }
+    const calls: string[] = []
+    const lines: string[] = []
+    const original = {
+      log: console.log,
+      warn: console.warn,
+      error: console.error,
+    }
+    console.log = (...args: unknown[]) => {
+      lines.push(
+        args.map((part) => String(part)).join(' '),
+      )
+    }
+    console.warn = console.log
+    console.error = console.log
+
+    let result: Awaited<
+      ReturnType<typeof previewNotifyEmail>
+    >
+
+    try {
+      result = await previewNotifyEmail('ev-preview-1', {
+        environment: baseEnvironment(),
+        kv,
+        fetchImpl: previewFetch(
+          [PREVIEW_EVENT_PAYLOAD],
+          calls,
+        ),
+        nowMs: NOW_MS,
+      })
+    } finally {
+      console.log = original.log
+      console.warn = original.warn
+      console.error = original.error
+    }
+
+    assert.equal(result.ok, true)
+
+    if (!result.ok) {
+      assert.fail('expected preview')
+    }
+
+    // EXACT same renderer as real delivery.
+    const expected = buildOrderEmail(
+      'orders@example.com',
+      {
+        id: 'ev-preview-1',
+        type: 'READY_FOR_PROCESSING',
+        occurredAt: '2026-09-19T07:02:00.000Z',
+        orderId: 'ord-preview-1',
+        reason: null,
+      },
+      parseCheckoutForm(
+        'ord-preview-1',
+        PREVIEW_CHECKOUT,
+      ),
+    )
+    assert.deepEqual(result.preview.event, {
+      id: 'ev-preview-1',
+      type: 'READY_FOR_PROCESSING',
+      checkoutFormId: 'ord-preview-1',
+      occurredAt: '2026-09-19T07:02:00.000Z',
+    })
+    assert.deepEqual(result.preview.email, {
+      to: expected.to,
+      subject: expected.subject,
+      textBody: expected.textBody,
+      htmlBody: expected.htmlBody,
+    })
+    assert.equal(
+      result.preview.email.subject,
+      '[ALLEGRO] ÚJ RENDELÉS – ord-preview-1',
+    )
+
+    // Read-only: cursor/pending/dedupe untouched, no
+    // relay POST, no Gmail — only Allegro GETs.
+    assert.deepEqual(
+      {
+        orderCursor: await kv.get(
+          NOTIFY_KV_KEYS.orderCursor,
+        ),
+        messageCursor: await kv.get(
+          NOTIFY_KV_KEYS.messageCursor,
+        ),
+        pending: await kv.get(NOTIFY_KV_KEYS.pending),
+        sent: await kv.get(
+          NOTIFY_KV_KEYS.sentOrder('ev-preview-1'),
+        ),
+      },
+      before,
+    )
+    assert.deepEqual(calls, [
+      'https://api.test/order/events?limit=100',
+      'https://api.test/order/checkout-forms/ord-preview-1',
+    ])
+
+    // PII reaches the ADMIN caller (asserted above via
+    // the email body) but is never logged or persisted.
+    const snapshot = lines.join('\n')
+    for (const forbidden of [
+      'buyer42',
+      'buyer42@example.com',
+      '+3612345678',
+      '26451800',
+      'Kerem ovatosan',
+      'Fo utca',
+      'orders@example.com',
+      'stub-access-token',
+    ]) {
+      assert.ok(
+        !snapshot.includes(forbidden),
+        `preview must not log: ${forbidden}`,
+      )
+    }
+  })
+
+  void it('reports unknown and non-notifiable events safely', async () => {
+    const kv = createMemoryNotifyKv()
+    await seedSession(kv)
+    const deps = {
+      environment: baseEnvironment(),
+      kv,
+      fetchImpl: previewFetch([
+        {
+          id: 'ev-bought-1',
+          type: 'BOUGHT',
+          occurredAt: '2026-09-19T07:01:00.000Z',
+          order: { id: 'ord-9' },
+        },
+      ]),
+      nowMs: NOW_MS,
+    }
+
+    assert.deepEqual(
+      await previewNotifyEmail('ev-missing', deps),
+      { ok: false, reason: 'EVENT_NOT_FOUND' },
+    )
+    assert.deepEqual(
+      await previewNotifyEmail('ev-bought-1', deps),
+      { ok: false, reason: 'EVENT_NOT_NOTIFIABLE' },
+    )
+    assert.equal(
+      await kv.get(NOTIFY_KV_KEYS.pending),
+      null,
+    )
+  })
+
+  void it('serves the route to ADMIN with the production-shaped event', async () => {
+    const kv = createMemoryNotifyKv()
+    await storeNotifyOAuth(
+      kv,
+      {
+        accessToken: 'stub-access-token',
+        refreshToken: 'stub-refresh-token',
+        expiresAt: Date.now() + 3600_000,
+      },
+      Buffer.from(TOKEN_KEY, 'base64'),
+      Date.now(),
+    )
+    const envKeys = Object.keys(baseEnvironment())
+    const envSnapshot = new Map(
+      envKeys.map((key) => [key, process.env[key]]),
+    )
+    const env = baseEnvironment()
+    for (const key of envKeys) {
+      process.env[key] = env[key]
+    }
+    setNotifyKvStore(kv)
+    const realFetch = globalThis.fetch
+    globalThis.fetch = previewFetch([
+      {
+        ...PREVIEW_EVENT_PAYLOAD,
+        id: '1789925489523437',
+        order: {
+          id: '7580c4f1-b515-11f1-bf93-53e0e0a0fe26',
+        },
+      },
+    ]) as unknown as typeof fetch
+
+    try {
+      const response = await adminPreviewApp(
+        'ADMIN',
+      ).request(
+        '/auth/allegro/notify-preview?eventId=1789925489523437',
+      )
+      assert.equal(response.status, 200)
+      const body = (await response.json()) as {
+        status: string
+        event: Record<string, unknown>
+        email: Record<string, unknown>
+      }
+      assert.equal(body.status, 'ok')
+      assert.equal(body.event['id'], '1789925489523437')
+      assert.equal(
+        body.event['type'],
+        'READY_FOR_PROCESSING',
+      )
+      assert.equal(
+        body.event['checkoutFormId'],
+        '7580c4f1-b515-11f1-bf93-53e0e0a0fe26',
+      )
+      assert.ok(typeof body.email['subject'] === 'string')
+      assert.ok(typeof body.email['htmlBody'] === 'string')
+    } finally {
+      globalThis.fetch = realFetch
+      setNotifyKvStore(null)
+      for (const [key, value] of envSnapshot) {
+        if (value === undefined) {
+          delete process.env[key]
+        } else {
+          process.env[key] = value
+        }
+      }
+    }
+  })
+
+  void it('is never transport-public', () => {
+    const source = readBridgeSource(
+      'apps/api/src/access-auth.ts',
+    )
+    const start = source.indexOf(
+      'const PUBLIC_PATHS = new Set([',
+    )
+    const block = source.slice(
+      start,
+      source.indexOf('])', start),
+    )
+    assert.ok(!block.includes('notify-preview'))
+
+    const proxy = readBridgeSource(
+      'apps/web/functions/api/[[path]].ts',
+    )
+    assert.ok(!proxy.includes('notify-preview'))
   })
 })
 

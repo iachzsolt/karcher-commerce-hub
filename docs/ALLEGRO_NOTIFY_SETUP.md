@@ -191,6 +191,17 @@ Allegro journal event, and events after the cursor (IDs,
 types, and timestamps only — never customer data). It works
 whether the bridge flag is on or off.
 
+To inspect the exact email the bridge would send for one
+already-processed order event (same renderer as real
+delivery, nothing sent/stored/advanced), also ADMIN-only:
+
+```js
+await (await fetch('/api/auth/allegro/notify-preview?eventId=<eventId>')).json()
+```
+
+The response may contain customer PII — it is returned to
+your authenticated browser only and never persisted.
+
 ## 9. Troubleshooting BAD_SIGNATURE
 
 The pull/ack HMAC is byte-identical on both sides (pinned
