@@ -3635,6 +3635,14 @@ async function rebuildPendingEmail(
   }
 
   if (pending.channel === 'return') {
+    const rebuild = async (ret: NotifyReturn) => {
+      const built = await buildReturnEmailForReturn(
+        config,
+        ret,
+      )
+
+      return 'email' in built ? built : null
+    }
     let from = pending.cursorBefore
 
     for (
@@ -3662,12 +3670,7 @@ async function rebuildPendingEmail(
       )
 
       if (match) {
-        const built = await buildReturnEmailForReturn(
-          config,
-          match,
-        )
-
-        return 'email' in built ? built : null
+        return rebuild(match)
       }
 
       from =
@@ -3680,6 +3683,26 @@ async function rebuildPendingEmail(
       ) {
         break
       }
+    }
+
+    // Cursor-anchored claims (e.g. queued by the ADMIN
+    // replay when the cursor already sits at the return)
+    // never appear in a from=cursor scan, so fall back to
+    // a bounded latest-walk: if the claimed return is
+    // still the newest, rebuild from it directly.
+    const latest = await fetchLatestReturn(
+      config,
+      tokens,
+      fetchImpl,
+      ORDER_PULL_MAX_PAGES,
+    )
+
+    if (
+      latest.ok &&
+      latest.ret !== null &&
+      latest.ret.id === pending.eventId
+    ) {
+      return rebuild(latest.ret)
     }
 
     return null
@@ -3885,6 +3908,50 @@ async function fetchReturnHighWater(
   }
 
   return { ok: true, highWaterId, scanned }
+}
+
+/* Latest return entity within a bounded walk (newest
+ * last in journal order). Used by the ADMIN replay action
+ * and by pending-claim rebuilds when the claim sits at or
+ * behind the cursor. */
+async function fetchLatestReturn(
+  config: NotifyConfig,
+  tokens: NotifyOAuthTokens,
+  fetchImpl: FetchImpl,
+  maxPages: number,
+): Promise<
+  | { ok: true; ret: NotifyReturn | null }
+  | { ok: false; status: number }
+> {
+  let from: string | null = null
+  let latest: NotifyReturn | null = null
+
+  for (let page = 0; page < maxPages; page += 1) {
+    const fetched = await fetchReturnPage(
+      config,
+      tokens,
+      fetchImpl,
+      from,
+    )
+
+    if (!fetched.ok) {
+      return { ok: false, status: fetched.status }
+    }
+
+    if (fetched.returns.length === 0) {
+      break
+    }
+
+    latest =
+      fetched.returns[fetched.returns.length - 1]!
+    from = latest.id
+
+    if (fetched.returns.length < RETURN_PAGE_LIMIT) {
+      break
+    }
+  }
+
+  return { ok: true, ret: latest }
 }
 
 async function buildReturnEmailForReturn(
@@ -4782,6 +4849,143 @@ export async function previewNotifyEmail(
         occurredAt: found.occurredAt,
       },
       email: built.email,
+    },
+  }
+}
+
+/* ============================================================
+ * ADMIN-only replay of the latest customer return (for a
+ * return created before the initial return seed, hence
+ * skipped as historical). Queues a TECHNICAL pending claim
+ * only: return/delivery/order IDs, no buyer/item/comment/
+ * parcel data. Never rewinds or writes the return cursor,
+ * never emails, never marks delivered. The next normal
+ * pull re-offers it as one EMAIL; the normal Gmail -> ACK
+ * then marks delivered and clears the claim (the cursor
+ * stays put when already at this return ID).
+ * ============================================================ */
+
+export type NotifyReplayResult =
+  | {
+      action: 'QUEUED' | 'ALREADY_DELIVERED'
+      returnId: string
+      orderId: string | null
+    }
+
+export async function replayLatestReturn(
+  deps: BridgeDeps = {},
+): Promise<
+  | { ok: true; result: NotifyReplayResult }
+  | { ok: false; reason: string; status?: number }
+> {
+  const environment = deps.environment ?? process.env
+  const nowMs = deps.nowMs ?? Date.now()
+  const fetchImpl = deps.fetchImpl ?? defaultFetch()
+
+  let config: NotifyConfig
+
+  try {
+    config = resolveNotifyConfig(environment)
+  } catch {
+    return { ok: false, reason: 'NOT_CONFIGURED' }
+  }
+
+  const kv = deps.kv ?? (await getNotifyKvStore())
+  const session = await ensureAccessToken(
+    config,
+    kv,
+    nowMs,
+    fetchImpl,
+  )
+
+  if ('missing' in session) {
+    return { ok: false, reason: 'NEEDS_BOOTSTRAP' }
+  }
+
+  const latest = await fetchLatestReturn(
+    config,
+    session.tokens,
+    fetchImpl,
+    ORDER_HIGH_WATER_MAX_PAGES,
+  )
+
+  if (!latest.ok) {
+    return {
+      ok: false,
+      reason: 'RETURN_POLL_FAILED',
+      status: latest.status,
+    }
+  }
+
+  if (!latest.ret) {
+    return { ok: false, reason: 'NO_RETURNS' }
+  }
+
+  const { ret } = latest
+
+  if (
+    (await kv.get(NOTIFY_KV_KEYS.sentReturn(ret.id))) !==
+    null
+  ) {
+    return {
+      ok: true,
+      result: {
+        action: 'ALREADY_DELIVERED',
+        returnId: ret.id,
+        orderId: ret.orderId,
+      },
+    }
+  }
+
+  const deliveryId = returnDeliveryId(ret.id)
+  const existing =
+    await kv.get<BridgePending>(NOTIFY_KV_KEYS.pending)
+
+  if (existing) {
+    if (existing.deliveryId === deliveryId) {
+      return {
+        ok: true,
+        result: {
+          action: 'QUEUED',
+          returnId: ret.id,
+          orderId: ret.orderId,
+        },
+      }
+    }
+
+    return { ok: false, reason: 'PENDING_EXISTS' }
+  }
+
+  const cursor = await kv.get<StoredCursor>(
+    NOTIFY_KV_KEYS.returnCursor,
+  )
+
+  await kv.set(
+    NOTIFY_KV_KEYS.pending,
+    {
+      deliveryId,
+      channel: 'return',
+      eventId: ret.id,
+      eventType: 'CUSTOMER_RETURN',
+      orderId: ret.orderId,
+      threadId: null,
+      offerId: null,
+      messageId: null,
+      cursorBefore: cursor?.lastId ?? null,
+      createdAt: new Date(nowMs).toISOString(),
+    } satisfies BridgePending,
+    { ttlMs: PENDING_TTL_MS },
+  )
+  notifyLog('notify return replay queued', {
+    eventId: ret.id,
+  })
+
+  return {
+    ok: true,
+    result: {
+      action: 'QUEUED',
+      returnId: ret.id,
+      orderId: ret.orderId,
     },
   }
 }

@@ -17,6 +17,7 @@ import {
   NOTIFY_KV_KEYS,
   parseCheckoutForm,
   previewNotifyEmail,
+  replayLatestReturn,
   reseedNotifyOrders,
   setNotifyKvStore,
   storeNotifyOAuth,
@@ -2846,6 +2847,339 @@ void describe('customer returns', () => {
     assert.ok(
       !JSON.stringify(pending).includes('buyer42'),
     )
+  })
+})
+
+void describe('return replay', () => {
+  function replayPayload(id: string) {
+    return {
+      id,
+      referenceNumber: `ref-${id}`,
+      order: { id: `ord-${id}` },
+      createdAt: '2026-09-19T07:00:00.000Z',
+      status: 'CREATED',
+      buyer: {
+        login: 'buyer42',
+        email: 'buyer42@example.com',
+      },
+      items: [
+        {
+          offer: { id: 'off-9', name: 'Karcher K 7' },
+          quantity: 1,
+          price: { amount: '129900', currency: 'HUF' },
+          reason: { type: 'DEFECT' },
+          userComment: 'Hibás a motor.',
+        },
+      ],
+      parcels: [{ carrier: 'GLS', trackingNumber: 'GLS9' }],
+    }
+  }
+
+  function replayApp(role: 'ADMIN' | 'VIEWER') {
+    const app = new Hono<{
+      Variables: AccessVariables
+    }>()
+    app.use('*', async (context, next) => {
+      context.set('commerceHubUser', {
+        email: `${role.toLowerCase()}@example.com`,
+        role,
+        subject: null,
+      })
+      await next()
+    })
+    app.route('/auth/allegro', allegroAuth)
+
+    return app
+  }
+
+  void it('rejects anonymous and unconfirmed callers', async () => {
+    const anonymous = await allegroAuth.request(
+      '/notify-replay-latest-return',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: true }),
+      },
+    )
+    assert.equal(anonymous.status, 403)
+
+    const viewer = await replayApp('VIEWER').request(
+      '/auth/allegro/notify-replay-latest-return',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: true }),
+      },
+    )
+    assert.equal(viewer.status, 403)
+
+    const unconfirmed = await replayApp('ADMIN').request(
+      '/auth/allegro/notify-replay-latest-return',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: false }),
+      },
+    )
+    assert.equal(unconfirmed.status, 400)
+  })
+
+  void it('queues the pre-seed return without touching the cursor', async () => {
+    const kv = createMemoryNotifyKv()
+    await seedSession(kv)
+    // Pre-seed production state: cursor already sits at
+    // the return, but no delivered marker exists.
+    await kv.set(NOTIFY_KV_KEYS.returnCursor, {
+      lastId: 'ret-2',
+      updatedAt: new Date(NOW_MS).toISOString(),
+    })
+    const fetchImpl = journalFetch(
+      [],
+      [],
+      [],
+      undefined,
+      [replayPayload('ret-1'), replayPayload('ret-2')],
+    )
+
+    const queued = await replayLatestReturn({
+      environment: baseEnvironment({
+        ALLEGRO_NOTIFY_RETURN_EMAIL:
+          'info.hu@karcher.com',
+      }),
+      kv,
+      fetchImpl,
+      nowMs: NOW_MS,
+    })
+
+    assert.deepEqual(queued, {
+      ok: true,
+      result: {
+        action: 'QUEUED',
+        returnId: 'ret-2',
+        orderId: 'ord-ret-2',
+      },
+    })
+    // Cursor never rewound or advanced here.
+    assert.equal(
+      (
+        await kv.get<StoredCursor>(
+          NOTIFY_KV_KEYS.returnCursor,
+        )
+      )?.lastId,
+      'ret-2',
+    )
+    // Pending claim holds technical IDs only.
+    const pending = await kv.get<BridgePending>(
+      NOTIFY_KV_KEYS.pending,
+    )
+    assert.deepEqual(pending, {
+      deliveryId: 'return:ret-2',
+      channel: 'return',
+      eventId: 'ret-2',
+      eventType: 'CUSTOMER_RETURN',
+      orderId: 'ord-ret-2',
+      threadId: null,
+      offerId: null,
+      messageId: null,
+      cursorBefore: 'ret-2',
+      createdAt: new Date(NOW_MS).toISOString(),
+    })
+    assert.equal(
+      await kv.get(NOTIFY_KV_KEYS.sentReturn('ret-2')),
+      null,
+    )
+  })
+
+  void it('pulls the queued return once, then ACKs and replays delivered', async () => {
+    const kv = createMemoryNotifyKv()
+    await seedSession(kv)
+    await kv.set(NOTIFY_KV_KEYS.orderCursor, {
+      lastId: 'ev-0',
+      updatedAt: new Date(NOW_MS).toISOString(),
+    })
+    await kv.set(NOTIFY_KV_KEYS.messageCursor, {
+      lastId: 'm-0',
+      updatedAt: new Date(NOW_MS).toISOString(),
+    })
+    await kv.set(NOTIFY_KV_KEYS.returnCursor, {
+      lastId: 'ret-2',
+      updatedAt: new Date(NOW_MS).toISOString(),
+    })
+    const lines: string[] = []
+    const original = {
+      log: console.log,
+      warn: console.warn,
+      error: console.error,
+    }
+    console.log = (...args: unknown[]) => {
+      lines.push(
+        args.map((part) => String(part)).join(' '),
+      )
+    }
+    console.warn = console.log
+    console.error = console.log
+
+    const deps = {
+      environment: baseEnvironment({
+        ALLEGRO_NOTIFY_RETURN_EMAIL:
+          'info.hu@karcher.com',
+      }),
+      kv,
+      fetchImpl: journalFetch(
+        [],
+        [],
+        [],
+        undefined,
+        [replayPayload('ret-1'), replayPayload('ret-2')],
+      ),
+      nowMs: NOW_MS,
+    }
+
+    try {
+      const queued = await replayLatestReturn(deps)
+      assert.equal(queued.ok, true)
+
+      // Next normal pull offers the queued return even
+      // though the cursor already sits at its ID.
+      const pulled = await handleNotifyPull(
+        await signedAuth({}),
+        deps,
+      )
+
+      if (
+        pulled.httpStatus !== 200 ||
+        pulled.result.action !== 'EMAIL'
+      ) {
+        assert.fail('expected queued return EMAIL')
+      }
+
+      assert.equal(
+        pulled.result.deliveryId,
+        'return:ret-2',
+      )
+      assert.equal(
+        pulled.result.email.subject,
+        '[ALLEGRO] VISSZAKÜLDÉS – ord-ret-2',
+      )
+
+      const ack = await handleNotifyAck(
+        await signedAuth({ deliveryId: 'return:ret-2' }),
+        deps,
+      )
+      assert.deepEqual(ack, {
+        httpStatus: 200,
+        result: { action: 'ACKED', duplicate: false },
+      })
+      assert.notEqual(
+        await kv.get(
+          NOTIFY_KV_KEYS.sentReturn('ret-2'),
+        ),
+        null,
+      )
+      assert.equal(
+        await kv.get(NOTIFY_KV_KEYS.pending),
+        null,
+      )
+      // Cursor already at this return: unchanged.
+      assert.equal(
+        (
+          await kv.get<StoredCursor>(
+            NOTIFY_KV_KEYS.returnCursor,
+          )
+        )?.lastId,
+        'ret-2',
+      )
+
+      const again = await replayLatestReturn(deps)
+      assert.deepEqual(again, {
+        ok: true,
+        result: {
+          action: 'ALREADY_DELIVERED',
+          returnId: 'ret-2',
+          orderId: 'ord-ret-2',
+        },
+      })
+    } finally {
+      console.log = original.log
+      console.warn = original.warn
+      console.error = original.error
+    }
+
+    const snapshot = lines.join('\n')
+    for (const forbidden of [
+      'buyer42',
+      'Hibás a motor',
+      'GLS9',
+      'Karcher K 7',
+      'info.hu@karcher.com',
+    ]) {
+      assert.ok(
+        !snapshot.includes(forbidden),
+        `replay flow must not log: ${forbidden}`,
+      )
+    }
+  })
+
+  void it('refuses to clobber a foreign pending claim', async () => {
+    const kv = createMemoryNotifyKv()
+    await seedSession(kv)
+    await kv.set(NOTIFY_KV_KEYS.pending, {
+      deliveryId: 'order:ev-9',
+      channel: 'order',
+      eventId: 'ev-9',
+      eventType: 'READY_FOR_PROCESSING',
+      orderId: 'ord-9',
+      threadId: null,
+      offerId: null,
+      messageId: null,
+      cursorBefore: 'ev-0',
+      createdAt: new Date(NOW_MS).toISOString(),
+    } satisfies BridgePending)
+
+    const result = await replayLatestReturn({
+      environment: baseEnvironment(),
+      kv,
+      fetchImpl: journalFetch(
+        [],
+        [],
+        [],
+        undefined,
+        [replayPayload('ret-1')],
+      ),
+      nowMs: NOW_MS,
+    })
+
+    assert.deepEqual(result, {
+      ok: false,
+      reason: 'PENDING_EXISTS',
+    })
+    assert.equal(
+      (
+        await kv.get<BridgePending>(
+          NOTIFY_KV_KEYS.pending,
+        )
+      )?.deliveryId,
+      'order:ev-9',
+    )
+  })
+
+  void it('is never transport-public', () => {
+    const source = readBridgeSource(
+      'apps/api/src/access-auth.ts',
+    )
+    const start = source.indexOf(
+      'const PUBLIC_PATHS = new Set([',
+    )
+    const block = source.slice(
+      start,
+      source.indexOf('])', start),
+    )
+    assert.ok(!block.includes('notify-replay'))
+
+    const proxy = readBridgeSource(
+      'apps/web/functions/api/[[path]].ts',
+    )
+    assert.ok(!proxy.includes('notify-replay'))
   })
 })
 

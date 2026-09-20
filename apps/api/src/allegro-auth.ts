@@ -13,6 +13,7 @@ import {
   handleNotifyAck,
   handleNotifyPull,
   previewNotifyEmail,
+  replayLatestReturn,
   reseedNotifyOrders,
   resolveNotifyConfig,
 } from './allegro-notify.js'
@@ -2085,6 +2086,89 @@ allegroAuth.get(
     return context.json({
       status: 'ok',
       ...result.preview,
+    })
+  },
+)
+
+/*
+ * ADMIN-only replay of the latest customer return.
+ * Deliberately NOT public (absent from both allowlists):
+ * queues a technical pending claim for a pre-seed return
+ * so the next normal pull emails it once. Never rewinds
+ * the cursor, never emails from Deno, never persists PII.
+ * The { confirm: true } body guards accidents.
+ */
+allegroAuth.post(
+  '/notify-replay-latest-return',
+  async (context) => {
+    const user = getCommerceHubUser(context)
+
+    if (!user || user.role !== 'ADMIN') {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Administrator permission is required.',
+        },
+        403,
+      )
+    }
+
+    let body: unknown
+
+    try {
+      body = await context.req.json()
+    } catch {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Request body must be JSON.',
+        },
+        400,
+      )
+    }
+
+    if (
+      typeof body !== 'object' ||
+      body === null ||
+      (body as Record<string, unknown>)['confirm'] !==
+        true
+    ) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Replay requires { "confirm": true }.',
+        },
+        400,
+      )
+    }
+
+    const result = await replayLatestReturn()
+
+    if (!result.ok) {
+      const status =
+        result.reason === 'NEEDS_BOOTSTRAP'
+          ? 503
+          : result.reason === 'PENDING_EXISTS'
+            ? 409
+            : result.reason === 'NO_RETURNS'
+              ? 404
+              : 502
+
+      return context.json(
+        {
+          status: 'error',
+          message: 'Return replay failed.',
+          reason: result.reason,
+        },
+        status as 404 | 409 | 502 | 503,
+      )
+    }
+
+    return context.json({
+      status: 'ok',
+      ...result.result,
     })
   },
 )
