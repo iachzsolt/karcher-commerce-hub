@@ -6,6 +6,7 @@ import {
   buildMessageEmail,
   buildNotifyAuthorizeUrl,
   buildOrderEmail,
+  cancellationDisplayLabel,
   canonicalJson,
   classifyOrderEvent,
   createMemoryNotifyKv,
@@ -14,6 +15,7 @@ import {
   encryptNotifyToken,
   escapeNotifyHtml,
   exchangeNotifyCode,
+  formatMoneyDisplay,
   hmacSha256Hex,
   isNotifiableMessage,
   loadNotifyOAuth,
@@ -26,6 +28,7 @@ import {
   runAllegroNotifyTick,
   signRelayEnvelope,
   storeNotifyOAuth,
+  translateShipmentMethod,
   verifyRelayEnvelope,
   type NotifyKv,
 } from '../src/allegro-notify.ts'
@@ -1345,7 +1348,7 @@ void describe('notification email enrichment', () => {
       '1051',
       'Budapest',
       'GLS futár',
-      '1990 HUF',
+      '1 990 Ft',
       'SZÁMLÁZÁSI ADATOK',
       'Számla igényelve',
       'Igen',
@@ -1354,10 +1357,10 @@ void describe('notification email enrichment', () => {
       '12345678-2-41',
       'RENDELÉS',
       'ONLINE (PAYU)',
-      '129900 HUF',
+      '129 900 Ft',
       'Karcher WD 5 x2',
-      '64950 HUF',
-      'SKU/ajánlat: 26451800',
+      '64 950 Ft',
+      'SKU: 26451800',
       'Kérem óvatosan csomagolni.',
     ]) {
       assert.ok(
@@ -1443,10 +1446,10 @@ void describe('notification email enrichment', () => {
       'SZÁMLÁZÁSI ADATOK',
       'Teszt Kft.',
       '12345678-2-41',
-      'TÖRLÉS',
-      'BUYER_CANCELLED',
+      'TÖRLÉSI INFORMÁCIÓK',
+      'Vásárló által törölve (BUYER_CANCELLED)',
       'Karcher WD 5 x2',
-      '129900 HUF',
+      '129 900 Ft',
     ]) {
       assert.ok(
         email.textBody.includes(part),
@@ -1476,6 +1479,11 @@ void describe('notification email enrichment', () => {
     )
     assert.ok(
       email.textBody.includes('AUTO_CANCELLED'),
+    )
+    assert.ok(
+      email.textBody.includes(
+        'Automatikusan törölve (AUTO_CANCELLED)',
+      ),
     )
     assert.ok(
       !email.textBody.includes('VÁSÁRLÓ'),
@@ -2196,5 +2204,463 @@ void describe('notification messaging pagination', () => {
     assert.equal(detailCalls, 0)
     assert.equal(summary.messageEmailsSent, 1)
     assert.equal(summary.messageEmailsFailed, 0)
+  })
+})
+
+void describe('notification email visuals', () => {
+  const orderEvent = {
+    id: 'ev-9',
+    type: 'READY_FOR_PROCESSING',
+    occurredAt: '2026-09-19T07:02:00.000Z',
+    orderId: 'ord-9',
+    reason: null,
+  }
+
+  function orderDetail() {
+    return parseCheckoutForm(
+      'ord-9',
+      checkoutFormFixture('ord-9'),
+    )
+  }
+
+  function buyerMessage(
+    overrides: Record<string, unknown> = {},
+  ) {
+    return {
+      id: 'm-9',
+      threadId: 'th-1',
+      createdAt: '2026-09-19T07:11:00.000Z',
+      authorIsInterlocutor: true,
+      authorLogin: 'buyer42',
+      text: 'Hol a csomagom?',
+      attachmentNames: [] as string[],
+      orderId: 'ord-2' as string | null,
+      offerId: null as string | null,
+      ...overrides,
+    }
+  }
+
+  void it('shares one operational style without branding', () => {
+    const email = buildOrderEmail(
+      'orders@example.com',
+      orderEvent,
+      orderDetail(),
+    )
+
+    for (const marker of [
+      'max-width:800px',
+      'Arial',
+      '#e5e7eb',
+      '#f3f4f6',
+      '<table',
+      'notify-stack',
+      '@media only screen and (max-width:600px)',
+    ]) {
+      assert.ok(
+        email.htmlBody.includes(marker),
+        `HTML must contain: ${marker}`,
+      )
+    }
+
+    for (const forbidden of [
+      'Kärcher',
+      'gradient',
+      '<script',
+      'javascript:',
+    ]) {
+      assert.ok(
+        !email.htmlBody.includes(forbidden),
+        `HTML must not contain: ${forbidden}`,
+      )
+    }
+
+    // Text fallback: no allegro wordmark image, plain
+    // readable content with the same data.
+    assert.ok(email.textBody.includes('Teszt Vevő'))
+    assert.ok(
+      email.textBody.includes('[ALLEGRO] ÚJ RENDELÉS'),
+    )
+  })
+
+  void it('renders the order two-row card layout with header label', () => {
+    const email = buildOrderEmail(
+      'orders@example.com',
+      orderEvent,
+      orderDetail(),
+    )
+
+    assert.ok(
+      email.htmlBody.includes(
+        '<span style="color:#ff5a00;',
+      ),
+    )
+    assert.ok(email.htmlBody.includes('>allegro</span>'))
+    assert.ok(
+      email.htmlBody.includes('Új rendelés'),
+    )
+
+    for (const heading of [
+      'VÁSÁRLÓ',
+      'SZÁLLÍTÁSI ADATOK',
+      'SZÁMLÁZÁSI ADATOK',
+      'RENDELÉS',
+      'VÁSÁRLÓI MEGJEGYZÉS',
+      'TERMÉKEK',
+    ]) {
+      assert.ok(
+        email.htmlBody.includes(heading),
+        `HTML must contain: ${heading}`,
+      )
+    }
+
+    // Fixture lines carry unit price + SKU + offer ID
+    // but no line total, so Összeg stays hidden.
+    for (const header of [
+      'Termék',
+      'Mennyiség',
+      'Egységár',
+      'SKU',
+      'Allegro ajánlat ID',
+    ]) {
+      assert.ok(
+        email.htmlBody.includes(header),
+        `product table must contain: ${header}`,
+      )
+    }
+
+    assert.ok(
+      !email.htmlBody.includes('Összeg'),
+    )
+
+    assert.ok(
+      email.htmlBody.includes('Karcher WD 5'),
+    )
+    assert.ok(
+      email.textBody.includes('VÁSÁRLÓI MEGJEGYZÉS'),
+    )
+    assert.ok(
+      email.textBody.includes(
+        'Kérem óvatosan csomagolni.',
+      ),
+    )
+  })
+
+  void it('omits the buyer note and sparse columns cleanly', () => {
+    const detail = parseCheckoutForm('ord-9', {
+      id: 'ord-9',
+      buyer: { login: 'buyer42' },
+      lineItems: [
+        {
+          quantity: 1,
+          offer: { id: 'off-1', name: 'Egyszerű termék' },
+        },
+      ],
+    })
+    const email = buildOrderEmail(
+      'orders@example.com',
+      orderEvent,
+      detail,
+    )
+
+    assert.ok(
+      !email.htmlBody.includes('VÁSÁRLÓI MEGJEGYZÉS'),
+    )
+    assert.ok(
+      !email.htmlBody.includes('Egységár'),
+    )
+    assert.ok(
+      !email.htmlBody.includes('Összeg'),
+    )
+    assert.ok(!email.htmlBody.includes('SKU'))
+    // …but the present offer ID still gets its column.
+    assert.ok(
+      email.htmlBody.includes('Allegro ajánlat ID'),
+    )
+    assert.ok(email.htmlBody.includes('off-1'))
+    assert.ok(
+      email.htmlBody.includes('Egyszerű termék'),
+    )
+    assert.ok(
+      email.textBody.includes('Egyszerű termék x1'),
+    )
+  })
+
+  void it('renders cancellations with human-primary labels', () => {
+    const email = buildCancellationEmail(
+      'cancellations@example.com',
+      'BUYER_CANCELLED',
+      { ...orderEvent, type: 'BUYER_CANCELLED' },
+      orderDetail(),
+    )
+
+    assert.ok(
+      email.htmlBody.includes('Rendeléstörlés'),
+    )
+    assert.ok(
+      email.htmlBody.includes('TÖRLÉSI INFORMÁCIÓK'),
+    )
+    assert.ok(
+      email.textBody.includes(
+        'Vásárló által törölve (BUYER_CANCELLED)',
+      ),
+    )
+    // Full data preserved: customer, products, totals.
+    assert.ok(email.textBody.includes('Teszt Vevő'))
+    assert.ok(
+      email.textBody.includes('Karcher WD 5 x2'),
+    )
+    assert.ok(
+      email.textBody.includes('129 900 Ft'),
+    )
+
+    const auto = buildCancellationEmail(
+      'cancellations@example.com',
+      'AUTO_CANCELLED',
+      { ...orderEvent, type: 'AUTO_CANCELLED' },
+      null,
+    )
+
+    assert.ok(
+      auto.textBody.includes(
+        'Automatikusan törölve (AUTO_CANCELLED)',
+      ),
+    )
+    assert.ok(
+      !auto.textBody.includes('VÁSÁRLÓ'),
+    )
+  })
+
+  void it('renders the order-related message case', () => {
+    const detail = parseCheckoutForm(
+      'ord-2',
+      checkoutFormFixture('ord-2'),
+    )
+    const email = buildMessageEmail(
+      'customerservice@example.com',
+      buyerMessage(),
+      detail,
+    )
+
+    assert.equal(
+      email.subject,
+      '[ALLEGRO] ÜZENET – ord-2',
+    )
+    assert.ok(
+      email.htmlBody.includes('Vásárlói üzenet'),
+    )
+    assert.ok(
+      email.htmlBody.includes(
+        'Rendeléshez kapcsolódó megkeresés',
+      ),
+    )
+
+    for (const heading of [
+      'ÜGYFÉL',
+      'KAPCSOLÓDÓ RENDELÉS',
+      'ÜZENET ADATAI',
+      'ÜZENET TARTALMA',
+    ]) {
+      assert.ok(
+        email.htmlBody.includes(heading),
+        `HTML must contain: ${heading}`,
+      )
+    }
+
+    assert.ok(
+      email.textBody.includes('Hol a csomagom?'),
+    )
+    assert.ok(
+      !email.textBody.includes('nincs'),
+    )
+    assert.ok(
+      !email.htmlBody.includes('CSATOLMÁNYOK'),
+    )
+  })
+
+  void it('renders the offer-related message case', () => {
+    const email = buildMessageEmail(
+      'customerservice@example.com',
+      buyerMessage({
+        text: 'Mekkora a mérete?',
+        orderId: null,
+        offerId: 'off-9',
+      }),
+    )
+
+    assert.equal(
+      email.subject,
+      '[ALLEGRO] ÜZENET – off-9',
+    )
+    assert.ok(
+      email.htmlBody.includes(
+        'Termékhez kapcsolódó kérdés',
+      ),
+    )
+    assert.ok(
+      email.htmlBody.includes(
+        'KAPCSOLÓDÓ TERMÉK / AJÁNLAT',
+      ),
+    )
+    assert.ok(email.textBody.includes('off-9'))
+    assert.ok(
+      !email.textBody.includes('KAPCSOLÓDÓ RENDELÉS'),
+    )
+    assert.ok(!email.textBody.includes('ÜGYFÉL'))
+    assert.ok(
+      !email.textBody.includes('nincs'),
+    )
+  })
+
+  void it('renders the general message case', () => {
+    const email = buildMessageEmail(
+      'customerservice@example.com',
+      buyerMessage({
+        text: 'Általános kérdés.',
+        orderId: null,
+        offerId: null,
+      }),
+    )
+
+    assert.equal(email.subject, '[ALLEGRO] ÜZENET')
+    assert.ok(
+      email.htmlBody.includes('Általános megkeresés'),
+    )
+    assert.ok(
+      !email.textBody.includes('KAPCSOLÓDÓ'),
+    )
+    assert.ok(!email.textBody.includes('ÜGYFÉL'))
+    assert.ok(
+      email.textBody.includes('Általános kérdés.'),
+    )
+  })
+
+  void it('lists attachment filenames only', () => {
+    const email = buildMessageEmail(
+      'customerservice@example.com',
+      buyerMessage({
+        orderId: null,
+        offerId: null,
+        attachmentNames: ['szamla.pdf', 'foto.jpg'],
+      }),
+    )
+
+    assert.ok(
+      email.htmlBody.includes('CSATOLMÁNYOK'),
+    )
+    assert.ok(
+      email.htmlBody.includes('szamla.pdf'),
+    )
+    assert.ok(email.textBody.includes('foto.jpg'))
+  })
+
+  void it('escapes message line breaks and injected markup', () => {
+    const email = buildMessageEmail(
+      'customerservice@example.com',
+      buyerMessage({
+        orderId: null,
+        offerId: null,
+        authorLogin: '<img src=x onerror=alert(1)>',
+        text: 'Első sor\nMásodik <b>sor</b>',
+      }),
+    )
+
+    assert.ok(
+      email.htmlBody.includes(
+        'Első sor<br>Második &lt;b&gt;sor&lt;/b&gt;',
+      ),
+    )
+    assert.ok(
+      !email.htmlBody.includes(
+        '<img src=x onerror=alert(1)>',
+      ),
+    )
+    assert.ok(
+      email.htmlBody.includes(
+        '&lt;img src=x onerror=alert(1)&gt;',
+      ),
+    )
+    assert.ok(
+      email.textBody.includes(
+        'Első sor\nMásodik <b>sor</b>',
+      ),
+    )
+  })
+
+  void it('formats money and shipment display values', () => {
+    assert.equal(
+      formatMoneyDisplay('56980.00 HUF'),
+      '56 980 Ft',
+    )
+    assert.equal(
+      formatMoneyDisplay('54990.00 HUF'),
+      '54 990 Ft',
+    )
+    assert.equal(
+      formatMoneyDisplay('1990.00 HUF'),
+      '1 990 Ft',
+    )
+    assert.equal(
+      formatMoneyDisplay('129900 HUF'),
+      '129 900 Ft',
+    )
+    assert.equal(
+      formatMoneyDisplay('1234.50 USD'),
+      '1 234.50 USD',
+    )
+    assert.equal(formatMoneyDisplay(null), null)
+    assert.equal(
+      formatMoneyDisplay('not-a-price'),
+      'not-a-price',
+    )
+    assert.equal(
+      translateShipmentMethod(
+        'Dostawa przez sprzedającego',
+      ),
+      'Eladó által szervezett kiszállítás',
+    )
+    assert.equal(
+      translateShipmentMethod('GLS futár'),
+      'GLS futár',
+    )
+    assert.equal(
+      translateShipmentMethod('Egyedi 123 <b>'),
+      'Egyedi 123 <b>',
+    )
+    assert.equal(
+      cancellationDisplayLabel('BUYER_CANCELLED'),
+      'Vásárló által törölve',
+    )
+    assert.equal(
+      cancellationDisplayLabel('AUTO_CANCELLED'),
+      'Automatikusan törölve',
+    )
+    assert.equal(
+      cancellationDisplayLabel('SOMETHING_NEW'),
+      'SOMETHING_NEW',
+    )
+  })
+
+  void it('applies display formatting inside order text', () => {
+    const detail = parseCheckoutForm(
+      'ord-9',
+      checkoutFormFixture('ord-9'),
+    )
+    const email = buildOrderEmail(
+      'orders@example.com',
+      orderEvent,
+      detail,
+    )
+
+    assert.ok(
+      email.textBody.includes('Szállítási költség: 1 990 Ft'),
+    )
+    assert.ok(
+      email.textBody.includes('Végösszeg: 129 900 Ft'),
+    )
+    assert.ok(
+      email.textBody.includes(
+        '- Karcher WD 5 x2 · 64 950 Ft · SKU: 26451800',
+      ),
+    )
   })
 })

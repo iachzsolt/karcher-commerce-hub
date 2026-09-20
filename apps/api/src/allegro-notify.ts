@@ -1207,13 +1207,194 @@ function rowsIf(
   return value ? [[label, value]] : []
 }
 
+/* ============================================================
+ * Presentation-only display helpers. These reformat already
+ * parsed values for humans; they never fetch, infer, or drop
+ * data. Unknown codes/methods pass through untouched.
+ * ============================================================ */
+
+function groupThousands(digits: string): string {
+  return digits.replace(/\B(?=(\d{3})+(?!\d))/g, ' ')
+}
+
+function splitMoneyParts(
+  value: string,
+): { amount: string; currency: string | null } | null {
+  const match =
+    /^\s*(-?[\d\s.,]+)\s*([A-Za-z]{3})?\s*$/.exec(value)
+
+  if (!match) {
+    return null
+  }
+
+  return {
+    amount: match[1]!.replace(/\s+/g, ''),
+    currency: match[2] ?? null,
+  }
+}
+
+function parseDecimalAmount(
+  amount: string,
+): { integer: string; fraction: string | null } | null {
+  let normalized = amount
+
+  if (
+    normalized.includes(',') &&
+    !normalized.includes('.')
+  ) {
+    normalized = normalized.replace(',', '.')
+  }
+
+  if (!/^-?\d+(\.\d+)?$/.test(normalized)) {
+    return null
+  }
+
+  const negative = normalized.startsWith('-')
+  const unsigned = negative
+    ? normalized.slice(1)
+    : normalized
+  const [integer = '', fraction] = unsigned.split('.')
+
+  return {
+    integer: (negative ? '-' : '') + integer,
+    fraction: fraction ?? null,
+  }
+}
+
+/* 56980.00 HUF -> 56 980 Ft. Non-HUF keeps its code with
+ * grouped digits (1234.50 USD -> 1 234.50 USD).
+ * Unparseable input is returned unchanged. */
+export function formatMoneyDisplay(
+  value: string | null,
+): string | null {
+  if (!value) {
+    return null
+  }
+
+  const parts = splitMoneyParts(value)
+
+  if (!parts) {
+    return value
+  }
+
+  const parsed = parseDecimalAmount(parts.amount)
+
+  if (!parsed) {
+    return value
+  }
+
+  const grouped = groupThousands(parsed.integer)
+
+  if (parts.currency === 'HUF') {
+    if (
+      parsed.fraction === null ||
+      /^0+$/.test(parsed.fraction)
+    ) {
+      return `${grouped} Ft`
+    }
+
+    return `${grouped},${parsed.fraction} Ft`
+  }
+
+  const amount =
+    parsed.fraction === null
+      ? grouped
+      : `${grouped}.${parsed.fraction}`
+
+  return parts.currency
+    ? `${amount} ${parts.currency}`
+    : amount
+}
+
+/* Exactly one proven display mapping. Unknown delivery
+ * methods are returned verbatim — never guessed. */
+export function translateShipmentMethod(
+  value: string | null,
+): string | null {
+  if (value === 'Dostawa przez sprzedającego') {
+    return 'Eladó által szervezett kiszállítás'
+  }
+
+  return value
+}
+
+/* Human-primary cancellation label; the technical event
+ * type stays alongside in parentheses where emitted. */
+export function cancellationDisplayLabel(
+  kind: string,
+): string {
+  if (kind === 'BUYER_CANCELLED') {
+    return 'Vásárló által törölve'
+  }
+
+  if (kind === 'AUTO_CANCELLED') {
+    return 'Automatikusan törölve'
+  }
+
+  return kind
+}
+
+/* Shared operational email style (single place, no
+ * duplication): white background, max-width 800px, Arial,
+ * dark text, #f3f4f6 section headers, #e5e7eb borders. No
+ * branding, icons, gradients, or banners — a clean internal
+ * notification. Table-based with inline styles for Gmail /
+ * mobile / Outlook; a small media query stacks the two
+ * card columns on narrow screens (clients without support
+ * simply keep the two-column table). No JavaScript, no
+ * remote CSS. Every externally sourced string is escaped
+ * at render time. */
+export type NotifyEmailCardRow = [
+  NotifyEmailSection | null,
+  NotifyEmailSection | null,
+]
+
+export type NotifyEmailProductTable = {
+  caption: string
+  headers: string[]
+  rows: string[][]
+  textLines: string[]
+}
+
+const EMAIL_FONT =
+  "font-family:Arial,'Helvetica Neue',Helvetica,sans-serif"
+
+function sectionBoxHtml(
+  section: NotifyEmailSection,
+): string {
+  const rows = section.rows
+    .map(
+      ([label, value]) =>
+        `<tr>` +
+        `<td style="${EMAIL_FONT};font-size:13px;color:#6b7280;padding:4px 8px 4px 0;vertical-align:top;white-space:nowrap;">${escapeNotifyHtml(label)}</td>` +
+        `<td style="${EMAIL_FONT};font-size:13px;color:#111827;padding:4px 0;vertical-align:top;">${escapeNotifyHtml(value)}</td>` +
+        `</tr>`,
+    )
+    .join('')
+
+  return (
+    `<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-collapse:collapse;background:#ffffff;">` +
+    `<tr><td style="${EMAIL_FONT};font-size:12px;font-weight:bold;color:#374151;background:#f3f4f6;padding:8px 12px;border-bottom:1px solid #e5e7eb;">${escapeNotifyHtml(section.heading)}</td></tr>` +
+    `<tr><td style="padding:8px 12px;"><table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">${rows}</table></td></tr>` +
+    `</table>`
+  )
+}
+
 function emailShell(
   title: string,
-  sections: NotifyEmailSection[],
+  eventLabel: string,
+  eventSubLabel: string | null,
+  cardRows: NotifyEmailCardRow[],
+  fullSections: NotifyEmailSection[],
   freeText: Array<{ label: string; value: string }>,
+  productTable: NotifyEmailProductTable | null,
 ): { textBody: string; htmlBody: string } {
-  const visible = sections.filter(
-    (section) => section.rows.length > 0,
+  const cardSections = cardRows.flatMap(
+    ([left, right]) => [left, right],
+  )
+  const visible = [...cardSections, ...fullSections].filter(
+    (section): section is NotifyEmailSection =>
+      section !== null && section.rows.length > 0,
   )
   const textLines = [title, '']
 
@@ -1233,38 +1414,119 @@ function emailShell(
       value,
       '',
     ]),
-    EMAIL_FOOTER_TEXT,
   )
 
-  const htmlSections = visible
+  if (productTable) {
+    textLines.push(productTable.caption, '')
+
+    for (const line of productTable.textLines) {
+      textLines.push(line)
+    }
+
+    textLines.push('')
+  }
+
+  textLines.push(EMAIL_FOOTER_TEXT)
+
+  const cardRowsHtml = cardRows
+    .map(([left, right]) => {
+      const leftHtml =
+        left && left.rows.length > 0
+          ? sectionBoxHtml(left)
+          : ''
+      const rightHtml =
+        right && right.rows.length > 0
+          ? sectionBoxHtml(right)
+          : ''
+
+      if (!leftHtml && !rightHtml) {
+        return ''
+      }
+
+      if (leftHtml && !rightHtml) {
+        return (
+          `<tr><td colspan="2" class="notify-stack" style="padding:0 0 12px 0;vertical-align:top;">${leftHtml}</td></tr>`
+        )
+      }
+
+      if (!leftHtml && rightHtml) {
+        return (
+          `<tr><td colspan="2" class="notify-stack" style="padding:0 0 12px 0;vertical-align:top;">${rightHtml}</td></tr>`
+        )
+      }
+
+      return (
+        `<tr>` +
+        `<td class="notify-stack" width="50%" style="padding:0 6px 12px 0;vertical-align:top;">${leftHtml}</td>` +
+        `<td class="notify-stack" width="50%" style="padding:0 0 12px 6px;vertical-align:top;">${rightHtml}</td>` +
+        `</tr>`
+      )
+    })
+    .join('')
+  const fullHtml = fullSections
+    .filter((section) => section.rows.length > 0)
     .map(
       (section) =>
-        `<h3>${escapeNotifyHtml(section.heading)}</h3>` +
-        `<table border="0" cellpadding="4">${section.rows
-          .map(
-            ([label, value]) =>
-              `<tr><th align="left">${escapeNotifyHtml(label)}</th>` +
-              `<td>${escapeNotifyHtml(value)}</td></tr>`,
-          )
-          .join('')}</table>`,
+        `<tr><td style="padding:0 0 12px 0;vertical-align:top;">${sectionBoxHtml(section)}</td></tr>`,
     )
     .join('')
-  const htmlFree = freeText
+  const freeHtml = freeText
     .map(
       ({ label, value }) =>
-        `<h3>${escapeNotifyHtml(label)}</h3>` +
-        `<p>${escapeNotifyHtml(value).replace(/\n/g, '<br>')}</p>`,
+        `<tr><td style="padding:0 0 12px 0;vertical-align:top;">` +
+        `<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-collapse:collapse;background:#ffffff;">` +
+        `<tr><td style="${EMAIL_FONT};font-size:12px;font-weight:bold;color:#374151;background:#f3f4f6;padding:8px 12px;border-bottom:1px solid #e5e7eb;">${escapeNotifyHtml(label)}</td></tr>` +
+        `<tr><td style="${EMAIL_FONT};font-size:13px;color:#111827;padding:8px 12px;">${escapeNotifyHtml(value).replace(/\n/g, '<br>')}</td></tr>` +
+        `</table></td></tr>`,
     )
     .join('')
+  const productHtml = productTable
+    ? `<tr><td style="padding:0 0 12px 0;vertical-align:top;">` +
+      `<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-collapse:collapse;background:#ffffff;">` +
+      `<tr><td colspan="${productTable.headers.length}" style="${EMAIL_FONT};font-size:12px;font-weight:bold;color:#374151;background:#f3f4f6;padding:8px 12px;border-bottom:1px solid #e5e7eb;">${escapeNotifyHtml(productTable.caption)}</td></tr>` +
+      `<tr>${productTable.headers
+        .map(
+          (header) =>
+            `<th align="left" style="${EMAIL_FONT};font-size:12px;font-weight:bold;color:#374151;padding:6px 8px;border-bottom:1px solid #e5e7eb;background:#f9fafb;">${escapeNotifyHtml(header)}</th>`,
+        )
+        .join('')}</tr>` +
+      productTable.rows
+        .map(
+          (row) =>
+            `<tr>${row
+              .map(
+                (cell) =>
+                  `<td style="${EMAIL_FONT};font-size:13px;color:#111827;padding:6px 8px;border-bottom:1px solid #e5e7eb;vertical-align:top;">${escapeNotifyHtml(cell)}</td>`,
+              )
+              .join('')}</tr>`,
+        )
+        .join('') +
+      `</table></td></tr>`
+    : ''
 
   return {
     textBody: textLines.join('\n'),
     htmlBody:
-      `<html><body><h2>${escapeNotifyHtml(title)}</h2>` +
-      htmlSections +
-      htmlFree +
-      `<hr><p><small>${escapeNotifyHtml(EMAIL_FOOTER_TEXT)}</small></p>` +
-      `</body></html>`,
+      `<html><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8">` +
+      `<style>@media only screen and (max-width:600px){.notify-stack{display:block !important;width:100% !important;padding-left:0 !important;padding-right:0 !important;}}</style>` +
+      `</head><body style="margin:0;padding:0;background:#ffffff;">` +
+      `<table width="100%" cellpadding="0" cellspacing="0" style="background:#ffffff;"><tr><td align="center" style="padding:16px 8px;">` +
+      `<table width="100%" cellpadding="0" cellspacing="0" style="max-width:800px;border-collapse:collapse;">` +
+      `<tr>` +
+      `<td align="left" style="${EMAIL_FONT};padding:0 0 12px 0;vertical-align:middle;"><span style="color:#ff5a00;font-weight:bold;font-size:28px;">allegro</span></td>` +
+      `<td align="right" style="${EMAIL_FONT};padding:0 0 12px 0;vertical-align:middle;">` +
+      `<div style="font-size:15px;font-weight:bold;color:#111827;">${escapeNotifyHtml(eventLabel)}</div>` +
+      (eventSubLabel
+        ? `<div style="font-size:12px;color:#6b7280;">${escapeNotifyHtml(eventSubLabel)}</div>`
+        : '') +
+      `</td></tr>` +
+      `<tr><td colspan="2" style="${EMAIL_FONT};font-size:13px;font-weight:bold;color:#111827;padding:0 0 12px 0;">${escapeNotifyHtml(title)}</td></tr>` +
+      cardRowsHtml +
+      fullHtml +
+      freeHtml +
+      productHtml +
+      `<tr><td colspan="2" style="${EMAIL_FONT};font-size:11px;color:#6b7280;padding:8px 0 0 0;border-top:1px solid #e5e7eb;">${escapeNotifyHtml(EMAIL_FOOTER_TEXT)}</td></tr>` +
+      `</table></td></tr></table></body></html>`,
   }
 }
 
@@ -1339,11 +1601,11 @@ function shippingSection(
       ...rowsIf('Telefon', detail.shipping.phone),
       ...rowsIf(
         'Szállítási mód',
-        detail.shipmentMethod,
+        translateShipmentMethod(detail.shipmentMethod),
       ),
       ...rowsIf(
         'Szállítási költség',
-        detail.deliveryCost,
+        formatMoneyDisplay(detail.deliveryCost),
       ),
       ...rowsIf(
         'Átvételi pont',
@@ -1410,26 +1672,106 @@ function billingSection(
   }
 }
 
-function formatProductLine(
-  line: OrderProductLine,
-): string {
-  const parts = [`${line.name} x${line.quantity}`]
-
-  if (line.unitPrice) {
-    parts.push(line.unitPrice)
+/* Compact product table: only columns with at least one
+ * value are rendered. SKU and the Allegro offer ID are
+ * separate columns — a bare SKU is never labeled as an
+ * offer reference. */
+function productTableData(
+  lines: OrderProductLine[],
+): NotifyEmailProductTable | null {
+  if (lines.length === 0) {
+    return null
   }
 
-  const reference = line.sku ?? line.offerId
+  const showUnit = lines.some(
+    (line) => line.unitPrice !== null,
+  )
+  const showTotal = lines.some(
+    (line) => line.lineTotal !== null,
+  )
+  const showSku = lines.some(
+    (line) => line.sku !== null,
+  )
+  const showOffer = lines.some(
+    (line) => line.offerId !== null,
+  )
+  const headers = ['Termék', 'Mennyiség']
 
-  if (reference) {
-    parts.push(`SKU/ajánlat: ${reference}`)
+  if (showUnit) {
+    headers.push('Egységár')
   }
 
-  if (line.lineTotal) {
-    parts.push(`Összesen: ${line.lineTotal}`)
+  if (showTotal) {
+    headers.push('Összeg')
   }
 
-  return `- ${parts.join(' · ')}`
+  if (showSku) {
+    headers.push('SKU')
+  }
+
+  if (showOffer) {
+    headers.push('Allegro ajánlat ID')
+  }
+
+  const rows = lines.map((line) => {
+    const cells = [
+      line.name,
+      String(line.quantity),
+    ]
+
+    if (showUnit) {
+      cells.push(
+        formatMoneyDisplay(line.unitPrice) ?? '–',
+      )
+    }
+
+    if (showTotal) {
+      cells.push(
+        formatMoneyDisplay(line.lineTotal) ?? '–',
+      )
+    }
+
+    if (showSku) {
+      cells.push(line.sku ?? '–')
+    }
+
+    if (showOffer) {
+      cells.push(line.offerId ?? '–')
+    }
+
+    return cells
+  })
+  const textLines = lines.map((line) => {
+    const parts = [`${line.name} x${line.quantity}`]
+    const unit = formatMoneyDisplay(line.unitPrice)
+
+    if (unit) {
+      parts.push(unit)
+    }
+
+    if (line.sku) {
+      parts.push(`SKU: ${line.sku}`)
+    }
+
+    if (line.offerId) {
+      parts.push(`Ajánlat: ${line.offerId}`)
+    }
+
+    const total = formatMoneyDisplay(line.lineTotal)
+
+    if (total) {
+      parts.push(`Összesen: ${total}`)
+    }
+
+    return `- ${parts.join(' · ')}`
+  })
+
+  return {
+    caption: 'TERMÉKEK',
+    headers,
+    rows,
+    textLines,
+  }
 }
 
 function paymentText(
@@ -1456,7 +1798,10 @@ function orderSection(
       ['Rendelési azonosító', detail.id],
       ...rowsIf('Időpont', detail.occurredAt),
       ...rowsIf('Fizetés', paymentText(detail)),
-      ...rowsIf('Végösszeg', detail.total),
+      ...rowsIf(
+        'Végösszeg',
+        formatMoneyDisplay(detail.total),
+      ),
       ...rowsIf('Pénznem', detail.currency),
     ],
   }
@@ -1813,31 +2158,30 @@ export function buildOrderEmail(
   detail: OrderDetail,
 ): NotifyEmail {
   const title = `[ALLEGRO] ÚJ RENDELÉS – ${detail.id}`
-  const productText =
-    detail.productLines.length > 0
-      ? detail.productLines
-          .map(formatProductLine)
-          .join('\n')
-      : '–'
+  const products = productTableData(detail.productLines)
   const { textBody, htmlBody } = emailShell(
     title,
+    'Új rendelés',
+    null,
     [
-      customerSection(detail),
-      shippingSection(detail),
-      billingSection(detail),
-      orderSection(detail),
+      [customerSection(detail), shippingSection(detail)],
+      [billingSection(detail), orderSection(detail)],
     ],
+    [],
     [
-      { label: 'Termékek', value: productText },
       ...(detail.messageToSeller
         ? [
             {
-              label: 'Vevő üzenete az eladónak',
+              label: 'VÁSÁRLÓI MEGJEGYZÉS',
               value: detail.messageToSeller,
             },
           ]
         : []),
+      ...(!products
+        ? [{ label: 'TERMÉKEK', value: '–' }]
+        : []),
     ],
+    products,
   )
 
   return { to, subject: title, textBody, htmlBody }
@@ -1851,49 +2195,83 @@ export function buildCancellationEmail(
 ): NotifyEmail {
   const orderId = detail?.id ?? event.orderId ?? event.id
   const title = `[ALLEGRO] TÖRLÉS – ${orderId}`
-  const productText =
-    detail && detail.productLines.length > 0
-      ? detail.productLines
-          .map(formatProductLine)
-          .join('\n')
+  const displayKind = cancellationDisplayLabel(kind)
+  const products =
+    detail !== null
+      ? productTableData(detail.productLines)
       : null
   const { textBody, htmlBody } = emailShell(
     title,
-    [
-      ...(detail
-        ? [
+    'Rendeléstörlés',
+    null,
+    detail
+      ? [
+          [
             customerSection(detail),
             shippingSection(detail),
+          ],
+          [
             billingSection(detail),
-          ]
-        : []),
-      {
-        heading: 'TÖRLÉS',
-        rows: [
-          ['Típus', kind],
-          ['Rendelési azonosító', orderId],
-          ...rowsIf(
-            'Időpont',
-            event.occurredAt ?? detail?.occurredAt ?? null,
-          ),
-          ...rowsIf(
-            'Indok',
-            event.reason ?? null,
-          ),
-          ...rowsIf(
-            'Végösszeg',
-            detail?.total ?? null,
-          ),
-          ...rowsIf(
-            'Pénznem',
-            detail?.currency ?? null,
-          ),
+            {
+              heading: 'TÖRLÉSI INFORMÁCIÓK',
+              rows: [
+                [
+                  'Típus',
+                  displayKind === kind
+                    ? kind
+                    : `${displayKind} (${kind})`,
+                ],
+                ['Rendelési azonosító', orderId],
+                ...rowsIf(
+                  'Időpont',
+                  event.occurredAt ??
+                    detail?.occurredAt ??
+                    null,
+                ),
+                ...rowsIf(
+                  'Indok',
+                  event.reason ?? null,
+                ),
+                ...rowsIf(
+                  'Végösszeg',
+                  formatMoneyDisplay(detail?.total ?? null),
+                ),
+                ...rowsIf(
+                  'Pénznem',
+                  detail?.currency ?? null,
+                ),
+              ],
+            },
+          ],
+        ]
+      : [
+          [
+            null,
+            {
+              heading: 'TÖRLÉSI INFORMÁCIÓK',
+              rows: [
+                [
+                  'Típus',
+                  displayKind === kind
+                    ? kind
+                    : `${displayKind} (${kind})`,
+                ],
+                ['Rendelési azonosító', orderId],
+                ...rowsIf(
+                  'Időpont',
+                  event.occurredAt ?? null,
+                ),
+                ...rowsIf(
+                  'Indok',
+                  event.reason ?? null,
+                ),
+              ],
+            },
+          ],
         ],
-      },
-    ],
-    productText
-      ? [{ label: 'Termékek', value: productText }]
-      : [],
+    [],
+    [],
+    products,
   )
 
   return { to, subject: title, textBody, htmlBody }
@@ -1936,6 +2314,48 @@ function messageCustomerSection(
   }
 }
 
+/* Buyer message relationship: order-related, offer /
+ * product-related, or general. Irrelevant relationship
+ * sections are omitted entirely — never "nincs"
+ * placeholders. Product name/SKU render only when present
+ * in the available data (the message payload carries the
+ * offer ID; names come from order enrichment when the
+ * message is order-related). */
+function messageRelationSection(
+  message: NotifyMessage,
+  detail: OrderDetail | null,
+): NotifyEmailSection | null {
+  if (message.orderId) {
+    return {
+      heading: 'KAPCSOLÓDÓ RENDELÉS',
+      rows: [
+        ...rowsIf('Rendelés', message.orderId),
+        ...rowsIf('Ajánlat', message.offerId),
+      ],
+    }
+  }
+
+  if (message.offerId) {
+    const enriched = detail?.productLines.find(
+      (line) => line.offerId === message.offerId,
+    )
+
+    return {
+      heading: 'KAPCSOLÓDÓ TERMÉK / AJÁNLAT',
+      rows: [
+        ...rowsIf('Ajánlat', message.offerId),
+        ...rowsIf(
+          'Termék',
+          enriched?.name ?? null,
+        ),
+        ...rowsIf('SKU', enriched?.sku ?? null),
+      ],
+    }
+  }
+
+  return null
+}
+
 export function buildMessageEmail(
   to: string,
   message: NotifyMessage,
@@ -1946,32 +2366,50 @@ export function buildMessageEmail(
     : message.offerId
       ? `[ALLEGRO] ÜZENET – ${message.offerId}`
       : '[ALLEGRO] ÜZENET'
+  const subLabel = message.orderId
+    ? 'Rendeléshez kapcsolódó megkeresés'
+    : message.offerId
+      ? 'Termékhez kapcsolódó kérdés'
+      : 'Általános megkeresés'
+  const customer = detail
+    ? messageCustomerSection(detail)
+    : null
+  const relation = messageRelationSection(
+    message,
+    detail,
+  )
+  const meta: NotifyEmailSection = {
+    heading: 'ÜZENET ADATAI',
+    rows: [
+      ...rowsIf('Vevő', message.authorLogin),
+      ...rowsIf('Időpont', message.createdAt),
+    ],
+  }
+  const attachments: NotifyEmailSection = {
+    heading: 'CSATOLMÁNYOK',
+    rows: message.attachmentNames.map(
+      (name, index) =>
+        [`${index + 1}. fájl`, name] as [
+          string,
+          string,
+        ],
+    ),
+  }
   const { textBody, htmlBody } = emailShell(
     title,
+    'Vásárlói üzenet',
+    subLabel,
+    customer || relation
+      ? [[customer, relation]]
+      : [],
+    [meta, attachments],
     [
       {
-        heading: 'ÜZENET',
-        rows: [
-          ...rowsIf('Vevő', message.authorLogin),
-          ...rowsIf('Időpont', message.createdAt),
-          ...rowsIf('Rendelés', message.orderId),
-          ...rowsIf('Ajánlat', message.offerId),
-          [
-            'Csatolmány',
-            message.attachmentNames.length > 0
-              ? message.attachmentNames.join(', ')
-              : 'nincs',
-          ],
-        ],
-      },
-      ...(detail ? [messageCustomerSection(detail)] : []),
-    ],
-    [
-      {
-        label: 'Vevő üzenete',
+        label: 'ÜZENET TARTALMA',
         value: message.text ?? '–',
       },
     ],
+    null,
   )
 
   return { to, subject: title, textBody, htmlBody }
