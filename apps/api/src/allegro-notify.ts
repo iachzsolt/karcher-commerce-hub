@@ -1467,13 +1467,13 @@ function emailShell(
     .filter((section) => section.rows.length > 0)
     .map(
       (section) =>
-        `<tr><td style="padding:0 0 12px 0;vertical-align:top;">${sectionBoxHtml(section)}</td></tr>`,
+        `<tr><td colspan="2" style="padding:0 0 12px 0;vertical-align:top;">${sectionBoxHtml(section)}</td></tr>`,
     )
     .join('')
   const freeHtml = freeText
     .map(
       ({ label, value }) =>
-        `<tr><td style="padding:0 0 12px 0;vertical-align:top;">` +
+        `<tr><td colspan="2" style="padding:0 0 12px 0;vertical-align:top;">` +
         `<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-collapse:collapse;background:#ffffff;">` +
         `<tr><td style="${EMAIL_FONT};font-size:12px;font-weight:bold;color:#374151;background:#f3f4f6;padding:8px 12px;border-bottom:1px solid #e5e7eb;">${escapeNotifyHtml(label)}</td></tr>` +
         `<tr><td style="${EMAIL_FONT};font-size:13px;color:#111827;padding:8px 12px;">${escapeNotifyHtml(value).replace(/\n/g, '<br>')}</td></tr>` +
@@ -1481,7 +1481,7 @@ function emailShell(
     )
     .join('')
   const productHtml = productTable
-    ? `<tr><td style="padding:0 0 12px 0;vertical-align:top;">` +
+    ? `<tr><td colspan="2" style="padding:0 0 12px 0;vertical-align:top;">` +
       `<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-collapse:collapse;background:#ffffff;">` +
       `<tr><td colspan="${productTable.headers.length}" style="${EMAIL_FONT};font-size:12px;font-weight:bold;color:#374151;background:#f3f4f6;padding:8px 12px;border-bottom:1px solid #e5e7eb;">${escapeNotifyHtml(productTable.caption)}</td></tr>` +
       `<tr>${productTable.headers
@@ -1820,6 +1820,66 @@ function orderSection(
  * logs, or diagnostics (see the privacy tests).
  * ============================================================ */
 
+/* Raw numeric amount + currency from an Allegro money
+ * value ({ amount, currency } object or "123.45 HUF"
+ * string). Used only to fall back to price × quantity when
+ * a line carries no canonical totalPrice — never to
+ * override one. */
+function moneyParts(
+  value: unknown,
+): { amount: number; currency: string | null } | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value)
+      ? { amount: value, currency: null }
+      : null
+  }
+
+  if (typeof value === 'string') {
+    const split = splitMoneyParts(value)
+
+    if (!split) {
+      return null
+    }
+
+    const parsed = parseDecimalAmount(split.amount)
+
+    if (!parsed) {
+      return null
+    }
+
+    const amount = Number(
+      parsed.fraction === null
+        ? parsed.integer
+        : `${parsed.integer}.${parsed.fraction}`,
+    )
+
+    return Number.isFinite(amount)
+      ? { amount, currency: split.currency }
+      : null
+  }
+
+  const record = recordOf(value)
+  const rawAmount = record?.['amount']
+
+  if (
+    typeof rawAmount !== 'string' &&
+    typeof rawAmount !== 'number'
+  ) {
+    return null
+  }
+
+  const parsed = moneyParts(rawAmount)
+
+  if (!parsed) {
+    return null
+  }
+
+  return {
+    amount: parsed.amount,
+    currency: textOrNull(record?.['currency']),
+  }
+}
+
 function moneyText(value: unknown): string | null {
   if (typeof value === 'string') {
     return value === '' ? null : value
@@ -1944,6 +2004,30 @@ export function parseCheckoutForm(
       typeof item?.['quantity'] === 'number'
         ? item['quantity']
         : 1
+    const unitSource =
+      item?.['price'] ?? item?.['originalPrice']
+    // Canonical totalPrice wins; only when absent is the
+    // total derived from the line's own price × quantity.
+    let lineTotal = moneyText(item?.['totalPrice'])
+
+    if (!lineTotal) {
+      const unit = moneyParts(unitSource)
+
+      if (
+        unit &&
+        Number.isFinite(quantity) &&
+        quantity > 0
+      ) {
+        const total =
+          Math.round(unit.amount * quantity * 100) / 100
+
+        lineTotal = moneyText({
+          amount: String(total),
+          currency: unit.currency,
+        })
+      }
+    }
+
     productLines.push({
       name,
       quantity,
@@ -1951,13 +2035,9 @@ export function parseCheckoutForm(
       sku: textOrNull(
         recordOf(offer?.['external'])?.['id'],
       ),
-      unitPrice: moneyText(
-        item?.['price'] ?? item?.['originalPrice'],
-      ),
-      lineTotal: moneyText(item?.['totalPrice']),
-      currency: moneyCurrency(
-        item?.['price'] ?? item?.['originalPrice'],
-      ),
+      unitPrice: moneyText(unitSource),
+      lineTotal,
+      currency: moneyCurrency(unitSource),
     })
   }
 

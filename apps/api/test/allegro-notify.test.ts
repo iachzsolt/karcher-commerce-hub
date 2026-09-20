@@ -2313,12 +2313,14 @@ void describe('notification email visuals', () => {
       )
     }
 
-    // Fixture lines carry unit price + SKU + offer ID
-    // but no line total, so Összeg stays hidden.
+    // Fixture lines carry unit price + SKU + offer ID;
+    // the missing canonical total falls back to
+    // price × quantity, so Összeg is restored.
     for (const header of [
       'Termék',
       'Mennyiség',
       'Egységár',
+      'Összeg',
       'SKU',
       'Allegro ajánlat ID',
     ]) {
@@ -2329,7 +2331,31 @@ void describe('notification email visuals', () => {
     }
 
     assert.ok(
-      !email.htmlBody.includes('Összeg'),
+      email.htmlBody.includes('129 900 Ft'),
+    )
+
+    // The product block spans the full email width: its
+    // own outer row opens with a colspan="2" cell directly
+    // containing the TERMÉKEK table (not the buyer-note
+    // row, which shares the same row pattern).
+    const tableOpen =
+      '<tr><td colspan="2" ' +
+      'style="padding:0 0 12px 0;vertical-align:top;">' +
+      '<table width="100%"'
+    const productsAt =
+      email.htmlBody.indexOf('TERMÉKEK')
+    const rowStart = email.htmlBody.lastIndexOf(
+      tableOpen,
+      productsAt,
+    )
+    assert.ok(rowStart >= 0)
+    const between = email.htmlBody.slice(
+      rowStart,
+      productsAt,
+    )
+    assert.ok(between.includes('<td colspan="2"'))
+    assert.ok(
+      !between.includes('VÁSÁRLÓI MEGJEGYZÉS'),
     )
 
     assert.ok(
@@ -2583,6 +2609,69 @@ void describe('notification email visuals', () => {
       email.textBody.includes(
         'Első sor\nMásodik <b>sor</b>',
       ),
+    )
+  })
+
+  void it('prefers the canonical line total over price × quantity', () => {
+    const detail = parseCheckoutForm('ord-9', {
+      id: 'ord-9',
+      buyer: { login: 'buyer42' },
+      lineItems: [
+        {
+          quantity: 2,
+          offer: { id: 'off-1', name: 'Termék' },
+          price: { amount: '64950', currency: 'HUF' },
+          totalPrice: {
+            amount: '130000',
+            currency: 'HUF',
+          },
+        },
+      ],
+    })
+    const email = buildOrderEmail(
+      'orders@example.com',
+      orderEvent,
+      detail,
+    )
+
+    // Canonical totalPrice wins; never recomputed.
+    assert.ok(
+      email.htmlBody.includes('130 000 Ft'),
+    )
+    assert.ok(
+      !email.htmlBody.includes('129 900 Ft'),
+    )
+    assert.ok(
+      email.textBody.includes('Összesen: 130 000 Ft'),
+    )
+  })
+
+  void it('derives a missing line total from price × quantity', () => {
+    const detail = parseCheckoutForm('ord-9', {
+      id: 'ord-9',
+      buyer: { login: 'buyer42' },
+      lineItems: [
+        {
+          quantity: 3,
+          offer: { id: 'off-1', name: 'Termék' },
+          price: { amount: '1990.00', currency: 'HUF' },
+        },
+      ],
+    })
+    const email = buildOrderEmail(
+      'orders@example.com',
+      orderEvent,
+      detail,
+    )
+
+    assert.ok(
+      email.htmlBody.includes('Összeg'),
+    )
+    assert.ok(
+      email.htmlBody.includes('5 970 Ft'),
+    )
+    assert.ok(
+      email.textBody.includes('Összesen: 5 970 Ft'),
     )
   })
 
