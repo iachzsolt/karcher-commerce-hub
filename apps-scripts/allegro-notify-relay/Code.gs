@@ -194,7 +194,8 @@ function runAllegroNotificationPoll() {
 
       if (pull.action === 'NOOP' || pull.action === 'SEEDED') {
         Logger.log(
-          'No email to send (action=' + pull.action + ').'
+          'No more notifications. Sent in this run: ' +
+          sent + '.'
         );
         return pull.action;
       }
@@ -217,6 +218,9 @@ function runAllegroNotificationPoll() {
             name: 'Allegro értesítés',
             noReply: true
           }
+        );
+        Logger.log(
+          'Notification sent: ' + pull.deliveryId
         );
       } catch (sendError) {
         // NO ACK on send failure: the event stays pending
@@ -242,6 +246,9 @@ function runAllegroNotificationPoll() {
         return 'ACK_FAILED';
       }
 
+      Logger.log(
+        'Notification ACKed: ' + pull.deliveryId
+      );
       sent++;
     }
 

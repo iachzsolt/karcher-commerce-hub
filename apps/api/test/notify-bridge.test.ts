@@ -9,6 +9,7 @@ import {
   bridgeCanonicalMessage,
   createMemoryNotifyKv,
   fetchOrderHighWater,
+  getNotifyDiagnostics,
   handleNotifyAck,
   handleNotifyPull,
   hmacSha256Hex,
@@ -146,10 +147,20 @@ function journalFetch(
     interlocutor: boolean
   }> = [],
   calls: string[] = [],
+  stats: unknown = {
+    latestEvent: {
+      id: 'ev-stats-latest',
+      occurredAt: '2026-09-19T07:59:00.000Z',
+    },
+  },
 ) {
   return async (input: string): Promise<Response> => {
     calls.push(input)
     const url = new URL(input)
+
+    if (url.pathname.endsWith('/order/event-stats')) {
+      return jsonResponse(stats)
+    }
 
     if (url.pathname.endsWith('/order/events')) {
       const from = url.searchParams.get('from')
@@ -1673,6 +1684,279 @@ void describe('bridge proxy origin handling', () => {
     assert.ok(
       !source.includes('Access-Control-Allow-Origin'),
     )
+  })
+})
+
+void describe('notify diagnostics', () => {
+  function adminApp(role: 'ADMIN' | 'VIEWER') {
+    const app = new Hono<{
+      Variables: AccessVariables
+    }>()
+    app.use('*', async (context, next) => {
+      context.set('commerceHubUser', {
+        email: `${role.toLowerCase()}@example.com`,
+        role,
+        subject: null,
+      })
+      await next()
+    })
+    app.route('/auth/allegro', allegroAuth)
+
+    return app
+  }
+
+  async function kvSnapshot(kv: NotifyKv) {
+    return {
+      orderCursor: await kv.get(NOTIFY_KV_KEYS.orderCursor),
+      messageCursor: await kv.get(
+        NOTIFY_KV_KEYS.messageCursor,
+      ),
+      pending: await kv.get(NOTIFY_KV_KEYS.pending),
+      sentOrder: await kv.get(
+        NOTIFY_KV_KEYS.sentOrder('ev-1'),
+      ),
+      sentMessage: await kv.get(
+        NOTIFY_KV_KEYS.sentMessage('m-1'),
+      ),
+    }
+  }
+
+  void it('rejects anonymous and non-admin callers', async () => {
+    const anonymous = await allegroAuth.request(
+      '/notify-diagnostics',
+    )
+    assert.equal(anonymous.status, 403)
+
+    const viewer = await adminApp('VIEWER').request(
+      '/auth/allegro/notify-diagnostics',
+    )
+    assert.equal(viewer.status, 403)
+  })
+
+  void it('reports technical state without mutating KV or leaking PII', async () => {
+    const kv = createMemoryNotifyKv()
+    // The route uses the real clock: seed a session valid
+    // now, not at the fixed NOW_MS used elsewhere.
+    await storeNotifyOAuth(
+      kv,
+      {
+        accessToken: 'stub-access-token',
+        refreshToken: 'stub-refresh-token',
+        expiresAt: Date.now() + 3600_000,
+      },
+      Buffer.from(TOKEN_KEY, 'base64'),
+      Date.now(),
+    )
+    await kv.set(NOTIFY_KV_KEYS.orderCursor, {
+      lastId: 'ev-0',
+      updatedAt: new Date(NOW_MS).toISOString(),
+    })
+    await kv.set(NOTIFY_KV_KEYS.messageCursor, {
+      lastId: 'm-15',
+      updatedAt: new Date(NOW_MS).toISOString(),
+    })
+    await kv.set(NOTIFY_KV_KEYS.pending, {
+      deliveryId: 'order:ev-1',
+      channel: 'order',
+      eventId: 'ev-1',
+      eventType: 'READY_FOR_PROCESSING',
+      orderId: 'ord-1',
+      threadId: null,
+      offerId: null,
+      messageId: null,
+      cursorBefore: 'ev-0',
+      createdAt: new Date(NOW_MS).toISOString(),
+    } satisfies BridgePending)
+    const events: OrderStubEvent[] = [
+      {
+        id: 'ev-1',
+        type: 'READY_FOR_PROCESSING',
+        orderId: 'ord-1',
+      },
+      {
+        id: 'ev-2',
+        type: 'BOUGHT',
+        orderId: 'ord-2',
+      },
+    ]
+    const before = await kvSnapshot(kv)
+    const envKeys = Object.keys(baseEnvironment())
+    const envSnapshot = new Map(
+      envKeys.map((key) => [key, process.env[key]]),
+    )
+    const env = baseEnvironment()
+    for (const key of envKeys) {
+      process.env[key] = env[key]
+    }
+
+    setNotifyKvStore(kv)
+    // Point the route at the stubbed Allegro API.
+    const realFetch = globalThis.fetch
+    const stubCalls: string[] = []
+    globalThis.fetch = journalFetch(
+      events,
+      [],
+      stubCalls,
+      {
+        latestEvent: {
+          id: 'ev-900',
+          occurredAt: '2026-09-19T07:59:00.000Z',
+        },
+      },
+    ) as unknown as typeof fetch
+
+    try {
+      const response = await adminApp('ADMIN').request(
+        '/auth/allegro/notify-diagnostics',
+      )
+      assert.equal(response.status, 200)
+      const body = (await response.json()) as Record<
+        string,
+        unknown
+      >
+
+      assert.equal(body['status'], 'ok')
+      assert.equal(body['enabled'], true)
+      assert.equal(body['orderCursor'], 'ev-0')
+      assert.deepEqual(body['orderPending'], {
+        deliveryId: 'order:ev-1',
+        eventId: 'ev-1',
+        eventType: 'READY_FOR_PROCESSING',
+        orderId: 'ord-1',
+      })
+      assert.equal(body['messageCursorPresent'], true)
+      assert.deepEqual(body['allegroLatestEvent'], {
+        id: 'ev-900',
+        occurredAt: '2026-09-19T07:59:00.000Z',
+      })
+      assert.deepEqual(body['eventsAfterCursor'], [
+        {
+          id: 'ev-1',
+          type: 'READY_FOR_PROCESSING',
+          checkoutFormId: 'ord-1',
+          occurredAt: '2026-09-19T07:00:00.000Z',
+        },
+        {
+          id: 'ev-2',
+          type: 'BOUGHT',
+          checkoutFormId: 'ord-2',
+          occurredAt: '2026-09-19T07:00:00.000Z',
+        },
+      ])
+
+      // No PII anywhere in the sanitized response.
+      const serialized = JSON.stringify(body)
+      for (const forbidden of [
+        'buyer42',
+        'example.com',
+        'Teszt',
+        'Hol a csomagom',
+        'street',
+        'phone',
+      ]) {
+        assert.ok(
+          !serialized.includes(forbidden),
+          `diagnostic leaks: ${forbidden}`,
+        )
+      }
+    } finally {
+      globalThis.fetch = realFetch
+      setNotifyKvStore(null)
+      for (const [key, value] of envSnapshot) {
+        if (value === undefined) {
+          delete process.env[key]
+        } else {
+          process.env[key] = value
+        }
+      }
+    }
+
+    // Read-only: cursor/dedupe/pending untouched.
+    assert.deepEqual(await kvSnapshot(kv), before)
+    // Only GETs: stats + one bounded events page.
+    assert.deepEqual(stubCalls, [
+      'https://api.test/order/event-stats',
+      'https://api.test/order/events?from=ev-0&limit=20',
+    ])
+  })
+
+  void it('works while disabled and reports a message pending as null', async () => {
+    const kv = createMemoryNotifyKv()
+    await seedSession(kv)
+    await kv.set(NOTIFY_KV_KEYS.pending, {
+      deliveryId: 'message:m-9',
+      channel: 'message',
+      eventId: 'm-9',
+      eventType: 'MESSAGE',
+      orderId: null,
+      threadId: 'th-1',
+      offerId: null,
+      messageId: 'm-9',
+      cursorBefore: 'm-8',
+      createdAt: new Date(NOW_MS).toISOString(),
+    } satisfies BridgePending)
+
+    const result = await getNotifyDiagnostics({
+      environment: baseEnvironment({
+        ALLEGRO_NOTIFY_ENABLED: 'false',
+      }),
+      kv,
+      fetchImpl: journalFetch([]),
+      nowMs: NOW_MS,
+    })
+
+    assert.equal(result.ok, true)
+
+    if (result.ok) {
+      assert.equal(result.diagnostics.enabled, false)
+      assert.equal(
+        result.diagnostics.orderPending,
+        null,
+      )
+      assert.equal(
+        result.diagnostics.messageCursorPresent,
+        false,
+      )
+      assert.deepEqual(
+        result.diagnostics.eventsAfterCursor,
+        [],
+      )
+    }
+  })
+
+  void it('is never transport-public', () => {
+    const source = readBridgeSource(
+      'apps/api/src/access-auth.ts',
+    )
+    const start = source.indexOf(
+      'const PUBLIC_PATHS = new Set([',
+    )
+    const block = source.slice(
+      start,
+      source.indexOf('])', start),
+    )
+    assert.ok(!block.includes('notify-diagnostics'))
+
+    const proxy = readBridgeSource(
+      'apps/web/functions/api/[[path]].ts',
+    )
+    const proxyStart = proxy.indexOf(
+      'const PUBLIC_PROXY_PATHS = new Set([',
+    )
+    const proxyBlock = proxy.slice(
+      proxyStart,
+      proxy.indexOf('])', proxyStart),
+    )
+    assert.ok(!proxyBlock.includes('notify-diagnostics'))
+
+    const bridgeStart = proxy.indexOf(
+      'const BRIDGE_SERVER_PATHS = new Set([',
+    )
+    const bridgeBlock = proxy.slice(
+      bridgeStart,
+      proxy.indexOf('])', bridgeStart),
+    )
+    assert.ok(!bridgeBlock.includes('notify-diagnostics'))
   })
 })
 

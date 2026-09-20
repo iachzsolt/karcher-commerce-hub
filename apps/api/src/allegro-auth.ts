@@ -8,6 +8,7 @@ import {
   ALLEGRO_NOTIFY_SCOPES,
   buildNotifyAuthorizeUrl,
   exchangeNotifyCode,
+  getNotifyDiagnostics,
   getNotifyKvStore,
   handleNotifyAck,
   handleNotifyPull,
@@ -1974,6 +1975,51 @@ allegroAuth.post('/notify-ack', async (context) => {
 
   return context.json({ ok: true, ...outcome.result })
 })
+
+/*
+ * ADMIN-only read-only bridge diagnostic. Deliberately NOT
+ * public (absent from both allowlists): inspects cursors,
+ * the pending claim, and Allegro journal position without
+ * sending, advancing, marking, claiming, or touching Neon.
+ * Works whether ALLEGRO_NOTIFY_ENABLED is true or false.
+ */
+allegroAuth.get(
+  '/notify-diagnostics',
+  async (context) => {
+    const user = getCommerceHubUser(context)
+
+    if (!user || user.role !== 'ADMIN') {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Administrator permission is required.',
+        },
+        403,
+      )
+    }
+
+    const result = await getNotifyDiagnostics()
+
+    if (!result.ok) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Notification diagnostic failed.',
+          reason: result.reason,
+        },
+        result.reason === 'NEEDS_BOOTSTRAP'
+          ? 503
+          : 502,
+      )
+    }
+
+    return context.json({
+      status: 'ok',
+      ...result.diagnostics,
+    })
+  },
+)
 
 /*
  * ADMIN-only safe order recovery. Deliberately NOT public

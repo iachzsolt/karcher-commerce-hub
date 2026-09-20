@@ -3377,6 +3377,198 @@ export async function reseedNotifyOrders(
 }
 
 /* ============================================================
+ * ADMIN-only read-only diagnostic. Strictly observational:
+ * KV is only READ (cursors, pending claim), Allegro sees
+ * only GETs (event-stats + one bounded events page), and
+ * nothing is emailed, advanced, marked, claimed, or written
+ * to Neon (this module has no database imports by
+ * construction). Only technical identifiers leave this
+ * function — event/order/message/thread IDs, types, and
+ * timestamps. No buyer, customer, order-content, or message
+ * fields are selected, stored, or logged. Works whether the
+ * bridge flag is on or off.
+ * ============================================================ */
+
+export type NotifyDiagnosticsEvent = {
+  id: string
+  type: string
+  checkoutFormId: string | null
+  occurredAt: string | null
+}
+
+export type NotifyDiagnostics = {
+  enabled: boolean
+  orderCursor: string | null
+  orderPending: {
+    deliveryId: string
+    eventId: string
+    eventType: string
+    orderId: string | null
+  } | null
+  messageCursorPresent: boolean
+  allegroLatestEvent: {
+    id: string
+    occurredAt: string | null
+  } | null
+  eventsAfterCursor: NotifyDiagnosticsEvent[]
+}
+
+/* /order/event-stats shape is parsed defensively: only a
+ * technical latest-event id + timestamp are extracted, and
+ * anything unrecognized yields null instead of invented
+ * data. */
+function parseLatestEvent(
+  payload: unknown,
+): { id: string; occurredAt: string | null } | null {
+  const root = recordOf(payload)
+
+  if (!root) {
+    return null
+  }
+
+  const holders = [
+    root['latestEvent'],
+    root['lastEvent'],
+    root,
+  ]
+
+  for (const holder of holders) {
+    const record = recordOf(holder)
+
+    if (!record) {
+      continue
+    }
+
+    const id =
+      textOrNull(record['id']) ??
+      textOrNull(record['eventId'])
+
+    if (!id) {
+      continue
+    }
+
+    return {
+      id,
+      occurredAt:
+        textOrNull(record['occurredAt']) ??
+        textOrNull(record['createdAt']),
+    }
+  }
+
+  return null
+}
+
+export async function getNotifyDiagnostics(
+  deps: BridgeDeps = {},
+): Promise<
+  | { ok: true; diagnostics: NotifyDiagnostics }
+  | { ok: false; reason: string; status?: number }
+> {
+  const environment = deps.environment ?? process.env
+  const nowMs = deps.nowMs ?? Date.now()
+  const fetchImpl = deps.fetchImpl ?? defaultFetch()
+
+  let config: NotifyConfig
+
+  try {
+    config = resolveNotifyConfig(environment)
+  } catch {
+    return { ok: false, reason: 'NOT_CONFIGURED' }
+  }
+
+  // Read-only by construction: every KV access below is
+  // get(), every Allegro call is GET, and no email,
+  // cursor, dedupe, pending, or Neon mutation exists on
+  // this path.
+  const kv = deps.kv ?? (await getNotifyKvStore())
+  const session = await ensureAccessToken(
+    config,
+    kv,
+    nowMs,
+    fetchImpl,
+  )
+
+  if ('missing' in session) {
+    return { ok: false, reason: 'NEEDS_BOOTSTRAP' }
+  }
+
+  const { tokens } = session
+  const orderCursor = await kv.get<StoredCursor>(
+    NOTIFY_KV_KEYS.orderCursor,
+  )
+  const messageCursor = await kv.get<StoredCursor>(
+    NOTIFY_KV_KEYS.messageCursor,
+  )
+  const pending =
+    await kv.get<BridgePending>(NOTIFY_KV_KEYS.pending)
+
+  const statsFetched = await fetchJson(
+    `${config.apiUrl}/order/event-stats`,
+    tokens,
+    config,
+    fetchImpl,
+  )
+
+  if (!statsFetched.ok) {
+    return {
+      ok: false,
+      reason: 'DIAGNOSTIC_POLL_FAILED',
+      status: statsFetched.status,
+    }
+  }
+
+  let eventsAfterCursor: NotifyDiagnosticsEvent[] = []
+
+  if (isValidCursor(orderCursor)) {
+    const pageFetched = await fetchJson(
+      `${config.apiUrl}/order/events?from=${encodeURIComponent(orderCursor.lastId)}&limit=20`,
+      tokens,
+      config,
+      fetchImpl,
+    )
+
+    if (!pageFetched.ok) {
+      return {
+        ok: false,
+        reason: 'DIAGNOSTIC_POLL_FAILED',
+        status: pageFetched.status,
+      }
+    }
+
+    eventsAfterCursor = parseOrderEvents(
+      pageFetched.data,
+    ).map((event) => ({
+      id: event.id,
+      type: event.type,
+      checkoutFormId: event.orderId,
+      occurredAt: event.occurredAt,
+    }))
+  }
+
+  return {
+    ok: true,
+    diagnostics: {
+      enabled: config.enabled,
+      orderCursor: orderCursor?.lastId ?? null,
+      orderPending:
+        pending && pending.channel === 'order'
+          ? {
+              deliveryId: pending.deliveryId,
+              eventId: pending.eventId,
+              eventType: pending.eventType,
+              orderId: pending.orderId,
+            }
+          : null,
+      messageCursorPresent: isValidCursor(messageCursor),
+      allegroLatestEvent: parseLatestEvent(
+        statsFetched.data,
+      ),
+      eventsAfterCursor,
+    },
+  }
+}
+
+/* ============================================================
  * Notification tick: ONE cron invocation handles order
  * events and buyer messages with effectively-once delivery.
  *

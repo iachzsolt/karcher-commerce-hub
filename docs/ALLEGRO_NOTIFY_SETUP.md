@@ -174,7 +174,24 @@ the notification cron is gone.
 - Deno logs contain only event types and technical IDs —
   never customer data.
 
-## 8. Troubleshooting BAD_SIGNATURE
+## 8. Read-only ADMIN diagnostic
+
+Logged in as an administrator, in the browser console on the
+hub host (the app attaches your Bearer token automatically):
+
+```js
+await (await fetch('/api/auth/allegro/notify-diagnostics')).json()
+```
+
+`GET /api/auth/allegro/notify-diagnostics` is ADMIN-only,
+never public, and strictly read-only: no email, no cursor
+advance, no dedupe/pending writes, no Neon. It reports the
+flag, cursors, the technical pending claim, the latest
+Allegro journal event, and events after the cursor (IDs,
+types, and timestamps only — never customer data). It works
+whether the bridge flag is on or off.
+
+## 9. Troubleshooting BAD_SIGNATURE
 
 The pull/ack HMAC is byte-identical on both sides (pinned
 cross-runtime ping vector in `test/notify-bridge.test.ts`:
