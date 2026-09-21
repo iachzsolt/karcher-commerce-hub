@@ -3795,6 +3795,283 @@ function normalizeSkuForDiagnostic(value: string) {
     .replace(/[^A-Z0-9]/g, '')
 }
 
+export type PricingIngressAudit = {
+  receivedAt: string
+  endpoint: '/pricing/sync' | '/pricing/reconcile'
+  rawItems: number
+  normalizedItems: number
+  acceptedItems: number
+  droppedItems: number
+  dropReasons: {
+    blankSku: number
+    invalidRow: number
+    invalidField: number
+    duplicateSku: number
+    unmatched: number
+    other: number
+  }
+  droppedSkus: string[]
+}
+
+/*
+ * Pure last-push audit over a normalize result. rawItems
+ * is body.items.length BEFORE any filtering; the equation
+ * rawItems = normalizedItems + droppedItems always holds.
+ * Only technical counts and SKU strings are retained —
+ * never prices, names, credentials, tokens, or the body.
+ */
+const PRICING_INGRESS_AUDIT_SKU_LIMIT = 200
+
+export function buildPricingIngressAudit(
+  endpoint: PricingIngressAudit['endpoint'],
+  body: unknown,
+  result: NormalizePricingPayloadResult,
+  receivedAt: string = new Date().toISOString(),
+): PricingIngressAudit {
+  const items =
+    typeof body === 'object' &&
+    body !== null &&
+    Array.isArray(
+      (body as { items?: unknown }).items,
+    )
+      ? (body as { items: unknown[] }).items
+      : []
+  const rawItems = items.length
+  const dropReasons: PricingIngressAudit['dropReasons'] =
+    {
+      blankSku: 0,
+      invalidRow: 0,
+      invalidField: 0,
+      duplicateSku: 0,
+      unmatched: 0,
+      other: 0,
+    }
+  const droppedSkuSet = new Set<string>()
+  const collectSku = (sku: unknown) => {
+    if (
+      typeof sku === 'string' &&
+      sku.trim() !== '' &&
+      droppedSkuSet.size <
+        PRICING_INGRESS_AUDIT_SKU_LIMIT
+    ) {
+      droppedSkuSet.add(sku.trim())
+    }
+  }
+
+  let normalizedItems = 0
+
+  if (result.ok) {
+    normalizedItems = result.validItems.length
+
+    for (const row of result.invalidRows) {
+      collectSku(row.sku)
+
+      if (row.sku === '') {
+        dropReasons.blankSku += 1
+      } else if (
+        row.errors.includes('INVALID_ROW')
+      ) {
+        dropReasons.invalidRow += 1
+      } else {
+        dropReasons.invalidField += 1
+      }
+    }
+
+    for (const row of result.duplicateRows) {
+      collectSku(row.sku)
+    }
+
+    dropReasons.duplicateSku =
+      result.duplicateRows.length
+
+    for (const item of result.unmatchedItems) {
+      collectSku(item.sku)
+    }
+
+    dropReasons.unmatched =
+      result.unmatchedItems.length
+  } else {
+    for (const row of result.invalidRows) {
+      collectSku(row.sku)
+
+      if (row.sku === '') {
+        dropReasons.blankSku += 1
+      } else if (
+        row.errors.includes('INVALID_ROW')
+      ) {
+        dropReasons.invalidRow += 1
+      } else {
+        dropReasons.invalidField += 1
+      }
+    }
+
+    for (const sku of result.duplicateSkus) {
+      collectSku(sku)
+    }
+
+    dropReasons.duplicateSku =
+      result.summary.duplicateSkuRows
+  }
+
+  const accounted =
+    dropReasons.blankSku +
+    dropReasons.invalidRow +
+    dropReasons.invalidField +
+    dropReasons.duplicateSku +
+    dropReasons.unmatched
+  const droppedItems = Math.max(
+    0,
+    rawItems - normalizedItems,
+  )
+  dropReasons.other = Math.max(
+    0,
+    droppedItems - accounted,
+  )
+
+  return {
+    receivedAt,
+    endpoint,
+    rawItems,
+    normalizedItems,
+    acceptedItems: normalizedItems,
+    droppedItems,
+    dropReasons,
+    droppedSkus: [...droppedSkuSet],
+  }
+}
+
+type PricingIngressKvStore = {
+  get(
+    key: readonly unknown[],
+  ): Promise<unknown | null>
+  set(
+    key: readonly unknown[],
+    value: unknown,
+  ): Promise<void>
+}
+
+let pricingIngressKvOverride:
+  | PricingIngressKvStore
+  | null = null
+
+export function setPricingIngressAuditStore(
+  store: PricingIngressKvStore | null,
+) {
+  pricingIngressKvOverride = store
+}
+
+async function openPricingIngressKv(): Promise<PricingIngressKvStore | null> {
+  const deno = (
+    globalThis as unknown as {
+      Deno?: { openKv?: () => Promise<{
+        get(key: readonly unknown[]): Promise<{ value: unknown }>
+        set(key: readonly unknown[], value: unknown): Promise<unknown>
+      }> }
+    }
+  ).Deno
+
+  if (!deno?.openKv) {
+    return null
+  }
+
+  try {
+    const kv = await deno.openKv()
+
+    return {
+      get: async (key) =>
+        (await kv.get([...key])).value ?? null,
+      set: async (key, value) => {
+        await kv.set([...key], value)
+      },
+    }
+  } catch {
+    return null
+  }
+}
+
+const PRICING_INGRESS_AUDIT_KEY = [
+  'arukereso',
+  'pricing',
+  'ingress-audit',
+] as const
+
+/*
+ * Best-effort audit write. Never throws and never affects
+ * the pricing response: failures (no Deno KV locally, KV
+ * errors) degrade to a warning while sync/reconcile
+ * proceed untouched.
+ */
+export async function recordPricingIngressAudit(
+  endpoint: PricingIngressAudit['endpoint'],
+  body: unknown,
+  result: NormalizePricingPayloadResult,
+): Promise<void> {
+  try {
+    const store =
+      pricingIngressKvOverride ??
+      (await openPricingIngressKv())
+
+    if (!store) {
+      return
+    }
+
+    await store.set(
+      [...PRICING_INGRESS_AUDIT_KEY],
+      buildPricingIngressAudit(endpoint, body, result),
+    )
+  } catch (error) {
+    console.warn(
+      'Pricing ingress audit write failed:',
+      error instanceof Error
+        ? error.message
+        : 'Unknown error',
+    )
+  }
+}
+
+export async function readPricingIngressAudit(): Promise<PricingIngressAudit | null> {
+  try {
+    const store =
+      pricingIngressKvOverride ??
+      (await openPricingIngressKv())
+
+    if (!store) {
+      return null
+    }
+
+    const value = await store.get([
+      ...PRICING_INGRESS_AUDIT_KEY,
+    ])
+
+    if (
+      !value ||
+      typeof value !== 'object' ||
+      Array.isArray(value)
+    ) {
+      return null
+    }
+
+    const record = value as Record<string, unknown>
+
+    if (
+      typeof record['receivedAt'] !== 'string' ||
+      (record['endpoint'] !== '/pricing/sync' &&
+        record['endpoint'] !== '/pricing/reconcile') ||
+      typeof record['rawItems'] !== 'number' ||
+      typeof record['normalizedItems'] !== 'number' ||
+      typeof record['acceptedItems'] !== 'number' ||
+      typeof record['droppedItems'] !== 'number' ||
+      !Array.isArray(record['droppedSkus'])
+    ) {
+      return null
+    }
+
+    return value as PricingIngressAudit
+  } catch {
+    return null
+  }
+}
+
 arukeresoApi.post(
   '/pricing/reconcile',
   async (context) => {
@@ -3828,6 +4105,12 @@ arukeresoApi.post(
         allowNoMatches: true,
         fullDiagnostics: true,
       })
+
+    await recordPricingIngressAudit(
+      '/pricing/reconcile',
+      body,
+      normalized,
+    )
 
     if (!normalized.ok) {
       return context.json(
@@ -4892,6 +5175,12 @@ arukeresoApi.post(
     const normalized =
       await normalizePricingPayload(body)
 
+    await recordPricingIngressAudit(
+      '/pricing/sync',
+      body,
+      normalized,
+    )
+
     if (!normalized.ok) {
       return context.json(
         {
@@ -5439,6 +5728,64 @@ export function computePricingImportDiagnostics(input: {
   }
 }
 
+export type PricingSourceSummary = {
+  parsedRows: number
+  validSkuRows: number
+  uniqueSkus: number
+  statusBreakdown: {
+    hasCompetitor: number
+    noCompetitor: number
+    partialMarketData: number
+  }
+  sampleSkus: string[]
+}
+
+/*
+ * Pure summary over stored pricing source rows (the
+ * normalized survivors of the last sync: identifier +
+ * market status only, never prices). No secrets, no names.
+ */
+export function summarizePricingSourceRows(
+  rows: Array<{
+    identifier: string | null
+    dataStatus: string | null
+  }>,
+): PricingSourceSummary {
+  const valid = rows.filter(
+    (row) =>
+      typeof row.identifier === 'string' &&
+      row.identifier.trim() !== '',
+  )
+  const unique = new Set(
+    valid.map((row) =>
+      (row.identifier as string).trim(),
+    ),
+  )
+  const statusBreakdown = {
+    hasCompetitor: 0,
+    noCompetitor: 0,
+    partialMarketData: 0,
+  }
+
+  for (const row of rows) {
+    if (row.dataStatus === 'HAS_COMPETITOR') {
+      statusBreakdown.hasCompetitor += 1
+    } else if (row.dataStatus === 'NO_COMPETITOR') {
+      statusBreakdown.noCompetitor += 1
+    } else {
+      statusBreakdown.partialMarketData += 1
+    }
+  }
+
+  return {
+    parsedRows: rows.length,
+    validSkuRows: valid.length,
+    uniqueSkus: unique.size,
+    statusBreakdown,
+    sampleSkus: [...unique].sort().slice(0, 12),
+  }
+}
+
 /*
  * ADMIN-only read-only pricing import diagnostic.
  * Deliberately NOT public and NOT gated by the
@@ -5532,6 +5879,198 @@ arukeresoApi.get(
         sourceRows,
         hubProducts,
       }),
+    })
+  },
+)
+
+/*
+ * ADMIN-only last-push ingress audit. Deliberately NOT
+ * public and NOT gated by the pricing sync token: normal
+ * Commerce Hub ADMIN auth only. Returns the technical
+ * audit recorded at ingress (counts + dropped SKUs only);
+ * 404 when no push has been audited yet.
+ */
+arukeresoApi.get(
+  '/pricing/ingress-diagnostics',
+  async (context) => {
+    const user = getCommerceHubUser(context)
+
+    if (!user || user.role !== 'ADMIN') {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Administrator permission is required.',
+        },
+        403,
+      )
+    }
+
+    const audit = await readPricingIngressAudit()
+
+    if (!audit) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'No pricing ingress audit recorded yet.',
+        },
+        404,
+      )
+    }
+
+    return context.json({
+      status: 'ok',
+      ...audit,
+    })
+  },
+)
+
+/*
+ * ADMIN-only live source diagnostic. Deliberately NOT
+ * public and NOT gated by the pricing sync token: normal
+ * Commerce Hub ADMIN auth only. Read-only (SELECTs), no
+ * sync execution, no writes, no prices/credentials in the
+ * response.
+ *
+ * Architectural fact this endpoint reports honestly:
+ * Commerce Hub never fetches Pricing Cockpit — there is no
+ * pull source, pagination, CSV download, or source
+ * credential on the Hub side. The Cockpit sender pushes
+ * `{ items: [...] }` payloads to POST /pricing/sync (or
+ * /pricing/reconcile for read-only checks), and only
+ * normalized valid rows are persisted. Raw payloads are
+ * never stored, so rawRows/rawBytes and sync-time drop
+ * reasons are unobservable post-hoc and reported as null
+ * instead of fabricated. Pre-persistence drops remain
+ * visible only via /pricing/reconcile run with the Cockpit
+ * payload and sync token (server-side, per
+ * docs/ARUKERESO_RECONCILIATION.md).
+ */
+arukeresoApi.get(
+  '/pricing/source-diagnostics',
+  async (context) => {
+    const user = getCommerceHubUser(context)
+
+    if (!user || user.role !== 'ADMIN') {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Administrator permission is required.',
+        },
+        403,
+      )
+    }
+
+    let database
+
+    try {
+      database = requireDatabase()
+    } catch {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Database configuration is missing.',
+        },
+        503,
+      )
+    }
+
+    const connectionRows = await database
+      .select({
+        id: dataConnections.id,
+        name: dataConnections.name,
+      })
+      .from(dataConnections)
+      .where(
+        and(
+          eq(dataConnections.purpose, 'PRICING'),
+          eq(dataConnections.isActive, true),
+        ),
+      )
+      .limit(2)
+
+    if (connectionRows.length !== 1) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            connectionRows.length === 0
+              ? 'Nem található aktív árazási forrás.'
+              : 'Több aktív árazási forrás található; a diagnosztika nem egyértelmű.',
+        },
+        409,
+      )
+    }
+
+    const connection = connectionRows[0]!
+    const storedRows = await database
+      .select({
+        identifier: pricingSourceItems.identifier,
+        dataStatus: pricingSourceItems.dataStatus,
+      })
+      .from(pricingSourceItems)
+      .where(
+        and(
+          eq(
+            pricingSourceItems.connectionId,
+            connection.id,
+          ),
+          eq(
+            pricingSourceItems.marketCode,
+            PRICING_MARKET_CODE,
+          ),
+          eq(
+            pricingSourceItems.currency,
+            PRICING_CURRENCY,
+          ),
+        ),
+      )
+    const summary =
+      summarizePricingSourceRows(storedRows)
+
+    return context.json({
+      status: 'ok',
+      source: {
+        type: 'push',
+        identifier: `${connection.name} (${connection.id})`,
+        transport: 'POST /arukereso/pricing/sync',
+        payloadPersisted: false,
+      },
+      fetch: {
+        mode: 'none',
+        httpStatus: null,
+        fetchedAt: new Date().toISOString(),
+        rawBytes: null,
+        rawRows: null,
+        pagesFetched: 0,
+        pageSizes: [],
+        totalReportedBySource: null,
+        reason:
+          'Commerce Hub never fetches Pricing Cockpit; ' +
+          'the Cockpit sender pushes payloads. Raw ' +
+          'payloads are not persisted, so pre-persistence ' +
+          'counts are observable only via /pricing/reconcile.',
+      },
+      parsed: summary,
+      filtering: {
+        droppedRows: null,
+        reasons: {
+          blankSku: null,
+          invalidRow: null,
+          missingRequiredField: null,
+          duplicateSkuExtraRows: null,
+          other: null,
+        },
+        reason:
+          'Sync-time drops are not persisted; run ' +
+          '/pricing/reconcile with the Cockpit payload ' +
+          'to observe them.',
+      },
+      sampleSkus: summary.sampleSkus,
+      persistedSourceRows: storedRows.length,
     })
   },
 )

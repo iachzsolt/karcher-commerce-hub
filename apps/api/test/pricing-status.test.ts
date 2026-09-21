@@ -10,10 +10,15 @@ import { Hono } from 'hono'
 import {
   applyPricingItemSearch,
   arukeresoApi,
+  buildPricingIngressAudit,
   collapsePricingItemRows,
   computePricingDiagnostics,
   computePricingImportDiagnostics,
   derivePricingItemFeedState,
+  readPricingIngressAudit,
+  recordPricingIngressAudit,
+  setPricingIngressAuditStore,
+  summarizePricingSourceRows,
 } from '../src/arukereso.ts'
 import type { AccessVariables } from '../src/access-auth.ts'
 
@@ -650,5 +655,491 @@ void describe(
         },
       )
     }
+  },
+)
+
+void describe(
+  'summarizePricingSourceRows',
+  () => {
+    void it(
+      'counts parsed rows, statuses and samples without secrets',
+      () => {
+        const result =
+          summarizePricingSourceRows([
+            {
+              identifier: '1.111-111.0',
+              dataStatus: 'HAS_COMPETITOR',
+            },
+            {
+              identifier: ' 2.222-222.0 ',
+              dataStatus: 'NO_COMPETITOR',
+            },
+            {
+              identifier: '2.222-222.0',
+              dataStatus: 'PARTIAL_MARKET_DATA',
+            },
+            {
+              identifier: '',
+              dataStatus: 'HAS_COMPETITOR',
+            },
+            {
+              identifier: null,
+              dataStatus: null,
+            },
+          ])
+
+        assert.equal(result.parsedRows, 5)
+        assert.equal(result.validSkuRows, 3)
+        assert.equal(result.uniqueSkus, 2)
+        assert.deepEqual(
+          result.statusBreakdown,
+          {
+            hasCompetitor: 2,
+            noCompetitor: 1,
+            partialMarketData: 2,
+          },
+        )
+        assert.deepEqual(result.sampleSkus, [
+          '1.111-111.0',
+          '2.222-222.0',
+        ])
+
+        const serialized =
+          JSON.stringify(result)
+        assert.ok(
+          !/token|secret|password|credential|iban|swift/i.test(
+            serialized,
+          ),
+        )
+      },
+    )
+  },
+)
+
+void describe(
+  'pricing ingress audit',
+  () => {
+    function okResult() {
+      return {
+        ok: true as const,
+        validItems: [
+          { sku: 'a-1' },
+          { sku: 'a-2' },
+        ],
+        summary: {
+          rows: 6,
+          matchedRows: 2,
+          unmatchedRows: 1,
+          validMatchedRows: 2,
+          invalidMatchedRows: 0,
+          duplicateSkuRows: 2,
+          hasCompetitor: 0,
+          noCompetitor: 0,
+          partialMarketData: 0,
+        },
+        unmatchedSample: ['u-1'],
+        unmatchedItems: [
+          {
+            rowIndex: 4,
+            sku: 'u-1',
+            name: null,
+            ean: null,
+            index: 1,
+            medianIndex: 1,
+            averageIndex: 1,
+            priceIndexBps: 10000,
+            medianIndexBps: 10000,
+            averageIndexBps: 10000,
+            marketStatus: 'HAS_COMPETITOR' as const,
+          },
+        ],
+        invalidRows: [
+          {
+            rowIndex: 0,
+            sku: '',
+            errors: ['INVALID_SKU'],
+          },
+        ],
+        duplicateRows: [
+          { rowIndex: 2, sku: 'd-1' },
+          { rowIndex: 3, sku: 'd-1' },
+        ],
+      }
+    }
+
+    void it(
+      'reconciles raw = normalized + dropped with real reasons',
+      () => {
+        const audit = buildPricingIngressAudit(
+          '/pricing/sync',
+          {
+            items: [{}, {}, {}, {}, {}, {}],
+          },
+          okResult() as never,
+          '2026-09-20T10:00:00.000Z',
+        )
+
+        assert.equal(audit.endpoint, '/pricing/sync')
+        assert.equal(audit.rawItems, 6)
+        assert.equal(audit.normalizedItems, 2)
+        assert.equal(audit.acceptedItems, 2)
+        assert.equal(audit.droppedItems, 4)
+        assert.deepEqual(audit.dropReasons, {
+          blankSku: 1,
+          invalidRow: 0,
+          invalidField: 0,
+          duplicateSku: 2,
+          unmatched: 1,
+          other: 0,
+        })
+        assert.deepEqual(audit.droppedSkus, [
+          'd-1',
+          'u-1',
+        ])
+
+        const serialized = JSON.stringify(audit)
+        assert.ok(
+          !/token|secret|password|credential|price|competitor|median|average/i.test(
+            serialized,
+          ),
+        )
+      },
+    )
+
+    void it(
+      'caps dropped SKUs at 200 on failure results',
+      () => {
+        const invalidRows = Array.from(
+          { length: 250 },
+          (_, index) => ({
+            rowIndex: index,
+            sku: `bad-${index}`,
+            errors: ['INVALID_INDEX'],
+          }),
+        )
+        const audit = buildPricingIngressAudit(
+          '/pricing/reconcile',
+          { items: invalidRows },
+          {
+            ok: false,
+            message: 'nope',
+            summary: {
+              rows: 250,
+              matchedRows: 0,
+              unmatchedRows: 0,
+              validMatchedRows: 0,
+              invalidMatchedRows: 250,
+              duplicateSkuRows: 0,
+              hasCompetitor: 0,
+              noCompetitor: 0,
+              partialMarketData: 0,
+            },
+            invalidRows,
+            duplicateSkus: [],
+          } as never,
+        )
+
+        assert.equal(audit.rawItems, 250)
+        assert.equal(audit.normalizedItems, 0)
+        assert.equal(audit.droppedItems, 250)
+        assert.equal(
+          audit.dropReasons.invalidField,
+          250,
+        )
+        assert.equal(audit.droppedSkus.length, 200)
+      },
+    )
+
+    void it(
+      'records technical-only audits and never throws',
+      async () => {
+        const written: unknown[] = []
+        setPricingIngressAuditStore({
+          get: async () => null,
+          set: async (_, value) => {
+            written.push(value)
+          },
+        })
+
+        try {
+          await recordPricingIngressAudit(
+            '/pricing/sync',
+            { items: [{}, {}] },
+            okResult() as never,
+          )
+        } finally {
+          setPricingIngressAuditStore(null)
+        }
+
+        assert.equal(written.length, 1)
+        const entry = written[0] as Record<
+          string,
+          unknown
+        >
+        assert.deepEqual(
+          Object.keys(entry).sort(),
+          [
+            'acceptedItems',
+            'dropReasons',
+            'droppedItems',
+            'droppedSkus',
+            'endpoint',
+            'normalizedItems',
+            'rawItems',
+            'receivedAt',
+          ].sort(),
+        )
+
+        setPricingIngressAuditStore({
+          get: async () => {
+            throw new Error('kv down')
+          },
+          set: async () => {
+            throw new Error('kv down')
+          },
+        })
+
+        try {
+          // Audit failure must never break pricing sync.
+          await recordPricingIngressAudit(
+            '/pricing/sync',
+            { items: [{}] },
+            okResult() as never,
+          )
+          assert.equal(
+            await readPricingIngressAudit(),
+            null,
+          )
+        } finally {
+          setPricingIngressAuditStore(null)
+        }
+      },
+    )
+  },
+)
+
+void describe(
+  'pricing source-diagnostics route',
+  () => {
+    const repoRoot = join(
+      dirname(fileURLToPath(import.meta.url)),
+      '..',
+      '..',
+      '..',
+    )
+
+    void it(
+      'rejects anonymous callers before touching the database',
+      async () => {
+        const response =
+          await arukeresoApi.request(
+            '/pricing/source-diagnostics',
+          )
+
+        assert.equal(response.status, 403)
+        assert.deepEqual(
+          await response.json(),
+          {
+            status: 'error',
+            message:
+              'Administrator permission is required.',
+          },
+        )
+      },
+    )
+
+    void it(
+      'is never transport-public',
+      () => {
+        const source = readFileSync(
+          join(
+            repoRoot,
+            'apps/api/src/access-auth.ts',
+          ),
+          'utf8',
+        )
+        const start = source.indexOf(
+          'const PUBLIC_PATHS = new Set([',
+        )
+        const block = source.slice(
+          start,
+          source.indexOf('])', start),
+        )
+
+        assert.ok(
+          !block.includes('pricing/source-diagnostics'),
+        )
+        assert.ok(
+          !block.includes('pricing/diagnostics'),
+        )
+      },
+    )
+
+    if (!process.env.DATABASE_URL) {
+      void it(
+        'fails closed for ADMIN without database configuration',
+        async () => {
+          const app = new Hono<{
+            Variables: AccessVariables
+          }>()
+          app.use('*', async (context, next) => {
+            context.set('commerceHubUser', {
+              email: 'admin@example.com',
+              role: 'ADMIN',
+              subject: null,
+            })
+            await next()
+          })
+          app.route('/arukereso', arukeresoApi)
+
+          const response = await app.request(
+            '/arukereso/pricing/source-diagnostics',
+          )
+
+          assert.equal(response.status, 503)
+        },
+      )
+    }
+  },
+)
+
+void describe(
+  'pricing ingress-diagnostics route',
+  () => {
+    const repoRoot = join(
+      dirname(fileURLToPath(import.meta.url)),
+      '..',
+      '..',
+      '..',
+    )
+
+    function adminApp() {
+      const app = new Hono<{
+        Variables: AccessVariables
+      }>()
+      app.use('*', async (context, next) => {
+        context.set('commerceHubUser', {
+          email: 'admin@example.com',
+          role: 'ADMIN',
+          subject: null,
+        })
+        await next()
+      })
+      app.route('/arukereso', arukeresoApi)
+
+      return app
+    }
+
+    void it(
+      'rejects anonymous callers before touching state',
+      async () => {
+        const response =
+          await arukeresoApi.request(
+            '/pricing/ingress-diagnostics',
+          )
+
+        assert.equal(response.status, 403)
+        assert.deepEqual(
+          await response.json(),
+          {
+            status: 'error',
+            message:
+              'Administrator permission is required.',
+          },
+        )
+      },
+    )
+
+    void it(
+      'returns 404 when no push has been audited yet',
+      async () => {
+        setPricingIngressAuditStore({
+          get: async () => null,
+          set: async () => {},
+        })
+
+        try {
+          const response = await adminApp().request(
+            '/arukereso/pricing/ingress-diagnostics',
+          )
+
+          assert.equal(response.status, 404)
+        } finally {
+          setPricingIngressAuditStore(null)
+        }
+      },
+    )
+
+    void it(
+      'returns the latest technical audit to ADMIN',
+      async () => {
+        const audit = buildPricingIngressAudit(
+          '/pricing/sync',
+          { items: [{}, {}] },
+          {
+            ok: true,
+            validItems: [{ sku: 'a-1' }],
+            summary: {
+              rows: 2,
+              matchedRows: 1,
+              unmatchedRows: 1,
+              validMatchedRows: 1,
+              invalidMatchedRows: 0,
+              duplicateSkuRows: 0,
+              hasCompetitor: 0,
+              noCompetitor: 0,
+              partialMarketData: 0,
+            },
+            unmatchedSample: [],
+            unmatchedItems: [],
+            invalidRows: [],
+            duplicateRows: [],
+          } as never,
+          '2026-09-20T10:00:00.000Z',
+        )
+        setPricingIngressAuditStore({
+          get: async () => audit,
+          set: async () => {},
+        })
+
+        try {
+          const response = await adminApp().request(
+            '/arukereso/pricing/ingress-diagnostics',
+          )
+
+          assert.equal(response.status, 200)
+          assert.deepEqual(
+            await response.json(),
+            { status: 'ok', ...audit },
+          )
+        } finally {
+          setPricingIngressAuditStore(null)
+        }
+      },
+    )
+
+    void it(
+      'is never transport-public',
+      () => {
+        const source = readFileSync(
+          join(
+            repoRoot,
+            'apps/api/src/access-auth.ts',
+          ),
+          'utf8',
+        )
+        const start = source.indexOf(
+          'const PUBLIC_PATHS = new Set([',
+        )
+        const block = source.slice(
+          start,
+          source.indexOf('])', start),
+        )
+
+        assert.ok(
+          !block.includes('pricing/ingress-diagnostics'),
+        )
+      },
+    )
   },
 )
