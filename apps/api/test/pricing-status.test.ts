@@ -3,12 +3,19 @@ import {
   it,
 } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { Hono } from 'hono'
 import {
   applyPricingItemSearch,
+  arukeresoApi,
   collapsePricingItemRows,
   computePricingDiagnostics,
+  computePricingImportDiagnostics,
   derivePricingItemFeedState,
 } from '../src/arukereso.ts'
+import type { AccessVariables } from '../src/access-auth.ts'
 
 void describe(
   'computePricingDiagnostics',
@@ -328,5 +335,320 @@ void describe(
         )
       },
     )
+  },
+)
+
+void describe(
+  'computePricingImportDiagnostics',
+  () => {
+    function mixedInput() {
+      return {
+        sourceRows: [
+          {
+            productId: 'p1',
+            sourceItemKey: 'k1',
+            identifier: '1.111-111.0',
+          },
+          {
+            productId: 'p1',
+            sourceItemKey: 'k2',
+            identifier: '1.111-111.0',
+          },
+          {
+            productId: null,
+            sourceItemKey: 'k3',
+            identifier: ' 2.222-222.0 ',
+          },
+          {
+            productId: 'p3',
+            sourceItemKey: 'k4',
+            identifier: '3.333-333.0',
+          },
+          {
+            productId: null,
+            sourceItemKey: 'k5',
+            identifier: '9.999-999.0',
+          },
+          {
+            productId: null,
+            sourceItemKey: 'k6',
+            identifier: '',
+          },
+          {
+            productId: null,
+            sourceItemKey: 'k7',
+            identifier: null,
+          },
+          {
+            productId: 'p4',
+            sourceItemKey: 'k8',
+            identifier: '4.444-444.0',
+          },
+        ],
+        hubProducts: [
+          {
+            id: 'p1',
+            sku: '1.111-111.0',
+            active: true,
+          },
+          {
+            id: 'p2',
+            sku: '2.222-222.0',
+            active: true,
+          },
+          {
+            id: 'p3',
+            sku: '3.333-333.0',
+            active: false,
+          },
+          {
+            id: 'p4',
+            sku: '4.444-444.0',
+            active: true,
+          },
+          {
+            id: 'p5',
+            sku: '4.444-444.0',
+            active: true,
+          },
+        ],
+      }
+    }
+
+    void it(
+      'reconciles every row into exactly one bucket',
+      () => {
+        const result =
+          computePricingImportDiagnostics(
+            mixedInput(),
+          )
+
+        assert.equal(result.sourceRows, 8)
+        assert.equal(result.blankSourceSkus, 2)
+        assert.equal(
+          result.duplicateSourceSkuRows,
+          1,
+        )
+        assert.deepEqual(
+          result.duplicateSourceSkus,
+          ['1.111-111.0'],
+        )
+        assert.equal(result.uniqueSourceSkus, 5)
+        assert.equal(result.hubProducts, 5)
+        assert.equal(result.matchedSourceSkus, 4)
+        assert.equal(
+          result.unmatchedSourceSkusCount,
+          1,
+        )
+        assert.deepEqual(
+          result.unmatchedSourceSkus,
+          ['9.999-999.0'],
+        )
+        assert.equal(
+          result.matchedButExcludedCount,
+          3,
+        )
+        assert.deepEqual(
+          result.matchedButExcluded,
+          [
+            {
+              sku: '2.222-222.0',
+              reason: 'STALE_UNLINKED_ROW',
+            },
+            {
+              sku: '3.333-333.0',
+              reason: 'PRODUCT_INACTIVE',
+            },
+            {
+              sku: '4.444-444.0',
+              reason: 'AMBIGUOUS_PRODUCT_SKU',
+            },
+          ],
+        )
+        assert.equal(result.currentPricingRows, 4)
+        assert.equal(result.linkedProducts, 1)
+
+        // Exact row equation: blank + duplicate extras +
+        // distinct identifiers = all rows.
+        assert.equal(
+          result.blankSourceSkus +
+            result.duplicateSourceSkuRows +
+            result.uniqueSourceSkus,
+          result.sourceRows,
+        )
+        assert.equal(
+          result.matchedSourceSkus +
+            result.unmatchedSourceSkusCount,
+          result.uniqueSourceSkus,
+        )
+      },
+    )
+
+    void it(
+      'matches production sync semantics exactly',
+      () => {
+        // Sync trims but never folds case: padded matches,
+        // case-differing does not.
+        const result =
+          computePricingImportDiagnostics({
+            sourceRows: [
+              {
+                productId: null,
+                sourceItemKey: 'k1',
+                identifier: '  abc-1 ',
+              },
+              {
+                productId: null,
+                sourceItemKey: 'k2',
+                identifier: 'ABC-1',
+              },
+            ],
+            hubProducts: [
+              {
+                id: 'p1',
+                sku: 'abc-1',
+                active: true,
+              },
+            ],
+          })
+
+        assert.equal(result.matchedSourceSkus, 1)
+        assert.deepEqual(
+          result.unmatchedSourceSkus,
+          ['ABC-1'],
+        )
+      },
+    )
+
+    void it(
+      'caps unmatched lists at 200 with full counts',
+      () => {
+        const sourceRows = Array.from(
+          { length: 250 },
+          (_, index) => ({
+            productId: null,
+            sourceItemKey: `k${index}`,
+            identifier: `9.${String(index).padStart(3, '0')}-999.0`,
+          }),
+        )
+        const result =
+          computePricingImportDiagnostics({
+            sourceRows,
+            hubProducts: [],
+          })
+
+        assert.equal(
+          result.unmatchedSourceSkusCount,
+          250,
+        )
+        assert.equal(
+          result.unmatchedSourceSkus.length,
+          200,
+        )
+        assert.equal(result.matchedSourceSkus, 0)
+        assert.equal(result.linkedProducts, 0)
+      },
+    )
+
+    void it(
+      'returns identifiers only, never secrets or prices',
+      () => {
+        const result =
+          computePricingImportDiagnostics(
+            mixedInput(),
+          )
+        const serialized = JSON.stringify(result)
+
+        assert.ok(
+          !/token|secret|password|price|competitor/i.test(
+            serialized,
+          ),
+        )
+      },
+    )
+  },
+)
+
+void describe(
+  'pricing diagnostics route',
+  () => {
+    const repoRoot = join(
+      dirname(fileURLToPath(import.meta.url)),
+      '..',
+      '..',
+      '..',
+    )
+
+    void it(
+      'rejects anonymous callers before touching the database',
+      async () => {
+        const response =
+          await arukeresoApi.request(
+            '/pricing/diagnostics',
+          )
+
+        assert.equal(response.status, 403)
+        assert.deepEqual(
+          await response.json(),
+          {
+            status: 'error',
+            message:
+              'Administrator permission is required.',
+          },
+        )
+      },
+    )
+
+    void it(
+      'is never transport-public',
+      () => {
+        const source = readFileSync(
+          join(
+            repoRoot,
+            'apps/api/src/access-auth.ts',
+          ),
+          'utf8',
+        )
+        const start = source.indexOf(
+          'const PUBLIC_PATHS = new Set([',
+        )
+        const block = source.slice(
+          start,
+          source.indexOf('])', start),
+        )
+
+        assert.ok(
+          !block.includes('pricing/diagnostics'),
+        )
+      },
+    )
+
+    if (!process.env.DATABASE_URL) {
+      void it(
+        'fails closed for ADMIN without database configuration',
+        async () => {
+          const app = new Hono<{
+            Variables: AccessVariables
+          }>()
+          app.use('*', async (context, next) => {
+            context.set('commerceHubUser', {
+              email: 'admin@example.com',
+              role: 'ADMIN',
+              subject: null,
+            })
+            await next()
+          })
+          app.route('/arukereso', arukeresoApi)
+
+          const response = await app.request(
+            '/arukereso/pricing/diagnostics',
+          )
+
+          // ADMIN passes auth; only the missing database
+          // stops it — no pricing sync token involved.
+          assert.equal(response.status, 503)
+        },
+      )
+    }
   },
 )

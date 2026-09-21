@@ -5267,6 +5267,275 @@ function computePricingDiagnostics(input: {
   }
 }
 
+export type PricingImportDiagnosticSkuExclusion = {
+  sku: string
+  reason:
+    | 'PRODUCT_INACTIVE'
+    | 'AMBIGUOUS_PRODUCT_SKU'
+    | 'STALE_UNLINKED_ROW'
+}
+
+export type PricingImportDiagnostics = {
+  sourceRows: number
+  uniqueSourceSkus: number
+  blankSourceSkus: number
+  duplicateSourceSkus: string[]
+  duplicateSourceSkuRows: number
+  hubProducts: number
+  matchedSourceSkus: number
+  unmatchedSourceSkusCount: number
+  unmatchedSourceSkus: string[]
+  matchedButExcludedCount: number
+  matchedButExcluded: PricingImportDiagnosticSkuExclusion[]
+  currentPricingRows: number
+  linkedProducts: number
+}
+
+/*
+ * Read-only source-to-pricing reconciliation over the
+ * CURRENT stored pricing source rows. Matching reuses the
+ * exact production sync semantics (identifier trimmed,
+ * then exact Map lookup — no case folding, no
+ * normalization), so the diagnostic explains the live
+ * data instead of a reimplementation. Every row lands in
+ * exactly one bucket:
+ * blank identifier / duplicate occurrence / unmatched /
+ * matched-but-excluded / linked. No prices, names, or
+ * secrets are returned — identifiers only.
+ */
+const PRICING_IMPORT_DIAGNOSTIC_LIST_LIMIT = 200
+
+export function computePricingImportDiagnostics(input: {
+  sourceRows: Array<{
+    productId: string | null
+    sourceItemKey: string
+    identifier: string | null
+  }>
+  hubProducts: Array<{
+    id: string
+    sku: string
+    active: boolean
+  }>
+}): PricingImportDiagnostics {
+  const productBySku = new Map(
+    input.hubProducts.map((product) => [
+      product.sku,
+      product,
+    ]),
+  )
+  const productSkuCounts = new Map<string, number>()
+
+  for (const product of input.hubProducts) {
+    productSkuCounts.set(
+      product.sku,
+      (productSkuCounts.get(product.sku) ?? 0) + 1,
+    )
+  }
+
+  let blankSourceSkus = 0
+  const seenIdentifiers = new Set<string>()
+  const duplicateCounts = new Map<string, number>()
+  const unmatched = new Set<string>()
+  const excluded = new Map<
+    string,
+    PricingImportDiagnosticSkuExclusion['reason']
+  >()
+  const linkedProductIds = new Set<string>()
+  let matchedSourceSkus = 0
+
+  for (const row of input.sourceRows) {
+    const identifier =
+      typeof row.identifier === 'string' &&
+      row.identifier.trim() !== ''
+        ? row.identifier.trim()
+        : null
+
+    if (identifier === null) {
+      blankSourceSkus += 1
+      continue
+    }
+
+    if (seenIdentifiers.has(identifier)) {
+      duplicateCounts.set(
+        identifier,
+        (duplicateCounts.get(identifier) ?? 1) + 1,
+      )
+      continue
+    }
+
+    seenIdentifiers.add(identifier)
+
+    const matched =
+      productBySku.get(identifier) ?? null
+
+    if (!matched) {
+      unmatched.add(identifier)
+      continue
+    }
+
+    matchedSourceSkus += 1
+
+    if (
+      (productSkuCounts.get(identifier) ?? 0) > 1
+    ) {
+      excluded.set(
+        identifier,
+        'AMBIGUOUS_PRODUCT_SKU',
+      )
+      continue
+    }
+
+    if (!matched.active) {
+      excluded.set(identifier, 'PRODUCT_INACTIVE')
+      continue
+    }
+
+    if (row.productId === null) {
+      excluded.set(identifier, 'STALE_UNLINKED_ROW')
+      continue
+    }
+
+    linkedProductIds.add(matched.id)
+  }
+
+  const duplicateSourceSkus = [...duplicateCounts]
+    .map(([sku]) => sku)
+    .sort()
+  const duplicateSourceSkuRows = [...duplicateCounts]
+    .map(([, count]) => count)
+    .reduce((total, count) => total + count - 1, 0)
+  const unmatchedSourceSkus = [...unmatched].sort()
+  const matchedButExcluded = [...excluded]
+    .map(([sku, reason]) => ({ sku, reason }))
+    .sort((left, right) =>
+      left.sku < right.sku ? -1 : 1,
+    )
+
+  return {
+    sourceRows: input.sourceRows.length,
+    uniqueSourceSkus: seenIdentifiers.size,
+    blankSourceSkus,
+    duplicateSourceSkus: duplicateSourceSkus.slice(
+      0,
+      PRICING_IMPORT_DIAGNOSTIC_LIST_LIMIT,
+    ),
+    duplicateSourceSkuRows,
+    hubProducts: input.hubProducts.length,
+    matchedSourceSkus,
+    unmatchedSourceSkusCount: unmatchedSourceSkus.length,
+    unmatchedSourceSkus: unmatchedSourceSkus.slice(
+      0,
+      PRICING_IMPORT_DIAGNOSTIC_LIST_LIMIT,
+    ),
+    matchedButExcludedCount: matchedButExcluded.length,
+    matchedButExcluded: matchedButExcluded.slice(
+      0,
+      PRICING_IMPORT_DIAGNOSTIC_LIST_LIMIT,
+    ),
+    currentPricingRows: input.sourceRows.filter(
+      (row) => row.productId !== null,
+    ).length,
+    linkedProducts: linkedProductIds.size,
+  }
+}
+
+/*
+ * ADMIN-only read-only pricing import diagnostic.
+ * Deliberately NOT public and NOT gated by the
+ * server-side pricing sync token (that token must never
+ * reach the browser): normal Commerce Hub ADMIN auth only.
+ * Three SELECTs, zero writes, no sync/import/reconcile
+ * execution, no prices or secrets in the response.
+ */
+arukeresoApi.get(
+  '/pricing/diagnostics',
+  async (context) => {
+    const user = getCommerceHubUser(context)
+
+    if (!user || user.role !== 'ADMIN') {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Administrator permission is required.',
+        },
+        403,
+      )
+    }
+
+    let database
+
+    try {
+      database = requireDatabase()
+    } catch {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Database configuration is missing.',
+        },
+        503,
+      )
+    }
+
+    const resolvedConnection =
+      await resolveActivePricingConnection(null)
+
+    if (!resolvedConnection.ok) {
+      return context.json(
+        {
+          status: 'error',
+          message: resolvedConnection.message,
+        },
+        409,
+      )
+    }
+
+    const [sourceRows, hubProducts] =
+      await Promise.all([
+        database
+          .select({
+            productId: pricingSourceItems.productId,
+            sourceItemKey:
+              pricingSourceItems.sourceItemKey,
+            identifier: pricingSourceItems.identifier,
+          })
+          .from(pricingSourceItems)
+          .where(
+            and(
+              eq(
+                pricingSourceItems.connectionId,
+                resolvedConnection.connectionId,
+              ),
+              eq(
+                pricingSourceItems.marketCode,
+                PRICING_MARKET_CODE,
+              ),
+              eq(
+                pricingSourceItems.currency,
+                PRICING_CURRENCY,
+              ),
+            ),
+          ),
+        database
+          .select({
+            id: products.id,
+            sku: products.sku,
+            active: products.active,
+          })
+          .from(products),
+      ])
+
+    return context.json({
+      status: 'ok',
+      ...computePricingImportDiagnostics({
+        sourceRows,
+        hubProducts,
+      }),
+    })
+  },
+)
+
 arukeresoApi.get(
   '/pricing/status',
   async (context) => {
