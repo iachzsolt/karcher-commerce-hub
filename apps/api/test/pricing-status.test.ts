@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Hono } from 'hono'
 import {
+  analyzeUnmatchedSkus,
   applyPricingItemSearch,
   arukeresoApi,
   buildPricingIngressAudit,
@@ -882,12 +883,19 @@ void describe(
             'acceptedItems',
             'dropReasons',
             'droppedItems',
+            'droppedSkuReasons',
             'droppedSkus',
             'endpoint',
             'normalizedItems',
             'rawItems',
             'receivedAt',
           ].sort(),
+        )
+        assert.deepEqual(
+          (entry as Record<string, unknown>)[
+            'droppedSkuReasons'
+          ],
+          { 'd-1': 'duplicateSku', 'u-1': 'unmatched' },
         )
 
         setPricingIngressAuditStore({
@@ -997,6 +1005,388 @@ void describe(
           )
 
           assert.equal(response.status, 503)
+        },
+      )
+    }
+  },
+)
+
+void describe(
+  'analyzeUnmatchedSkus',
+  () => {
+    function catalog() {
+      return {
+        hubProducts: [
+          {
+            id: 'p-exact',
+            sku: '1.008-057.0',
+            active: true,
+          },
+          {
+            id: 'p-pad',
+            sku: '2.111-111.0',
+            active: true,
+          },
+          {
+            id: 'p-punct',
+            sku: '31112222',
+            active: true,
+          },
+          {
+            id: 'p-case',
+            sku: 'abc-1',
+            active: true,
+          },
+          {
+            id: 'p-digits',
+            sku: 'K 555-666',
+            active: true,
+          },
+          {
+            id: 'p-off',
+            sku: '9.999-999.0',
+            active: false,
+          },
+          {
+            id: 'p-amb-a',
+            sku: '7.777-777.0',
+            active: true,
+          },
+          {
+            id: 'p-amb-b',
+            sku: '77777770',
+            active: true,
+          },
+        ],
+        identifiers: [
+          {
+            productId: 'p-pad',
+            type: 'EAN',
+            value: '4061234567890',
+          },
+        ],
+        catalogRows: [
+          {
+            productId: 'p-case',
+            identifier: 'ABC-1-CMS',
+            matchStatus: 'MATCHED',
+          },
+        ],
+      }
+    }
+
+    void it(
+      'classifies exact, normalized, inactive, ambiguous and absent',
+      () => {
+        const { items, summary } =
+          analyzeUnmatchedSkus({
+            sourceSkus: [
+              '1.008-057.0',
+              '  2.111-111.0  ',
+              '3.111-2222',
+              'ABC-1',
+              '555666',
+              '9 999 9990',
+              '7 777 7770',
+              '0.000-000.0',
+              '4061234567890',
+              'ABC-1-CMS',
+            ],
+            ...catalog(),
+          })
+
+        const bySku = new Map(
+          items.map((item) => [
+            item.sourceSku,
+            item,
+          ]),
+        )
+
+        // Exact production hit stays separate.
+        assert.deepEqual(
+          bySku.get('1.008-057.0')?.exactMatch,
+          {
+            productId: 'p-exact',
+            sku: '1.008-057.0',
+            active: true,
+          },
+        )
+        assert.deepEqual(
+          bySku.get('1.008-057.0')?.candidates,
+          [],
+        )
+
+        // Whitespace-only difference.
+        assert.equal(
+          bySku.get('  2.111-111.0  ')?.exactMatch,
+          null,
+        )
+        assert.ok(
+          bySku
+            .get('  2.111-111.0  ')
+            ?.candidates.some(
+              (candidate) =>
+                candidate.sku === '2.111-111.0' &&
+                candidate.matchType === 'TRIMMED',
+            ),
+        )
+
+        // Dots/hyphens difference.
+        assert.ok(
+          bySku
+            .get('3.111-2222')
+            ?.candidates.some(
+              (candidate) =>
+                candidate.sku === '31112222' &&
+                candidate.matchType ===
+                  'PUNCTUATION_NORMALIZED',
+            ),
+        )
+
+        // Case-only difference is never exact.
+        assert.equal(
+          bySku.get('ABC-1')?.exactMatch,
+          null,
+        )
+        assert.ok(
+          bySku
+            .get('ABC-1')
+            ?.candidates.some(
+              (candidate) =>
+                candidate.sku === 'abc-1' &&
+                candidate.matchType ===
+                  'OTHER_SAFE_NORMALIZATION',
+            ),
+        )
+
+        // Digits-only fallback.
+        assert.ok(
+          bySku
+            .get('555666')
+            ?.candidates.some(
+              (candidate) =>
+                candidate.sku === 'K 555-666' &&
+                candidate.matchType === 'DIGITS_ONLY',
+            ),
+        )
+
+        // Present but inactive (spaced form, so no
+        // exact hit; the normalized candidate is
+        // inactive-only).
+        const off = bySku.get('9 999 9990')
+        assert.equal(off?.exactMatch, null)
+        assert.ok(
+          (off?.candidates.length ?? 0) > 0,
+        )
+        assert.ok(
+          off?.candidates.every(
+            (candidate) =>
+              candidate.active === false,
+          ),
+        )
+
+        // Two products behind one normalized form
+        // (neither is an exact hit).
+        const amb = bySku.get('7 777 7770')
+        assert.equal(amb?.exactMatch, null)
+        assert.equal(amb?.ambiguous, true)
+        assert.equal(
+          amb?.candidates.filter(
+            (candidate) =>
+              candidate.matchType ===
+              'PUNCTUATION_NORMALIZED',
+          ).length,
+          2,
+        )
+
+        // Truly absent.
+        const missing = bySku.get('0.000-000.0')
+        assert.equal(missing?.exactMatch, null)
+        assert.deepEqual(
+          missing?.candidates,
+          [],
+        )
+        assert.equal(missing?.ambiguous, false)
+
+        // Identifier + catalog sources are searched too.
+        const ean = bySku.get('4061234567890')
+        assert.equal(ean?.exactMatch, null)
+        assert.ok(
+          ean?.candidates.some(
+            (candidate) =>
+              candidate.source ===
+                'product-identifier:EAN' &&
+              candidate.matchType === 'TRIMMED',
+          ) ?? false,
+        )
+        const cms = bySku.get('ABC-1-CMS')
+        assert.ok(
+          cms?.candidates.some(
+            (candidate) =>
+              candidate.source ===
+                'cms-catalog' &&
+              candidate.catalogMatchStatus ===
+                'MATCHED',
+          ) ?? false,
+        )
+
+        // Disjoint summary partition.
+        assert.deepEqual(summary, {
+          totalUnmatched: 10,
+          exactElsewhere: 1,
+          normalizedCandidateFound: 6,
+          noCatalogCandidate: 1,
+          inactiveOnly: 1,
+          ambiguousCandidates: 1,
+        })
+      },
+    )
+
+    void it(
+      'never auto-links and exposes no prices or secrets',
+      () => {
+        const { items, summary } =
+          analyzeUnmatchedSkus({
+            sourceSkus: ['ABC-1'],
+            ...catalog(),
+          })
+
+        for (const item of items) {
+          assert.equal(
+            (item as Record<string, unknown>)[
+              'productId'
+            ] ?? null,
+            null,
+          )
+        }
+
+        const serialized = JSON.stringify({
+          items,
+          summary,
+        })
+        assert.ok(
+          !/token|secret|password|credential|price|competitor|median|average|iban|swift/i.test(
+            serialized,
+          ),
+        )
+      },
+    )
+  },
+)
+
+void describe(
+  'pricing unmatched-catalog-diagnostics route',
+  () => {
+    const repoRoot = join(
+      dirname(fileURLToPath(import.meta.url)),
+      '..',
+      '..',
+      '..',
+    )
+
+    function adminApp() {
+      const app = new Hono<{
+        Variables: AccessVariables
+      }>()
+      app.use('*', async (context, next) => {
+        context.set('commerceHubUser', {
+          email: 'admin@example.com',
+          role: 'ADMIN',
+          subject: null,
+        })
+        await next()
+      })
+      app.route('/arukereso', arukeresoApi)
+
+      return app
+    }
+
+    void it(
+      'rejects anonymous callers before touching state',
+      async () => {
+        const response =
+          await arukeresoApi.request(
+            '/pricing/unmatched-catalog-diagnostics',
+          )
+
+        assert.equal(response.status, 403)
+        assert.deepEqual(
+          await response.json(),
+          {
+            status: 'error',
+            message:
+              'Administrator permission is required.',
+          },
+        )
+      },
+    )
+
+    void it(
+      'is never transport-public',
+      () => {
+        const source = readFileSync(
+          join(
+            repoRoot,
+            'apps/api/src/access-auth.ts',
+          ),
+          'utf8',
+        )
+        const start = source.indexOf(
+          'const PUBLIC_PATHS = new Set([',
+        )
+        const block = source.slice(
+          start,
+          source.indexOf('])', start),
+        )
+
+        assert.ok(
+          !block.includes(
+            'pricing/unmatched-catalog-diagnostics',
+          ),
+        )
+      },
+    )
+
+    if (!process.env.DATABASE_URL) {
+      void it(
+        'fails closed for ADMIN without database configuration',
+        async () => {
+          setPricingIngressAuditStore({
+            get: async () => ({
+              receivedAt:
+                '2026-09-20T10:00:00.000Z',
+              endpoint: '/pricing/sync',
+              rawItems: 1,
+              normalizedItems: 0,
+              acceptedItems: 0,
+              droppedItems: 1,
+              dropReasons: {
+                blankSku: 0,
+                invalidRow: 0,
+                invalidField: 0,
+                duplicateSku: 0,
+                unmatched: 1,
+                other: 0,
+              },
+              droppedSkus: ['9.999-999.0'],
+              droppedSkuReasons: {
+                '9.999-999.0': 'unmatched',
+              },
+            }),
+            set: async () => {},
+          })
+
+          try {
+            const response = await adminApp().request(
+              '/arukereso/pricing/unmatched-catalog-diagnostics',
+            )
+
+            // ADMIN passes auth and finds the audit;
+            // only the missing database stops it.
+            assert.equal(response.status, 503)
+          } finally {
+            setPricingIngressAuditStore(null)
+          }
         },
       )
     }

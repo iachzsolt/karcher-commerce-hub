@@ -3795,6 +3795,13 @@ function normalizeSkuForDiagnostic(value: string) {
     .replace(/[^A-Z0-9]/g, '')
 }
 
+export type PricingIngressDropReason =
+  | 'blankSku'
+  | 'invalidRow'
+  | 'invalidField'
+  | 'duplicateSku'
+  | 'unmatched'
+
 export type PricingIngressAudit = {
   receivedAt: string
   endpoint: '/pricing/sync' | '/pricing/reconcile'
@@ -3811,6 +3818,9 @@ export type PricingIngressAudit = {
     other: number
   }
   droppedSkus: string[]
+  droppedSkuReasons: Partial<
+    Record<string, PricingIngressDropReason>
+  >
 }
 
 /*
@@ -3847,15 +3857,25 @@ export function buildPricingIngressAudit(
       other: 0,
     }
   const droppedSkuSet = new Set<string>()
-  const collectSku = (sku: unknown) => {
+  const droppedSkuReasons: Partial<
+    Record<string, PricingIngressDropReason>
+  > = {}
+  const collectSku = (
+    sku: unknown,
+    reason: PricingIngressDropReason,
+  ) => {
     if (
-      typeof sku === 'string' &&
-      sku.trim() !== '' &&
-      droppedSkuSet.size <
+      typeof sku !== 'string' ||
+      sku.trim() === '' ||
+      droppedSkuSet.size >=
         PRICING_INGRESS_AUDIT_SKU_LIMIT
     ) {
-      droppedSkuSet.add(sku.trim())
+      return
     }
+
+    const key = sku.trim()
+    droppedSkuSet.add(key)
+    droppedSkuReasons[key] ??= reason
   }
 
   let normalizedItems = 0
@@ -3864,49 +3884,49 @@ export function buildPricingIngressAudit(
     normalizedItems = result.validItems.length
 
     for (const row of result.invalidRows) {
-      collectSku(row.sku)
-
       if (row.sku === '') {
         dropReasons.blankSku += 1
       } else if (
         row.errors.includes('INVALID_ROW')
       ) {
+        collectSku(row.sku, 'invalidRow')
         dropReasons.invalidRow += 1
       } else {
+        collectSku(row.sku, 'invalidField')
         dropReasons.invalidField += 1
       }
     }
 
     for (const row of result.duplicateRows) {
-      collectSku(row.sku)
+      collectSku(row.sku, 'duplicateSku')
     }
 
     dropReasons.duplicateSku =
       result.duplicateRows.length
 
     for (const item of result.unmatchedItems) {
-      collectSku(item.sku)
+      collectSku(item.sku, 'unmatched')
     }
 
     dropReasons.unmatched =
       result.unmatchedItems.length
   } else {
     for (const row of result.invalidRows) {
-      collectSku(row.sku)
-
       if (row.sku === '') {
         dropReasons.blankSku += 1
       } else if (
         row.errors.includes('INVALID_ROW')
       ) {
+        collectSku(row.sku, 'invalidRow')
         dropReasons.invalidRow += 1
       } else {
+        collectSku(row.sku, 'invalidField')
         dropReasons.invalidField += 1
       }
     }
 
     for (const sku of result.duplicateSkus) {
-      collectSku(sku)
+      collectSku(sku, 'duplicateSku')
     }
 
     dropReasons.duplicateSku =
@@ -3937,6 +3957,7 @@ export function buildPricingIngressAudit(
     droppedItems,
     dropReasons,
     droppedSkus: [...droppedSkuSet],
+    droppedSkuReasons,
   }
 }
 
@@ -5922,6 +5943,390 @@ arukeresoApi.get(
     return context.json({
       status: 'ok',
       ...audit,
+    })
+  },
+)
+
+export type UnmatchedSkuCandidate = {
+  productId: string | null
+  sku: string
+  active: boolean | null
+  source: string
+  catalogMatchStatus: string | null
+  matchType:
+    | 'TRIMMED'
+    | 'PUNCTUATION_NORMALIZED'
+    | 'DIGITS_ONLY'
+    | 'OTHER_SAFE_NORMALIZATION'
+}
+
+export type UnmatchedSkuAnalysis = {
+  sourceSku: string
+  exactMatch: {
+    productId: string
+    sku: string
+    active: boolean
+  } | null
+  ambiguous: boolean
+  candidates: UnmatchedSkuCandidate[]
+}
+
+export type UnmatchedCatalogSummary = {
+  totalUnmatched: number
+  exactElsewhere: number
+  normalizedCandidateFound: number
+  noCatalogCandidate: number
+  inactiveOnly: number
+  ambiguousCandidates: number
+}
+
+function stripSkuPunctuation(value: string): string {
+  return value.replace(/[.\- ]/g, '')
+}
+
+function stripSkuToDigits(value: string): string {
+  return value.replace(/[^0-9]/g, '')
+}
+
+/*
+ * Pure unmatched-SKU catalog analysis. Production
+ * exact-match semantics are never altered: an exact hit is
+ * reported separately and candidates are comparison-only
+ * forms (trimmed, punctuation-stripped, lowercased,
+ * digits-only), weakest match type winning per row, never
+ * auto-chosen. Multiple distinct products behind one
+ * normalized form flag the SKU ambiguous.
+ */
+export function analyzeUnmatchedSkus(input: {
+  sourceSkus: string[]
+  hubProducts: Array<{
+    id: string
+    sku: string
+    active: boolean
+  }>
+  identifiers: Array<{
+    productId: string | null
+    type: string
+    value: string
+  }>
+  catalogRows: Array<{
+    productId: string | null
+    identifier: string | null
+    matchStatus: string | null
+  }>
+}): {
+  items: UnmatchedSkuAnalysis[]
+  summary: UnmatchedCatalogSummary
+} {
+  const productById = new Map(
+    input.hubProducts.map((product) => [
+      product.id,
+      product,
+    ]),
+  )
+  const productBySku = new Map(
+    input.hubProducts.map((product) => [
+      product.sku,
+      product,
+    ]),
+  )
+
+  type RowRef = {
+    productId: string | null
+    value: string
+    active: boolean | null
+    source: string
+    catalogMatchStatus: string | null
+  }
+  const rows: RowRef[] = []
+
+  for (const product of input.hubProducts) {
+    rows.push({
+      productId: product.id,
+      value: product.sku,
+      active: product.active,
+      source: 'hub-products',
+      catalogMatchStatus: null,
+    })
+  }
+
+  for (const identifier of input.identifiers) {
+    if (
+      typeof identifier.value !== 'string' ||
+      identifier.value.trim() === ''
+    ) {
+      continue
+    }
+
+    const product = identifier.productId
+      ? productById.get(identifier.productId) ?? null
+      : null
+
+    rows.push({
+      productId: identifier.productId,
+      value: identifier.value,
+      active: product ? product.active : null,
+      source: `product-identifier:${identifier.type}`,
+      catalogMatchStatus: null,
+    })
+  }
+
+  for (const row of input.catalogRows) {
+    if (
+      typeof row.identifier !== 'string' ||
+      row.identifier.trim() === ''
+    ) {
+      continue
+    }
+
+    const product = row.productId
+      ? productById.get(row.productId) ?? null
+      : null
+
+    rows.push({
+      productId: row.productId,
+      value: row.identifier,
+      active: product ? product.active : null,
+      source: 'cms-catalog',
+      catalogMatchStatus: row.matchStatus,
+    })
+  }
+
+  const items: UnmatchedSkuAnalysis[] = []
+  const summary: UnmatchedCatalogSummary = {
+    totalUnmatched: input.sourceSkus.length,
+    exactElsewhere: 0,
+    normalizedCandidateFound: 0,
+    noCatalogCandidate: 0,
+    inactiveOnly: 0,
+    ambiguousCandidates: 0,
+  }
+
+  for (const sourceSku of input.sourceSkus) {
+    const trimmed = sourceSku.trim()
+    const exact = productBySku.get(sourceSku) ?? null
+    const candidates: UnmatchedSkuCandidate[] = []
+    const candidateProducts = new Set<string>()
+
+    if (!exact && trimmed !== '') {
+      const lowered = trimmed.toLowerCase()
+      const depunctuated = stripSkuPunctuation(trimmed)
+      const digits =
+        stripSkuToDigits(trimmed)
+
+      for (const row of rows) {
+        const rowTrimmed = row.value.trim()
+        let matchType:
+          | UnmatchedSkuCandidate['matchType']
+          | null = null
+
+        if (rowTrimmed === trimmed) {
+          matchType = 'TRIMMED'
+        } else if (
+          stripSkuPunctuation(rowTrimmed) ===
+            depunctuated &&
+          depunctuated !== ''
+        ) {
+          matchType = 'PUNCTUATION_NORMALIZED'
+        } else if (
+          rowTrimmed.toLowerCase() === lowered
+        ) {
+          matchType = 'OTHER_SAFE_NORMALIZATION'
+        } else if (
+          digits !== '' &&
+          stripSkuToDigits(rowTrimmed) === digits
+        ) {
+          matchType = 'DIGITS_ONLY'
+        }
+
+        if (!matchType) {
+          continue
+        }
+
+        candidates.push({
+          productId: row.productId,
+          sku: row.value,
+          active: row.active,
+          source: row.source,
+          catalogMatchStatus: row.catalogMatchStatus,
+          matchType,
+        })
+
+        if (row.productId) {
+          candidateProducts.add(row.productId)
+        }
+      }
+
+      candidates.sort((left, right) =>
+        left.sku < right.sku
+          ? -1
+          : left.sku > right.sku
+            ? 1
+            : 0,
+      )
+    }
+
+    const ambiguous = candidateProducts.size > 1
+    const analysis: UnmatchedSkuAnalysis = {
+      sourceSku,
+      exactMatch: exact
+        ? {
+            productId: exact.id,
+            sku: exact.sku,
+            active: exact.active,
+          }
+        : null,
+      ambiguous,
+      candidates,
+    }
+    items.push(analysis)
+
+    if (analysis.exactMatch) {
+      summary.exactElsewhere += 1
+    } else if (candidates.length === 0) {
+      summary.noCatalogCandidate += 1
+    } else if (ambiguous) {
+      summary.ambiguousCandidates += 1
+    } else if (
+      candidates.every(
+        (candidate) => candidate.active === false,
+      )
+    ) {
+      summary.inactiveOnly += 1
+    } else {
+      summary.normalizedCandidateFound += 1
+    }
+  }
+
+  return { items, summary }
+}
+
+/*
+ * ADMIN-only unmatched-SKU catalog diagnostic.
+ * Deliberately NOT public and NOT gated by the pricing
+ * sync token: normal Commerce Hub ADMIN auth only.
+ * Reads the latest ingress audit's unmatched SKUs and
+ * searches products, identifiers, and active-catalog rows
+ * for safe comparison forms (trimmed, punctuation-,
+ * case-, digits-only). Never auto-links, never writes,
+ * never exposes prices or secrets.
+ */
+arukeresoApi.get(
+  '/pricing/unmatched-catalog-diagnostics',
+  async (context) => {
+    const user = getCommerceHubUser(context)
+
+    if (!user || user.role !== 'ADMIN') {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Administrator permission is required.',
+        },
+        403,
+      )
+    }
+
+    const audit = await readPricingIngressAudit()
+
+    if (!audit) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'No pricing ingress audit recorded yet.',
+        },
+        404,
+      )
+    }
+
+    const unmatched = Object.entries(
+      audit.droppedSkuReasons ?? {},
+    )
+      .filter(([, reason]) => reason === 'unmatched')
+      .map(([sku]) => sku)
+      .sort()
+
+    let database
+
+    try {
+      database = requireDatabase()
+    } catch {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'Database configuration is missing.',
+        },
+        503,
+      )
+    }
+
+    const activeCatalogConnections = await database
+      .select({ id: dataConnections.id })
+      .from(dataConnections)
+      .where(
+        and(
+          eq(
+            dataConnections.sourceType,
+            'CSV_UPLOAD',
+          ),
+          eq(dataConnections.purpose, 'CATALOG'),
+          eq(dataConnections.isActive, true),
+        ),
+      )
+    const catalogConnectionIds =
+      activeCatalogConnections.map(
+        (connection) => connection.id,
+      )
+    const [hubProducts, identifiers, catalogRows] =
+      await Promise.all([
+        database
+          .select({
+            id: products.id,
+            sku: products.sku,
+            active: products.active,
+          })
+          .from(products),
+        database
+          .select({
+            productId:
+              productIdentifiers.productId,
+            type: productIdentifiers.type,
+            value: productIdentifiers.value,
+          })
+          .from(productIdentifiers),
+        catalogConnectionIds.length > 0
+          ? database
+              .select({
+                productId:
+                  catalogSourceItems.productId,
+                identifier:
+                  catalogSourceItems.identifier,
+                matchStatus:
+                  catalogSourceItems.matchStatus,
+              })
+              .from(catalogSourceItems)
+              .where(
+                inArray(
+                  catalogSourceItems.connectionId,
+                  catalogConnectionIds,
+                ),
+              )
+          : [],
+      ])
+    const analysis = analyzeUnmatchedSkus({
+      sourceSkus: unmatched,
+      hubProducts,
+      identifiers,
+      catalogRows,
+    })
+
+    return context.json({
+      status: 'ok',
+      auditedAt: audit.receivedAt,
+      endpoint: audit.endpoint,
+      ...analysis,
     })
   },
 )
