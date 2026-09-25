@@ -1535,8 +1535,10 @@ export function formatMoneyDisplay(
     : amount
 }
 
-/* Exactly one proven display mapping. Unknown delivery
- * methods are returned verbatim — never guessed. */
+/* Exactly two proven display mappings, matched on the
+ * full string only ("pobranie" is a suffix of the plain
+ * variant, so prefix matching would be wrong). Unknown
+ * delivery methods are returned verbatim — never guessed. */
 export function translateShipmentMethod(
   value: string | null,
 ): string | null {
@@ -1544,7 +1546,249 @@ export function translateShipmentMethod(
     return 'Eladó által szervezett kiszállítás'
   }
 
+  if (
+    value === 'Dostawa przez sprzedającego pobranie'
+  ) {
+    return 'Eladó által szervezett kiszállítás – utánvét'
+  }
+
   return value
+}
+
+/* Exactly three explicit payment mappings, matched on
+ * the full value only. Anything else passes through
+ * verbatim. */
+export function translatePaymentValue(
+  value: string | null,
+): string | null {
+  if (value === 'CASH_ON_DELIVERY') {
+    return 'Utánvét'
+  }
+
+  if (value === 'ONLINE') {
+    return 'Online fizetés'
+  }
+
+  if (value === 'ONLINE (AF)') {
+    return 'Online fizetés'
+  }
+
+  return value
+}
+
+/* Common named HTML entities (Latin-1 + punctuation). The
+ * decoder below also handles decimal/hex numeric entities;
+ * anything unlisted is left intact. */
+const NAMED_NOTIFY_ENTITIES: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  nbsp: ' ',
+  iexcl: '¡',
+  cent: '¢',
+  pound: '£',
+  curren: '¤',
+  yen: '¥',
+  brvbar: '¦',
+  sect: '§',
+  uml: '¨',
+  copy: '©',
+  ordf: 'ª',
+  laquo: '«',
+  not: '¬',
+  shy: '­',
+  reg: '®',
+  macr: '¯',
+  deg: '°',
+  plusmn: '±',
+  sup2: '²',
+  sup3: '³',
+  acute: '´',
+  micro: 'µ',
+  para: '¶',
+  middot: '·',
+  cedil: '¸',
+  sup1: '¹',
+  ordm: 'º',
+  raquo: '»',
+  frac14: '¼',
+  frac12: '½',
+  frac34: '¾',
+  iquest: '¿',
+  Agrave: 'À',
+  Aacute: 'Á',
+  Acirc: 'Â',
+  Atilde: 'Ã',
+  Auml: 'Ä',
+  Aring: 'Å',
+  AElig: 'Æ',
+  Ccedil: 'Ç',
+  Egrave: 'È',
+  Eacute: 'É',
+  Ecirc: 'Ê',
+  Euml: 'Ë',
+  Igrave: 'Ì',
+  Iacute: 'Í',
+  Icirc: 'Î',
+  Iuml: 'Ï',
+  ETH: 'Ð',
+  Ntilde: 'Ñ',
+  Ograve: 'Ò',
+  Oacute: 'Ó',
+  Ocirc: 'Ô',
+  Otilde: 'Õ',
+  Ouml: 'Ö',
+  times: '×',
+  Oslash: 'Ø',
+  Ugrave: 'Ù',
+  Uacute: 'Ú',
+  Ucirc: 'Û',
+  Uuml: 'Ü',
+  Yacute: 'Ý',
+  THORN: 'Þ',
+  szlig: 'ß',
+  agrave: 'à',
+  aacute: 'á',
+  acirc: 'â',
+  atilde: 'ã',
+  auml: 'ä',
+  aring: 'å',
+  aelig: 'æ',
+  ccedil: 'ç',
+  egrave: 'è',
+  eacute: 'é',
+  ecirc: 'ê',
+  euml: 'ë',
+  igrave: 'ì',
+  iacute: 'í',
+  icirc: 'î',
+  iuml: 'ï',
+  eth: 'ð',
+  ntilde: 'ñ',
+  ograve: 'ò',
+  oacute: 'ó',
+  ocirc: 'ô',
+  otilde: 'õ',
+  ouml: 'ö',
+  divide: '÷',
+  oslash: 'ø',
+  ugrave: 'ù',
+  uacute: 'ú',
+  ucirc: 'û',
+  uuml: 'ü',
+  yacute: 'ý',
+  thorn: 'þ',
+  yuml: 'ÿ',
+  OElig: 'Œ',
+  oelig: 'œ',
+  Scaron: 'Š',
+  scaron: 'š',
+  Yuml: 'Ÿ',
+  fnof: 'ƒ',
+  euro: '€',
+  ndash: '–',
+  mdash: '—',
+  hellip: '…',
+  trade: '™',
+  bull: '•',
+  lsaquo: '‹',
+  rsaquo: '›',
+}
+
+/* Decodes ONE layer of standard HTML entities from
+ * Allegro buyer text (named above + decimal/hex
+ * numeric). Single regex pass over the original string —
+ * never recursive, so `&amp;lt;` becomes `&lt;` and stops
+ * there (no double-decoding). Unknown entities stay
+ * intact. Callers MUST still escape the result before HTML
+ * insertion; decoded `<`, `>`, `&` and quotes are raw. */
+export function decodeNotifyEntitiesOnce(
+  value: string | null,
+): string | null {
+  if (!value) {
+    return value
+  }
+
+  return value.replace(
+    /&(#\d+|#[xX][0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]+);/g,
+    (entity, code: string) => {
+      if (code.startsWith('#')) {
+        const numeric =
+          code[1] === 'x' || code[1] === 'X'
+            ? Number.parseInt(code.slice(2), 16)
+            : Number.parseInt(code.slice(1), 10)
+
+        if (
+          !Number.isInteger(numeric) ||
+          numeric < 0 ||
+          numeric > 0x10ffff ||
+          (numeric >= 0xd800 && numeric <= 0xdfff)
+        ) {
+          return entity
+        }
+
+        try {
+          return String.fromCodePoint(numeric)
+        } catch {
+          return entity
+        }
+      }
+
+      return (
+        NAMED_NOTIFY_ENTITIES[code] ?? entity
+      )
+    },
+  )
+}
+
+const BUDAPEST_TIME_ZONE = 'Europe/Budapest'
+
+/* Allegro UTC timestamps -> Hungarian customer-service
+ * display in Europe/Budapest ("2026. 09. 25. 19:14").
+ * Intl carries DST, so CEST/CET transitions are correct.
+ * Null stays null (row omitted); unparseable input passes
+ * through instead of vanishing. Display-only: stored and
+ * API values are untouched. */
+export function formatNotifyDateTime(
+  value: string | null,
+): string | null {
+  if (!value) {
+    return value
+  }
+
+  const parsed = Date.parse(value)
+
+  if (!Number.isFinite(parsed)) {
+    return value
+  }
+
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: BUDAPEST_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  })
+    .formatToParts(new Date(parsed))
+    .reduce<Record<string, string>>(
+      (collected, part) => {
+        collected[part.type] = part.value
+
+        return collected
+      },
+      {},
+    )
+
+  return (
+    `${parts['year']}. ` +
+    `${parts['month']}. ` +
+    `${parts['day']}. ` +
+    `${parts['hour']}:${parts['minute']}`
+  )
 }
 
 /* Human-primary cancellation label; the technical event
@@ -2006,16 +2250,18 @@ function productTableData(
 function paymentText(
   detail: OrderDetail,
 ): string | null {
-  if (
-    detail.paymentStatus &&
-    detail.paymentProvider
-  ) {
-    return `${detail.paymentStatus} (${detail.paymentProvider})`
+  const status = translatePaymentValue(
+    detail.paymentStatus,
+  )
+  const provider = translatePaymentValue(
+    detail.paymentProvider,
+  )
+
+  if (status && provider) {
+    return `${status} (${provider})`
   }
 
-  return (
-    detail.paymentStatus ?? detail.paymentProvider
-  )
+  return status ?? provider
 }
 
 function orderSection(
@@ -2025,7 +2271,10 @@ function orderSection(
     heading: 'RENDELÉS',
     rows: [
       ['Rendelési azonosító', detail.id],
-      ...rowsIf('Időpont', detail.occurredAt),
+      ...rowsIf(
+        'Időpont',
+        formatNotifyDateTime(detail.occurredAt),
+      ),
       ...rowsIf('Fizetés', paymentText(detail)),
       ...rowsIf(
         'Végösszeg',
@@ -2478,11 +2727,14 @@ export function buildOrderEmail(
     ],
     [],
     [
-      ...(detail.messageToSeller
+          ...(detail.messageToSeller
         ? [
             {
               label: 'VÁSÁRLÓI MEGJEGYZÉS',
-              value: detail.messageToSeller,
+              value:
+                decodeNotifyEntitiesOnce(
+                  detail.messageToSeller,
+                ) ?? detail.messageToSeller,
             },
           ]
         : []),
@@ -2533,9 +2785,11 @@ export function buildCancellationEmail(
                 ['Rendelési azonosító', orderId],
                 ...rowsIf(
                   'Időpont',
-                  event.occurredAt ??
-                    detail?.occurredAt ??
-                    null,
+                  formatNotifyDateTime(
+                    event.occurredAt ??
+                      detail?.occurredAt ??
+                      null,
+                  ),
                 ),
                 ...rowsIf(
                   'Indok',
@@ -2568,7 +2822,9 @@ export function buildCancellationEmail(
                 ['Rendelési azonosító', orderId],
                 ...rowsIf(
                   'Időpont',
-                  event.occurredAt ?? null,
+                  formatNotifyDateTime(
+                    event.occurredAt ?? null,
+                  ),
                 ),
                 ...rowsIf(
                   'Indok',
@@ -2687,11 +2943,21 @@ export function buildMessageEmail(
     message,
     detail,
   )
+  // Buyer-authored text may arrive HTML-entity encoded
+  // (e.g. &eacute;). Decode one layer first, then the
+  // shared shell escapes it for HTML; textBody carries the
+  // same decoded human-readable text.
+  const decodedText =
+    decodeNotifyEntitiesOnce(message.text) ??
+    '–'
   const meta: NotifyEmailSection = {
     heading: 'ÜZENET ADATAI',
     rows: [
       ...rowsIf('Vevő', message.authorLogin),
-      ...rowsIf('Időpont', message.createdAt),
+      ...rowsIf(
+        'Időpont',
+        formatNotifyDateTime(message.createdAt),
+      ),
     ],
   }
   const attachments: NotifyEmailSection = {
@@ -2715,7 +2981,7 @@ export function buildMessageEmail(
     [
       {
         label: 'ÜZENET TARTALMA',
-        value: message.text ?? '–',
+        value: decodedText,
       },
     ],
     null,
@@ -2858,7 +3124,10 @@ export function buildReturnEmail(
               'Kapcsolódó rendelés',
               ret.orderId,
             ),
-            ...rowsIf('Létrehozva', ret.createdAt),
+            ...rowsIf(
+              'Létrehozva',
+              formatNotifyDateTime(ret.createdAt),
+            ),
             ...rowsIf('Státusz', ret.status),
           ],
         },

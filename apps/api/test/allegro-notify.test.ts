@@ -10,12 +10,14 @@ import {
   canonicalJson,
   classifyOrderEvent,
   createMemoryNotifyKv,
+  decodeNotifyEntitiesOnce,
   decryptNotifyToken,
   emptyOrderDetail,
   encryptNotifyToken,
   escapeNotifyHtml,
   exchangeNotifyCode,
   formatMoneyDisplay,
+  formatNotifyDateTime,
   hmacSha256Hex,
   isNotifiableMessage,
   loadNotifyOAuth,
@@ -28,6 +30,7 @@ import {
   runAllegroNotifyTick,
   signRelayEnvelope,
   storeNotifyOAuth,
+  translatePaymentValue,
   translateShipmentMethod,
   verifyRelayEnvelope,
   type NotifyKv,
@@ -1356,7 +1359,7 @@ void describe('notification email enrichment', () => {
       'Cég utca 2.',
       '12345678-2-41',
       'RENDELÉS',
-      'ONLINE (PAYU)',
+      'Online fizetés (PAYU)',
       '129 900 Ft',
       'Karcher WD 5 x2',
       '64 950 Ft',
@@ -2672,6 +2675,181 @@ void describe('notification email visuals', () => {
     )
     assert.ok(
       email.textBody.includes('Összesen: 5 970 Ft'),
+    )
+  })
+
+  void it('decodes message entities once, then escapes', () => {
+    assert.equal(
+      decodeNotifyEntitiesOnce(
+        'Mikor &eacute;rkezik a term&eacute;k?',
+      ),
+      'Mikor érkezik a termék?',
+    )
+    assert.equal(
+      decodeNotifyEntitiesOnce('&#65;&#x42;&amp;'),
+      'AB&',
+    )
+    // Unknown entities stay intact.
+    assert.equal(
+      decodeNotifyEntitiesOnce('a &bogus; b'),
+      'a &bogus; b',
+    )
+    assert.equal(decodeNotifyEntitiesOnce(null), null)
+
+    const email = buildMessageEmail(
+      'customerservice@example.com',
+      buyerMessage({
+        orderId: null,
+        offerId: null,
+        text: 'Mikor &eacute;rkezik?',
+      }),
+    )
+
+    assert.ok(
+      email.htmlBody.includes('Mikor érkezik?'),
+    )
+    assert.ok(
+      email.textBody.includes('Mikor érkezik?'),
+    )
+  })
+
+  void it('escapes decoded dangerous markup without double-decoding', () => {
+    const email = buildMessageEmail(
+      'customerservice@example.com',
+      buyerMessage({
+        orderId: null,
+        offerId: null,
+        text: '&lt;script&gt;alert(1)&lt;/script&gt; &amp;lt;b&amp;gt;',
+      }),
+    )
+
+    // One decode layer only: &amp;lt; stops at &lt; and is
+    // escaped back, never rendered as a tag.
+    assert.ok(
+      email.htmlBody.includes(
+        '&lt;script&gt;alert(1)&lt;/script&gt; &amp;lt;b&amp;gt;',
+      ),
+    )
+    assert.ok(
+      !email.htmlBody.includes('<script>'),
+    )
+    assert.ok(
+      !email.htmlBody.includes('<b>'),
+    )
+    assert.ok(
+      email.textBody.includes(
+        '<script>alert(1)</script> &lt;b&gt;',
+      ),
+    )
+  })
+
+  void it('formats message datetimes in Budapest time with DST', () => {
+    assert.equal(
+      formatNotifyDateTime(
+        '2026-09-25T17:14:50.051Z',
+      ),
+      '2026. 09. 25. 19:14',
+    )
+    // Winter (CET, +1).
+    assert.equal(
+      formatNotifyDateTime(
+        '2026-01-15T12:00:00.000Z',
+      ),
+      '2026. 01. 15. 13:00',
+    )
+    // DST transition day: 00:30Z is CET, 01:30Z is CEST.
+    assert.equal(
+      formatNotifyDateTime(
+        '2026-03-29T00:30:00.000Z',
+      ),
+      '2026. 03. 29. 01:30',
+    )
+    assert.equal(
+      formatNotifyDateTime(
+        '2026-03-29T01:30:00.000Z',
+      ),
+      '2026. 03. 29. 03:30',
+    )
+    assert.equal(formatNotifyDateTime(null), null)
+    assert.equal(
+      formatNotifyDateTime('not-a-date'),
+      'not-a-date',
+    )
+
+    const email = buildMessageEmail(
+      'customerservice@example.com',
+      buyerMessage({
+        orderId: null,
+        offerId: null,
+        createdAt: '2026-09-25T17:14:50.051Z',
+      }),
+    )
+
+    assert.ok(
+      email.htmlBody.includes('2026. 09. 25. 19:14'),
+    )
+    assert.ok(
+      email.textBody.includes('2026. 09. 25. 19:14'),
+    )
+  })
+
+  void it('maps the COD shipping variant and passes unknown through', () => {
+    assert.equal(
+      translateShipmentMethod(
+        'Dostawa przez sprzedającego pobranie',
+      ),
+      'Eladó által szervezett kiszállítás – utánvét',
+    )
+    assert.equal(
+      translateShipmentMethod(
+        'Dostawa przez sprzedającego',
+      ),
+      'Eladó által szervezett kiszállítás',
+    )
+    assert.equal(
+      translateShipmentMethod('GLS futár'),
+      'GLS futár',
+    )
+    assert.equal(translateShipmentMethod(null), null)
+  })
+
+  void it('maps known payments exactly and keeps unknowns', () => {
+    assert.equal(
+      translatePaymentValue('CASH_ON_DELIVERY'),
+      'Utánvét',
+    )
+    assert.equal(
+      translatePaymentValue('ONLINE'),
+      'Online fizetés',
+    )
+    // Explicitly confirmed suffix mapping.
+    assert.equal(
+      translatePaymentValue('ONLINE (AF)'),
+      'Online fizetés',
+    )
+    assert.equal(
+      translatePaymentValue('PAYU'),
+      'PAYU',
+    )
+    assert.equal(translatePaymentValue(null), null)
+
+    const detail = parseCheckoutForm('ord-9', {
+      id: 'ord-9',
+      buyer: { login: 'buyer42' },
+      payment: { type: 'CASH_ON_DELIVERY' },
+      lineItems: [],
+    })
+    const email = buildOrderEmail(
+      'orders@example.com',
+      orderEvent,
+      detail,
+    )
+
+    assert.ok(
+      email.textBody.includes('Fizetés: Utánvét'),
+    )
+    assert.ok(
+      email.htmlBody.includes('Utánvét'),
     )
   })
 
