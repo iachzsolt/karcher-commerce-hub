@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 
 import {
   createDatabase,
+  catalogSyncRuns,
   dataConnections,
   dataConnectionSchedules,
   dataConnectionRuns,
@@ -108,6 +109,52 @@ export function selectRelatedImportForWrapper<
   }
 
   return best
+}
+
+/*
+ * Mirror of the dataConnectionRuns orphan reaper below:
+ * when a catalog sync run finalizes, any older run still
+ * stuck at RUNNING belongs to a dead runtime and can
+ * never finish itself. Mark it INTERRUPTED so History
+ * distinguishes it from a live run. Self-healing: if the
+ * older runtime is somehow still alive, its own finalize
+ * overwrites this. The current run id is always excluded,
+ * so fresh RUNNING jobs are never touched.
+ */
+export async function reapStaleCatalogSyncRuns(
+  database: ReturnType<typeof createDatabase>,
+  currentRunId: string,
+  currentStartedAt: Date,
+): Promise<{ reaped: number }> {
+  try {
+    await database
+      .update(catalogSyncRuns)
+      .set({
+        status: 'INTERRUPTED',
+        error:
+          'A futást a runtime leállása szakította meg; egy újabb futás zárta le.',
+        finishedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(catalogSyncRuns.status, 'RUNNING'),
+          ne(catalogSyncRuns.id, currentRunId),
+          lt(
+            catalogSyncRuns.startedAt,
+            currentStartedAt,
+          ),
+        ),
+      )
+
+    return { reaped: 1 }
+  } catch (reapError) {
+    console.error(
+      'Catalog sync orphan run reap failed:',
+      reapError,
+    )
+
+    return { reaped: 0 }
+  }
 }
 
 const dataConnectionsApi = new Hono()

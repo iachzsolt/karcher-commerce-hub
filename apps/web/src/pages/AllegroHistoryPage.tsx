@@ -42,7 +42,12 @@ type AllegroHistoryResponse = {
 type CatalogSyncRun = {
   id: string
   trigger: 'AUTOMATIC' | 'MANUAL'
-  status: 'RUNNING' | 'SUCCESS' | 'FAILED' | 'SKIPPED'
+  status:
+    | 'RUNNING'
+    | 'SUCCESS'
+    | 'FAILED'
+    | 'SKIPPED'
+    | 'INTERRUPTED'
   totalOffers: number
   newOffers: number
   renamedOffers: number
@@ -1043,7 +1048,8 @@ function CatalogSyncHistoryGroup({ run }: { run: CatalogSyncRun }) {
   const tone: HistoryRunTone =
     run.status === 'SUCCESS'
       ? 'success'
-      : run.status === 'FAILED'
+      : run.status === 'FAILED' ||
+          run.status === 'INTERRUPTED'
         ? 'failed'
         : run.status === 'RUNNING'
           ? 'pending'
@@ -1053,9 +1059,11 @@ function CatalogSyncHistoryGroup({ run }: { run: CatalogSyncRun }) {
       ? 'Sikeres'
       : run.status === 'FAILED'
         ? 'Sikertelen'
-        : run.status === 'RUNNING'
-          ? 'Folyamatban'
-          : 'Kihagyva'
+        : run.status === 'INTERRUPTED'
+          ? 'Megszakadt'
+          : run.status === 'RUNNING'
+            ? 'Folyamatban'
+            : 'Kihagyva'
   const metrics = [
     ['Allegro-ajánlat', run.totalOffers],
     ['Új ajánlat', run.newOffers],
@@ -1413,6 +1421,7 @@ function AllegroHistoryPage() {
   const [warning, setWarning] = useState<string | null>(null)
   const [truncated, setTruncated] = useState(false)
   const latestRequestId = useRef(0)
+  const requestInFlight = useRef(false)
 
   const validationError = useMemo(() => {
     if (!from || !to) return 'Add meg a kezdő és záró dátumot.'
@@ -1427,135 +1436,166 @@ function AllegroHistoryPage() {
     return null
   }, [from, initialDates, to])
 
-  const loadHistory = useCallback(async () => {
-    const requestId = latestRequestId.current + 1
-    latestRequestId.current = requestId
+  const loadHistory = useCallback(
+    async (options?: { silent?: boolean }) => {
+      if (requestInFlight.current) {
+        return
+      }
 
-    if (validationError) {
-      setEvents([])
-      setCatalogSyncRuns([])
-      setInventoryRefreshRuns([])
-      setTruncated(false)
+      requestInFlight.current = true
+
+      const requestId = latestRequestId.current + 1
+      latestRequestId.current = requestId
+      const silent = options?.silent === true
+
+      if (validationError) {
+        setEvents([])
+        setCatalogSyncRuns([])
+        setInventoryRefreshRuns([])
+        setTruncated(false)
+        setError(null)
+        setWarning(null)
+        setLoading(false)
+        requestInFlight.current = false
+        return
+      }
+
+      // Silent background refreshes overwrite state in
+      // place instead of flashing an empty list.
+      if (!silent) {
+        setLoading(true)
+        setEvents([])
+        setCatalogSyncRuns([])
+        setInventoryRefreshRuns([])
+        setTruncated(false)
+      }
+
       setError(null)
       setWarning(null)
-      setLoading(false)
-      return
-    }
 
-    setLoading(true)
-    setError(null)
-    setWarning(null)
-    setEvents([])
-    setCatalogSyncRuns([])
-    setInventoryRefreshRuns([])
-    setTruncated(false)
+      try {
+        const params = new URLSearchParams({ from, to })
+        const supplementalRequests =
+          Promise.allSettled([
+            fetch(
+              `${API_BASE_URL}/allegro/catalog-sync-runs?${params.toString()}`,
+            ),
+            fetch(
+              `${API_BASE_URL}/allegro/inventory-refresh-runs?${params.toString()}`,
+            ),
+          ])
 
-    try {
-      const params = new URLSearchParams({ from, to })
-      const supplementalRequests = Promise.allSettled([
-        fetch(
-          `${API_BASE_URL}/allegro/catalog-sync-runs?${params.toString()}`,
-        ),
-        fetch(
-          `${API_BASE_URL}/allegro/inventory-refresh-runs?${params.toString()}`,
-        ),
-      ])
+        const response = await fetch(
+          `${API_BASE_URL}/allegro/history?${params.toString()}`,
+        )
+        const body = (await response.json()) as
+          | AllegroHistoryResponse
+          | { message?: string }
 
-      const response = await fetch(
-        `${API_BASE_URL}/allegro/history?${params.toString()}`,
-      )
-      const body = (await response.json()) as
-        | AllegroHistoryResponse
-        | { message?: string }
+        if (
+          !response.ok ||
+          !('status' in body) ||
+          body.status !== 'ok'
+        ) {
+          throw new Error(
+            'message' in body && body.message
+              ? body.message
+              : 'Nem sikerült betölteni az Allegro-előzményeket.',
+          )
+        }
 
-      if (!response.ok || !('status' in body) || body.status !== 'ok') {
-        throw new Error(
-          'message' in body && body.message
-            ? body.message
+        let nextCatalogRuns: CatalogSyncRun[] = []
+        let nextInventoryRuns: InventoryRefreshRun[] =
+          []
+        let hasSupplementalError = false
+
+        if (requestId !== latestRequestId.current)
+          return
+
+        setEvents(body.data)
+        setTruncated(body.truncated)
+        setLoadedAt(Date.now())
+        setLoading(false)
+
+        const [catalogRequest, inventoryRequest] =
+          await supplementalRequests
+
+        if (
+          catalogRequest.status === 'fulfilled' &&
+          catalogRequest.value.ok
+        ) {
+          try {
+            const catalogBody =
+              (await catalogRequest.value.json()) as CatalogSyncRunsResponse
+
+            if (
+              catalogBody.status === 'ok' &&
+              Array.isArray(catalogBody.runs)
+            ) {
+              nextCatalogRuns = catalogBody.runs
+            } else {
+              hasSupplementalError = true
+            }
+          } catch {
+            hasSupplementalError = true
+          }
+        } else {
+          hasSupplementalError = true
+        }
+
+        if (
+          inventoryRequest.status === 'fulfilled' &&
+          inventoryRequest.value.ok
+        ) {
+          try {
+            const inventoryBody =
+              (await inventoryRequest.value
+                .json()) as InventoryRefreshRunsResponse
+
+            if (
+              inventoryBody.status === 'ok' &&
+              Array.isArray(inventoryBody.runs)
+            ) {
+              nextInventoryRuns = inventoryBody.runs
+            } else {
+              hasSupplementalError = true
+            }
+          } catch {
+            hasSupplementalError = true
+          }
+        } else {
+          hasSupplementalError = true
+        }
+
+        if (requestId !== latestRequestId.current)
+          return
+
+        setCatalogSyncRuns(nextCatalogRuns)
+        setInventoryRefreshRuns(nextInventoryRuns)
+        setWarning(
+          hasSupplementalError
+            ? 'Az események betöltődtek, de egyes futásösszesítések nem érhetők el.'
+            : null,
+        )
+      } catch (loadError) {
+        if (requestId !== latestRequestId.current)
+          return
+
+        setError(
+          loadError instanceof Error
+            ? loadError.message
             : 'Nem sikerült betölteni az Allegro-előzményeket.',
         )
-      }
-
-      let nextCatalogRuns: CatalogSyncRun[] = []
-      let nextInventoryRuns: InventoryRefreshRun[] = []
-      let hasSupplementalError = false
-
-      if (requestId !== latestRequestId.current) return
-
-      setEvents(body.data)
-      setTruncated(body.truncated)
-      setLoadedAt(Date.now())
-      setLoading(false)
-
-      const [catalogRequest, inventoryRequest] = await supplementalRequests
-
-      if (
-        catalogRequest.status === 'fulfilled' &&
-        catalogRequest.value.ok
-      ) {
-        try {
-          const catalogBody =
-            (await catalogRequest.value.json()) as CatalogSyncRunsResponse
-
-          if (catalogBody.status === 'ok' && Array.isArray(catalogBody.runs)) {
-            nextCatalogRuns = catalogBody.runs
-          } else {
-            hasSupplementalError = true
-          }
-        } catch {
-          hasSupplementalError = true
+      } finally {
+        if (requestId === latestRequestId.current) {
+          setLoading(false)
         }
-      } else {
-        hasSupplementalError = true
+
+        requestInFlight.current = false
       }
-
-      if (
-        inventoryRequest.status === 'fulfilled' &&
-        inventoryRequest.value.ok
-      ) {
-        try {
-          const inventoryBody =
-            (await inventoryRequest.value
-              .json()) as InventoryRefreshRunsResponse
-
-          if (
-            inventoryBody.status === 'ok' &&
-            Array.isArray(inventoryBody.runs)
-          ) {
-            nextInventoryRuns = inventoryBody.runs
-          } else {
-            hasSupplementalError = true
-          }
-        } catch {
-          hasSupplementalError = true
-        }
-      } else {
-        hasSupplementalError = true
-      }
-
-      if (requestId !== latestRequestId.current) return
-
-      setCatalogSyncRuns(nextCatalogRuns)
-      setInventoryRefreshRuns(nextInventoryRuns)
-      setWarning(
-        hasSupplementalError
-          ? 'Az események betöltődtek, de egyes futásösszesítések nem érhetők el.'
-          : null,
-      )
-    } catch (loadError) {
-      if (requestId !== latestRequestId.current) return
-
-      setError(
-        loadError instanceof Error
-          ? loadError.message
-          : 'Nem sikerült betölteni az Allegro-előzményeket.',
-      )
-    } finally {
-      if (requestId === latestRequestId.current) {
-        setLoading(false)
-      }
-    }
-  }, [from, to, validationError])
+    },
+    [from, to, validationError],
+  )
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -1567,6 +1607,73 @@ function AllegroHistoryPage() {
       latestRequestId.current += 1
     }
   }, [loadHistory])
+
+  /*
+   * Lightweight auto-refresh: while the loaded result
+   * still contains a processing/pending row, silently
+   * refetch about every 30 seconds so completions appear
+   * without manual Retry/date switching. Stops by itself
+   * once nothing is pending; a focus regain triggers one
+   * immediate background refresh under the same condition.
+   * The in-flight guard inside loadHistory prevents
+   * overlapping requests; timers/listeners are cleared
+   * on unmount and the date range is never touched.
+   */
+  const hasProcessingRows =
+    events.some(
+      (event) =>
+        event.eventType === 'SYNC' &&
+        (event.newValue === 'PENDING' ||
+          event.newValue ===
+            'REACTIVATION_IN_PROGRESS'),
+    ) ||
+    catalogSyncRuns.some(
+      (run) => run.status === 'RUNNING',
+    ) ||
+    inventoryRefreshRuns.some(
+      (run) => run.status === 'RUNNING',
+    )
+
+  useEffect(() => {
+    if (!hasProcessingRows) {
+      return
+    }
+
+    let disposed = false
+    let timeoutId: number | null = null
+
+    const tick = () => {
+      if (disposed) {
+        return
+      }
+
+      void loadHistory({ silent: true })
+      timeoutId = window.setTimeout(tick, 30000)
+    }
+
+    timeoutId = window.setTimeout(tick, 30000)
+
+    const onFocus = () => {
+      if (!disposed) {
+        void loadHistory({ silent: true })
+      }
+    }
+
+    window.addEventListener('focus', onFocus)
+
+    return () => {
+      disposed = true
+
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId)
+      }
+
+      window.removeEventListener(
+        'focus',
+        onFocus,
+      )
+    }
+  }, [hasProcessingRows, loadHistory])
 
   const dayGroups = useMemo(() => {
     const groups = new Map<

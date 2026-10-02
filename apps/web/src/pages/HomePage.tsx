@@ -1,4 +1,8 @@
-import { useEffect, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useState,
+} from 'react'
 import '../CommerceHub.css'
 import { API_BASE_URL } from '../config/api'
 
@@ -1673,6 +1677,146 @@ function HomePage({
       (listing) =>
         hasListingDifference(listing),
     ).length
+
+  /*
+   * Bounded Allegro propagation polling. After a push,
+   * remote values converge eventually (Allegro 202), so a
+   * single fixed-delay refresh can still show a stale
+   * "Eltérés". Reuses the existing 5s verification cadence
+   * (bulk flow sleeps); ~25s total, then stops and keeps
+   * the genuine mismatch visible. Desired values are never
+   * touched — only remote convergence is awaited.
+   */
+  const ALLEGRO_PROPAGATION_POLL_INTERVAL_MS = 5000
+  const ALLEGRO_PROPAGATION_MAX_ATTEMPTS = 6
+
+  type PushedListingTarget = {
+    id: string
+    intendedPriceMinor: number | null
+    intendedStock: number | null
+    intendedPublicationStatus: AllegroListing['desiredPublicationStatus']
+    priceChanged: boolean
+    stockChanged: boolean
+    publicationChanged: boolean
+  }
+
+  const isListingTargetConverged = (
+    listing: AllegroListing,
+    target: PushedListingTarget,
+  ): boolean => {
+    if (
+      target.priceChanged &&
+      target.intendedPriceMinor !== null &&
+      listing.priceMinor !==
+        target.intendedPriceMinor
+    ) {
+      return false
+    }
+
+    if (
+      target.stockChanged &&
+      target.intendedStock !== null
+    ) {
+      const intentionallyInactive =
+        listing.desiredPublicationStatus ===
+          'INACTIVE' &&
+        (listing.publicationStatus ===
+          'INACTIVE' ||
+          listing.publicationStatus === 'ENDED')
+
+      if (
+        !intentionallyInactive &&
+        getEffectiveStockAvailable(listing) !==
+          target.intendedStock
+      ) {
+        return false
+      }
+    }
+
+    if (
+      target.publicationChanged &&
+      hasPublicationDifference(listing)
+    ) {
+      return false
+    }
+
+    return true
+  }
+
+  const reloadAllegroListings = useCallback(async (): Promise<
+    AllegroListing[]
+  > => {
+    const response = await fetch(
+      `${API_BASE_URL}/allegro/listings`,
+    )
+
+    if (!response.ok) {
+      throw new Error(
+        'Nem sikerült frissíteni az ajánlatlistát.',
+      )
+    }
+
+    const data =
+      (await response.json()) as AllegroListingResponse
+
+    setAllegroListings(data.data)
+
+    return data.data
+  }, [])
+
+  const waitForListingConvergence = async (
+    initialListings: AllegroListing[],
+    targets: PushedListingTarget[],
+  ): Promise<{ converged: boolean }> => {
+    let current = initialListings
+
+    for (
+      let attempt = 0;
+      attempt < ALLEGRO_PROPAGATION_MAX_ATTEMPTS;
+      attempt += 1
+    ) {
+      const freshById = new Map(
+        current.map((listing) => [
+          listing.id,
+          listing,
+        ]),
+      )
+      const open = targets.filter((target) => {
+        const fresh = freshById.get(target.id)
+
+        return (
+          !fresh ||
+          !isListingTargetConverged(fresh, target)
+        )
+      })
+
+      if (open.length === 0) {
+        return { converged: true }
+      }
+
+      if (
+        attempt + 1 >=
+        ALLEGRO_PROPAGATION_MAX_ATTEMPTS
+      ) {
+        break
+      }
+
+      await new Promise((resolve) =>
+        window.setTimeout(
+          resolve,
+          ALLEGRO_PROPAGATION_POLL_INTERVAL_MS,
+        ),
+      )
+
+      try {
+        current = await reloadAllegroListings()
+      } catch {
+        // Keep the previous snapshot and retry next round.
+      }
+    }
+
+    return { converged: false }
+  }
   const selectedChangedListingsCount =
     allegroListings.filter(
       (listing) =>
@@ -2382,6 +2526,27 @@ Hibás: ${failed}`,
       ),
     )
   }, [listingPageCount])
+
+  /*
+   * Lightweight freshness: when the tab regains focus,
+   * reload listings from the backend (read-only GET, no
+   * sync POSTs) so automation or another tab cannot leave
+   * a stale Eltérés on screen. Failures are silent; the
+   * manual Frissítés button remains the explicit retry.
+   */
+  useEffect(() => {
+    const onFocus = () => {
+      void reloadAllegroListings().catch(
+        () => undefined,
+      )
+    }
+
+    window.addEventListener('focus', onFocus)
+
+    return () => {
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [reloadAllegroListings])
   const toggleListingSelection = (
     listingId: string,
   ) => {
@@ -2559,67 +2724,50 @@ Biztosan szinkronizálod őket az Allegróval?`,
 
       let refreshWarning = ''
 
-      if (pending > 0) {
-        const offerIds = changedListings
-          .map((listing) => listing.offerId)
-          .filter(
-            (offerId): offerId is string =>
-              typeof offerId === 'string' &&
-              offerId.trim().length > 0,
+      if (succeeded > 0 || pending > 0) {
+        const targets: PushedListingTarget[] =
+          changedListings.map((listing) => ({
+            id: listing.id,
+            intendedPriceMinor:
+              getEffectiveDesiredPriceMinor(listing),
+            intendedStock: listing.desiredStock,
+            intendedPublicationStatus:
+              listing.desiredPublicationStatus,
+            priceChanged:
+              hasPriceDifference(listing),
+            stockChanged:
+              listing.desiredStock !== null &&
+              getEffectiveStockAvailable(listing) !==
+                listing.desiredStock,
+            publicationChanged:
+              hasPublicationDifference(listing),
+          }))
+
+        let refreshedListings: AllegroListing[] = []
+
+        try {
+          refreshedListings =
+            await reloadAllegroListings()
+        } catch (error) {
+          console.error(
+            'Pending Allegro sync verification failed:',
+            error,
           )
-
-        const refreshBatches: string[][] = []
-
-        for (
-          let index = 0;
-          index < offerIds.length;
-          index += 10
-        ) {
-          refreshBatches.push(
-            offerIds.slice(index, index + 10),
-          )
-        }
-
-        let refreshFailed = false
-
-        for (let pass = 0; pass < 2; pass += 1) {
-          await new Promise((resolve) =>
-            window.setTimeout(resolve, 5000),
-          )
-
-          try {
-            for (const batch of refreshBatches) {
-              const refreshResponse = await fetch(
-                `${API_BASE_URL}/auth/allegro/sync`,
-                {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                  },
-                  body: JSON.stringify({
-                    offerIds: batch,
-                  }),
-                },
-              )
-
-              if (!refreshResponse.ok) {
-                throw new Error(
-                  `HTTP ${refreshResponse.status}`,
-                )
-              }
-            }
-          } catch (error) {
-            refreshFailed = true
-            console.error(
-              'Pending Allegro sync verification failed:',
-              error,
-            )
-          }
-        }
-
-        if (refreshFailed) {
           refreshWarning =
             '\n\nMegjegyzés: az Allegro-állapot frissítését nem sikerült teljesen megerősíteni.'
+        }
+
+        if (!refreshWarning) {
+          const convergence =
+            await waitForListingConvergence(
+              refreshedListings,
+              targets,
+            )
+
+          if (!convergence.converged) {
+            refreshWarning =
+              '\n\nMegjegyzés: az Allegro még nem mindenhol tükrözi a kérést; a megmaradt Eltérés a következő frissítéskor eltűnik, ha az állapot valóban beállt.'
+          }
         }
       }
 
@@ -2647,8 +2795,6 @@ Folyamatban: ${pending}${
             : ''
         }${errorDetails}${refreshWarning}`,
       )
-
-      window.location.reload()
     } finally {
       setBulkSyncing(false)
     }
@@ -2810,24 +2956,37 @@ ${changes.join('\n')}`,
         )
       }
 
-      const listingResponse = await fetch(
-        `${API_BASE_URL}/allegro/listings`,
-      )
+      const refreshedListings =
+        await reloadAllegroListings()
 
-      if (!listingResponse.ok) {
-        throw new Error(
-          'Nem sikerült frissíteni az ajánlatlistát.',
+      const convergence =
+        await waitForListingConvergence(
+          refreshedListings,
+          [
+            {
+              id: listing.id,
+              intendedPriceMinor: priceChanged
+                ? effectiveDesiredPriceMinor
+                : null,
+              intendedStock: stockChanged
+                ? listing.desiredStock
+                : null,
+              intendedPublicationStatus:
+                publicationChanged
+                  ? listing.desiredPublicationStatus
+                  : null,
+              priceChanged,
+              stockChanged,
+              publicationChanged,
+            },
+          ],
         )
-      }
 
-      const listingData =
-        (await listingResponse.json()) as AllegroListingResponse
-
-      setAllegroListings(listingData.data)
-
-
-
-      window.alert('Az ajánlat sikeresen szinkronizálva.')
+      window.alert(
+        convergence.converged
+          ? 'Az ajánlat sikeresen szinkronizálva.'
+          : 'Az ajánlat elküldve, de az Allegro még nem mindenhol tükrözi a kérést; az Eltérés a következő frissítéskor eltűnik, ha az állapot valóban beállt.',
+      )
     } catch (error) {
       console.error('Listing sync failed:', error)
 

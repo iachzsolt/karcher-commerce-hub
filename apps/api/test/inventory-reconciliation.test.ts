@@ -1,10 +1,18 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
+  isDuplicateOpenPendingSyncEvent,
   isTerminalInventorySyncStatus,
   reconcilePendingSyncEvent,
+  syncAllegroInventoryRows,
 } from '../src/allegro-inventory-sync.ts'
-import { selectRelatedImportForWrapper } from '../src/data-connections.ts'
+import {
+  reapStaleCatalogSyncRuns,
+  selectRelatedImportForWrapper,
+} from '../src/data-connections.ts'
 import {
   aggregateListingStories,
   describeStoryDetail,
@@ -737,6 +745,347 @@ void describe('history presentation', () => {
         importStatus: null,
       }).overall,
       'running',
+    )
+  })
+})
+
+void describe('duplicate open pending suppression', () => {
+  void it('suppresses an identical still-open pair', () => {
+    assert.equal(
+      isDuplicateOpenPendingSyncEvent(
+        {
+          oldValue: 'NONE',
+          newValue: 'REACTIVATION_IN_PROGRESS',
+        },
+        'NONE',
+        'REACTIVATION_IN_PROGRESS',
+      ),
+      true,
+    )
+    assert.equal(
+      isDuplicateOpenPendingSyncEvent(
+        {
+          oldValue: 'ACTIVATE',
+          newValue: 'PENDING',
+        },
+        'ACTIVATE',
+        'PENDING',
+      ),
+      true,
+    )
+  })
+
+  void it('allows emission after any terminal event', () => {
+    for (const terminal of [
+      'SUCCESS',
+      'FAILED',
+      'NO_CHANGE',
+    ]) {
+      assert.equal(
+        isDuplicateOpenPendingSyncEvent(
+          {
+            oldValue: 'NONE',
+            newValue: terminal,
+          },
+          'NONE',
+          'REACTIVATION_IN_PROGRESS',
+        ),
+        false,
+      )
+    }
+  })
+
+  void it('allows emission when the pair differs', () => {
+    assert.equal(
+      isDuplicateOpenPendingSyncEvent(
+        {
+          oldValue: 'ACTIVATE',
+          newValue: 'PENDING',
+        },
+        'NONE',
+        'REACTIVATION_IN_PROGRESS',
+      ),
+      false,
+    )
+    assert.equal(
+      isDuplicateOpenPendingSyncEvent(
+        {
+          oldValue: 'NONE',
+          newValue: 'SUCCESS',
+        },
+        'NONE',
+        'SUCCESS',
+      ),
+      false,
+    )
+    assert.equal(
+      isDuplicateOpenPendingSyncEvent(
+        null,
+        'NONE',
+        'REACTIVATION_IN_PROGRESS',
+      ),
+      false,
+    )
+  })
+
+  function activatingRow() {
+    return {
+      sku: 'ACTIVATING',
+      listingId: 'listing-activating',
+      offerId: 'offer-activating',
+      targetStock: 5,
+      remoteStock: 5,
+      desiredStock: 5,
+      stockLocked: false,
+      stockAutoPaused: true,
+      publicationStatus: 'ACTIVATING',
+      desiredPublicationStatus: 'ACTIVE',
+      duplicateOfferCount: 1,
+      sourceMissing: false,
+    }
+  }
+
+  function stubDatabase(
+    latestEvents: Array<{
+      listingId: string
+      oldValue: string | null
+      newValue: string | null
+    }>,
+  ) {
+    const inserted: unknown[] = []
+    const terminal = (rows: unknown[]) => ({
+      limit: () => Promise.resolve(rows),
+      then: (
+        resolve: (value: unknown) => unknown,
+      ) =>
+        Promise.resolve(rows).then(resolve),
+    })
+
+    return {
+      inserted,
+      database: {
+        select: (fields: Record<string, unknown>) => {
+          const rows =
+            'metadataJson' in fields
+              ? []
+              : latestEvents
+          const chain = {
+            from: () => ({
+              where: () => ({
+                orderBy: () => terminal(rows),
+              }),
+            }),
+          }
+
+          return chain
+        },
+        insert: () => ({
+          values: (values: unknown) => {
+            inserted.push(values)
+
+            return Promise.resolve()
+          },
+        }),
+        update: () => {
+          throw new Error(
+            'unexpected database update',
+          )
+        },
+      } as unknown as Parameters<
+        typeof syncAllegroInventoryRows
+      >[0],
+    }
+  }
+
+  const silentAdapter = {
+    pushStock: async () => {
+      throw new Error('pushStock must not run')
+    },
+    pushStatus: async () => {
+      throw new Error('pushStatus must not run')
+    },
+    refresh: async () => {
+      throw new Error('refresh must not run')
+    },
+  }
+
+  void it('does not insert a duplicate pending reactivation row', async () => {
+    const stub = stubDatabase([
+      {
+        listingId: 'listing-activating',
+        oldValue: 'NONE',
+        newValue: 'REACTIVATION_IN_PROGRESS',
+      },
+    ])
+    const result = await syncAllegroInventoryRows(
+      stub.database,
+      [activatingRow()],
+      silentAdapter,
+    )
+
+    assert.equal(result.summary.pending, 1)
+    assert.deepEqual(stub.inserted, [])
+  })
+
+  void it('inserts a reactivation row after a terminal event', async () => {
+    const stub = stubDatabase([
+      {
+        listingId: 'listing-activating',
+        oldValue: 'NONE',
+        newValue: 'SUCCESS',
+      },
+    ])
+    const result = await syncAllegroInventoryRows(
+      stub.database,
+      [activatingRow()],
+      silentAdapter,
+    )
+
+    assert.equal(result.summary.pending, 1)
+    assert.equal(stub.inserted.length, 1)
+    assert.deepEqual(
+      (
+        stub.inserted[0] as Array<{
+          oldValue: string
+          newValue: string
+        }>
+      ).map((row) => ({
+        oldValue: row.oldValue,
+        newValue: row.newValue,
+      })),
+      [
+        {
+          oldValue: 'NONE',
+          newValue: 'REACTIVATION_IN_PROGRESS',
+        },
+      ],
+    )
+  })
+
+  void it('still inserts when the guard lookup fails', async () => {
+    const failing = {
+      select: () => {
+        throw new Error('lookup failed')
+      },
+      insert: () => ({
+        values: () => Promise.resolve(),
+      }),
+      update: () => {
+        throw new Error(
+          'unexpected database update',
+        )
+      },
+    } as unknown as Parameters<
+      typeof syncAllegroInventoryRows
+    >[0]
+    const result = await syncAllegroInventoryRows(
+      failing,
+      [activatingRow()],
+      silentAdapter,
+    )
+
+    assert.equal(result.summary.pending, 1)
+  })
+})
+
+void describe('catalog sync stale-run reaper', () => {
+  function stubDatabase() {
+    const updates: Array<{
+      set: unknown
+      where: unknown
+    }> = []
+    const database = {
+      update: () => ({
+        set: (values: unknown) => ({
+          where: (condition: unknown) => {
+            updates.push({
+              set: values,
+              where: condition,
+            })
+
+            return Promise.resolve()
+          },
+        }),
+      }),
+    }
+
+    return { updates, database }
+  }
+
+  void it('marks a stale RUNNING run INTERRUPTED', async () => {
+    const stub = stubDatabase()
+
+    await reapStaleCatalogSyncRuns(
+      stub.database as never,
+      'run-current',
+      new Date('2026-09-20T10:00:00.000Z'),
+    )
+
+    assert.equal(stub.updates.length, 1)
+    const set = stub.updates[0]?.set as Record<
+      string,
+      unknown
+    >
+    assert.equal(set['status'], 'INTERRUPTED')
+    assert.equal(
+      typeof set['error'],
+      'string',
+    )
+    assert.ok(set['finishedAt'] instanceof Date)
+  })
+
+  void it('never throws when the reap fails', async () => {
+    const failing = {
+      update: () => {
+        throw new Error('db down')
+      },
+    }
+
+    await reapStaleCatalogSyncRuns(
+      failing as never,
+      'run-current',
+      new Date(),
+    )
+  })
+
+  void it('keeps the guard clauses intact in source', () => {
+    const source = readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        '..',
+        'src',
+        'data-connections.ts',
+      ),
+      'utf8',
+    )
+    assert.ok(
+      source.includes(
+        'export async function reapStaleCatalogSyncRuns',
+      ),
+    )
+
+    // Current run excluded, only older RUNNING rows are
+    // ever marked INTERRUPTED (identifiers below are
+    // unique to the reaper; whitespace normalized since
+    // calls may wrap lines).
+    const flat = source
+      .replace(/\s+/g, ' ')
+      .replace(/\( /g, '(')
+    assert.ok(
+      flat.includes('ne(catalogSyncRuns.id,'),
+    )
+    assert.ok(
+      flat.includes(
+        'lt(catalogSyncRuns.startedAt,',
+      ),
+    )
+    assert.ok(
+      flat.includes(
+        "eq(catalogSyncRuns.status, 'RUNNING')",
+      ),
+    )
+    assert.ok(
+      flat.includes("status: 'INTERRUPTED'"),
     )
   })
 })

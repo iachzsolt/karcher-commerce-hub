@@ -42,6 +42,7 @@ import { cors } from 'hono/cors'
 import {
   dataConnectionsApi,
   processDueDataConnectionSchedules,
+  reapStaleCatalogSyncRuns,
   selectRelatedImportForWrapper,
 } from './data-connections.js'
 import {
@@ -9157,6 +9158,12 @@ async function runAutomaticAllegroCatalogSync(
             error,
           )
         })
+
+      await reapStaleCatalogSyncRuns(
+        db,
+        runId,
+        startedAt,
+      )
     }
 
     return {
@@ -9196,6 +9203,12 @@ async function runAutomaticAllegroCatalogSync(
             finalizeError,
           )
         })
+
+      await reapStaleCatalogSyncRuns(
+        db,
+        runId,
+        startedAt,
+      )
     }
 
     console.error(

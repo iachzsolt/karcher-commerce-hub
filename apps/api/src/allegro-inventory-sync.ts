@@ -52,6 +52,39 @@ type ResolveInventoryInput = {
   accountId: string
 }
 
+/*
+ * Still-open history states: a newer identical event
+ * would add no information. Anything else (including a
+ * terminal SUCCESS/FAILED) re-enables emission, so a
+ * genuinely new pending is never suppressed.
+ */
+const OPEN_INVENTORY_SYNC_STATUSES = new Set([
+  'PENDING',
+  'REACTIVATION_IN_PROGRESS',
+])
+
+export function isDuplicateOpenPendingSyncEvent(
+  latestEvent: {
+    oldValue: string | null
+    newValue: string | null
+  } | null,
+  action: string,
+  status: string,
+): boolean {
+  if (!latestEvent) {
+    return false
+  }
+
+  if (
+    latestEvent.oldValue !== action ||
+    latestEvent.newValue !== status
+  ) {
+    return false
+  }
+
+  return OPEN_INVENTORY_SYNC_STATUSES.has(status)
+}
+
 export async function resolveAllegroInventoryRows(
   database: Database,
   input: ResolveInventoryInput,
@@ -1700,6 +1733,121 @@ export async function syncAllegroInventoryRows(
   const rowByListingId = new Map(
     rows.map((row) => [row.listingId, row]),
   )
+  /*
+   * Do not pile identical still-open pending rows onto a
+   * listing: when the latest stored event is already this
+   * exact open pair, another row adds no information and
+   * only extends the "Feldolgozás alatt" tail. Any
+   * terminal or different event re-enables emission.
+   * Lookup failure falls through to the legacy behavior
+   * (insert) so the guard can never break a sync.
+   */
+  const openGuardCandidates = new Map<
+    string,
+    { action: string; status: string }
+  >()
+
+  for (const result of results) {
+    const listingId =
+      typeof result.listingId === 'string'
+        ? result.listingId
+        : null
+    const action =
+      typeof result.action === 'string'
+        ? result.action
+        : null
+    const status =
+      typeof result.status === 'string'
+        ? result.status
+        : null
+
+    if (
+      listingId &&
+      action &&
+      status &&
+      OPEN_INVENTORY_SYNC_STATUSES.has(status) &&
+      !openGuardCandidates.has(listingId)
+    ) {
+      openGuardCandidates.set(listingId, {
+        action,
+        status,
+      })
+    }
+  }
+
+  const suppressedHistoryKeys = new Set<string>()
+
+  if (openGuardCandidates.size > 0) {
+    try {
+      const latestStoredEvents = await database
+        .select({
+          listingId:
+            allegroChangeEvents.listingId,
+          oldValue:
+            allegroChangeEvents.oldValue,
+          newValue:
+            allegroChangeEvents.newValue,
+        })
+        .from(allegroChangeEvents)
+        .where(
+          and(
+            eq(
+              allegroChangeEvents.eventType,
+              'SYNC',
+            ),
+            inArray(
+              allegroChangeEvents.listingId,
+              [...openGuardCandidates.keys()],
+            ),
+          ),
+        )
+        .orderBy(
+          desc(allegroChangeEvents.occurredAt),
+        )
+      const latestByListingId = new Map<
+        string,
+        {
+          oldValue: string | null
+          newValue: string | null
+        }
+      >()
+
+      for (const stored of latestStoredEvents) {
+        if (
+          !latestByListingId.has(stored.listingId)
+        ) {
+          latestByListingId.set(stored.listingId, {
+            oldValue: stored.oldValue,
+            newValue: stored.newValue,
+          })
+        }
+      }
+
+      for (const [
+        listingId,
+        candidate,
+      ] of openGuardCandidates) {
+        if (
+          isDuplicateOpenPendingSyncEvent(
+            latestByListingId.get(listingId) ??
+              null,
+            candidate.action,
+            candidate.status,
+          )
+        ) {
+          suppressedHistoryKeys.add(
+            `${listingId}|${candidate.action}|${candidate.status}`,
+          )
+        }
+      }
+    } catch (error) {
+      console.error(
+        'Allegro pending history guard lookup failed:',
+        error,
+      )
+    }
+  }
+
   const syncOccurredAt = new Date()
   const syncEvents = results.flatMap((result) => {
     const listingId =
@@ -1714,6 +1862,15 @@ export async function syncAllegroInventoryRows(
       typeof result.status === 'string'
         ? result.status
         : 'UNKNOWN'
+
+    if (
+      listingId &&
+      suppressedHistoryKeys.has(
+        `${listingId}|${action}|${status}`,
+      )
+    ) {
+      return []
+    }
     const failedDiagnostic =
       extractFailedInventoryListingDiagnostic(
         result,
