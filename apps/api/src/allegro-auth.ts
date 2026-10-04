@@ -1,6 +1,7 @@
 ﻿import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Hono } from 'hono'
-import { and, desc, eq } from 'drizzle-orm'
+import { and, desc, eq, inArray } from 'drizzle-orm'
+import { reconcileAllegroObservation, type AllegroObservedOffer } from './allegro-remote-observation.js'
 import { getCommerceHubUser } from './access-auth.js'
 import { decryptSecret, encryptSecret } from './token-crypto.js'
 import { applyAllegroDesiredStock, resolveAllegroInventoryRows, syncAllegroInventoryRows } from './allegro-inventory-sync.js'
@@ -5273,6 +5274,51 @@ function normalizeAllegroListingStatus(
       return 'UNKNOWN'
   }
 }
+
+// Local observation write only. No desired-state initialization or Allegro mutation.
+allegroAuth.post('/reconcile-listings', async (context) => {
+  const body = await context.req.json().catch(() => null) as { listingIds?: unknown } | null
+  if (!Array.isArray(body?.listingIds) || body.listingIds.length < 1 || body.listingIds.length > 10 ||
+    body.listingIds.some(id => typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) {
+    return context.json({ message: 'Provide 1–10 explicit listing IDs' }, 400)
+  }
+  const ids = [...new Set(body.listingIds as string[])]
+  assertAllegroEnvironmentConfiguration()
+  await restoreAllegroSession()
+  await refreshAllegroSessionIfNeeded()
+  if (!currentSession || currentSession.environment !== getAllegroEnvironment()) return context.json({ message: 'Matching Allegro account required' }, 409)
+  const session = currentSession
+  if (!process.env.DATABASE_URL || !process.env.ALLEGRO_API_URL) return context.json({ message: 'Configuration missing' }, 503)
+  const database = createDatabase(process.env.DATABASE_URL)
+  const targets = await database.select({ id: platformListings.id, offerId: platformListings.externalListingId })
+    .from(platformListings)
+    .innerJoin(platformAccounts, eq(platformAccounts.id, platformListings.accountId))
+    .innerJoin(platforms, eq(platforms.id, platformListings.platformId))
+    .where(and(inArray(platformListings.id, ids), eq(platformListings.accountId, session.platformAccountId),
+      eq(platformListings.marketplace, 'allegro-hu'), eq(platforms.code, 'ALLEGRO'),
+      eq(platformAccounts.active, true), eq(platformAccounts.environment, session.environment)))
+  if (targets.length !== ids.length) return context.json({ message: 'Target outside connected account scope' }, 409)
+  const results: Array<{ listingId: string; ok: boolean; error?: string }> = []
+  for (const target of targets) {
+    try {
+      await reconcileAllegroObservation(target.offerId, async offerId => {
+        const response = await allegroFetch(`${process.env.ALLEGRO_API_URL}/sale/product-offers/${encodeURIComponent(offerId)}`, {
+          method: 'GET', signal: AbortSignal.timeout(10000),
+          headers: { Authorization: `Bearer ${session.accessToken}`, Accept: 'application/vnd.allegro.public.v1+json' },
+        })
+        if (!response.ok) throw new Error(`Allegro GET: HTTP ${response.status}`)
+        return await response.json() as AllegroObservedOffer
+      }, async observation => {
+        await database.insert(listingRemoteStates).values({ listingId: target.id, ...observation })
+          .onConflictDoUpdate({ target: listingRemoteStates.listingId, set: observation })
+      })
+      results.push({ listingId: target.id, ok: true })
+    } catch (error) {
+      results.push({ listingId: target.id, ok: false, error: error instanceof Error ? error.message : 'Remote observation failed' })
+    }
+  }
+  return context.json({ results })
+})
 
 allegroAuth.get(
   '/offer-debug/:offerId',

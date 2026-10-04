@@ -1,10 +1,12 @@
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
 } from 'react'
 import '../CommerceHub.css'
 import { API_BASE_URL } from '../config/api'
+import { convergeAllegroListings, effectiveAllegroStock, evaluateAllegroMismatch } from '../utils/allegroMismatch'
 
 type HealthResponse = {
   status: string
@@ -543,25 +545,7 @@ function HomePage({
   const hasPublicationDifference = (
     listing: AllegroListing,
   ) => {
-    if (
-      listing.desiredPublicationStatus === 'ACTIVE'
-    ) {
-      return (
-        listing.publicationStatus !== 'ACTIVE' &&
-        listing.publicationStatus !== 'ACTIVATING'
-      )
-    }
-
-    if (
-      listing.desiredPublicationStatus === 'INACTIVE'
-    ) {
-      return (
-        listing.publicationStatus !== 'INACTIVE' &&
-        listing.publicationStatus !== 'ENDED'
-      )
-    }
-
-    return false
+    return evaluateAllegroMismatch(listing, null).reasons.some(reason => reason.field === 'publication')
   }
 
   const [apiHealth, setApiHealth] =
@@ -1628,49 +1612,21 @@ function HomePage({
   const hasPriceDifference = (
     listing: AllegroListing,
   ) => {
-    const effectiveDesiredPriceMinor =
-      getEffectiveDesiredPriceMinor(listing)
-
-    return (
-      effectiveDesiredPriceMinor !== null &&
-      listing.priceMinor !==
-        effectiveDesiredPriceMinor
-    )
+    return evaluateAllegroMismatch(listing, getEffectiveDesiredPriceMinor(listing)).reasons.some(reason => reason.field === 'price')
   }
   const getEffectiveStockAvailable = (
     listing: AllegroListing,
   ) => {
-    const isNotSellable =
-      listing.publicationStatus === 'ENDED' ||
-      listing.publicationStatus === 'INACTIVE'
-
-    if (isNotSellable || listing.stockAutoPaused) {
-      return 0
-    }
-
-    return listing.stockAvailable
+    return effectiveAllegroStock(listing)
   }
 
   const hasListingDifference = (
     listing: AllegroListing,
   ) => {
-    const isIntentionallyInactive =
-      listing.desiredPublicationStatus === 'INACTIVE' &&
-      (listing.publicationStatus === 'INACTIVE' ||
-        listing.publicationStatus === 'ENDED')
-
-    const hasStockDifference =
-      !isIntentionallyInactive &&
-      listing.desiredStock !== null &&
-      getEffectiveStockAvailable(listing) !==
-        listing.desiredStock
-
-    return (
-      hasPriceDifference(listing) ||
-      hasStockDifference ||
-      hasPublicationDifference(listing)
-    )
+    return evaluateAllegroMismatch(listing, getEffectiveDesiredPriceMinor(listing)).hasDifference
   }
+  const hasStockDifference = (listing: AllegroListing) =>
+    evaluateAllegroMismatch(listing, null).reasons.some(reason => reason.field === 'stock')
 
   const changedListingsCount =
     allegroListings.filter(
@@ -1704,43 +1660,10 @@ function HomePage({
     listing: AllegroListing,
     target: PushedListingTarget,
   ): boolean => {
-    if (
-      target.priceChanged &&
-      target.intendedPriceMinor !== null &&
-      listing.priceMinor !==
-        target.intendedPriceMinor
-    ) {
-      return false
-    }
-
-    if (
-      target.stockChanged &&
-      target.intendedStock !== null
-    ) {
-      const intentionallyInactive =
-        listing.desiredPublicationStatus ===
-          'INACTIVE' &&
-        (listing.publicationStatus ===
-          'INACTIVE' ||
-          listing.publicationStatus === 'ENDED')
-
-      if (
-        !intentionallyInactive &&
-        getEffectiveStockAvailable(listing) !==
-          target.intendedStock
-      ) {
-        return false
-      }
-    }
-
-    if (
-      target.publicationChanged &&
-      hasPublicationDifference(listing)
-    ) {
-      return false
-    }
-
-    return true
+    const evaluation = evaluateAllegroMismatch({ ...listing,
+      desiredStock: target.stockChanged ? target.intendedStock : null,
+    }, target.priceChanged ? target.intendedPriceMinor : null)
+    return !evaluation.reasons.some(reason => reason.field !== 'publication' || target.publicationChanged)
   }
 
   const reloadAllegroListings = useCallback(async (): Promise<
@@ -1764,58 +1687,71 @@ function HomePage({
     return data.data
   }, [])
 
+  const [remoteErrors, setRemoteErrors] = useState<Record<string, string>>({})
+  const [refreshingRemoteIds, setRefreshingRemoteIds] = useState<string[]>([])
+  const remoteRefreshInFlight = useRef(false)
+  const lastRemoteAttempt = useRef(new Map<string, number>())
+
+  const reconcileRemoteListings = useCallback(async (ids: string[]) => {
+    if (remoteRefreshInFlight.current) throw new Error('Távoli frissítés már folyamatban.')
+    remoteRefreshInFlight.current = true
+    setRefreshingRemoteIds(ids)
+    let failed = false
+    try {
+      for (let offset = 0; offset < ids.length; offset += 10) {
+        const batch = ids.slice(offset, offset + 10)
+        batch.forEach(id => lastRemoteAttempt.current.set(id, Date.now()))
+        try {
+          const response = await fetch(`${API_BASE_URL}/auth/allegro/reconcile-listings`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ listingIds: batch }),
+          })
+          if (!response.ok) throw new Error(`Távoli lekérdezés: HTTP ${response.status}`)
+          const data = await response.json() as { results: Array<{ listingId: string; ok: boolean; error?: string }> }
+          const errors: Record<string, string> = {}
+          for (const id of batch) {
+            const result = data.results.find(row => row.listingId === id)
+            if (!result?.ok) errors[id] = result?.error ?? 'Távoli adat nem elérhető'
+          }
+          if (Object.keys(errors).length) failed = true
+          setRemoteErrors(previous => {
+            const next = { ...previous }
+            batch.forEach(id => { delete next[id] })
+            return { ...next, ...errors }
+          })
+        } catch (error) {
+          failed = true
+          setRemoteErrors(previous => ({ ...previous, ...Object.fromEntries(batch.map(id => [id, error instanceof Error ? error.message : 'Távoli adat nem elérhető'])) }))
+        }
+      }
+    } finally {
+      remoteRefreshInFlight.current = false
+      setRefreshingRemoteIds([])
+    }
+    if (failed) throw new Error('Egyes távoli adatok nem elérhetők.')
+  }, [])
+
+  const refreshRemoteRows = useCallback(async (ids: string[]) => {
+    try { await reconcileRemoteListings(ids) } catch { /* Per-row errors remain visible. */ }
+    await reloadAllegroListings()
+  }, [reconcileRemoteListings, reloadAllegroListings])
+
   const waitForListingConvergence = async (
-    initialListings: AllegroListing[],
+    _initialListings: AllegroListing[],
     targets: PushedListingTarget[],
   ): Promise<{ converged: boolean }> => {
-    let current = initialListings
-
-    for (
-      let attempt = 0;
-      attempt < ALLEGRO_PROPAGATION_MAX_ATTEMPTS;
-      attempt += 1
-    ) {
-      const freshById = new Map(
-        current.map((listing) => [
-          listing.id,
-          listing,
-        ]),
-      )
-      const open = targets.filter((target) => {
-        const fresh = freshById.get(target.id)
-
-        return (
-          !fresh ||
-          !isListingTargetConverged(fresh, target)
-        )
-      })
-
-      if (open.length === 0) {
-        return { converged: true }
-      }
-
-      if (
-        attempt + 1 >=
-        ALLEGRO_PROPAGATION_MAX_ATTEMPTS
-      ) {
-        break
-      }
-
-      await new Promise((resolve) =>
-        window.setTimeout(
-          resolve,
-          ALLEGRO_PROPAGATION_POLL_INTERVAL_MS,
-        ),
-      )
-
-      try {
-        current = await reloadAllegroListings()
-      } catch {
-        // Keep the previous snapshot and retry next round.
-      }
-    }
-
-    return { converged: false }
+    return convergeAllegroListings({
+      targets: targets.map(target => target.id),
+      reconcile: reconcileRemoteListings,
+      reload: reloadAllegroListings,
+      matches: (rows, id) => {
+        const listing = rows.find(row => row.id === id)
+        const target = targets.find(row => row.id === id)
+        return Boolean(listing && target && isListingTargetConverged(listing, target))
+      },
+      wait: () => new Promise(resolve => window.setTimeout(resolve, ALLEGRO_PROPAGATION_POLL_INTERVAL_MS)),
+      attempts: ALLEGRO_PROPAGATION_MAX_ATTEMPTS,
+    })
   }
   const selectedChangedListingsCount =
     allegroListings.filter(
@@ -2589,6 +2525,33 @@ Hibás: ${failed}`,
     })
   }
 
+  const mismatchPresentation = (listing: AllegroListing) => {
+    const evaluation = evaluateAllegroMismatch(listing, getEffectiveDesiredPriceMinor(listing), Boolean(remoteErrors[listing.id]))
+    const labels = { STOCK: 'készlet', PRICE: 'ár', PUBLICATION: 'státusz', REMOTE_DATA_UNAVAILABLE: 'távoli adat nem elérhető' }
+    const unavailableOnly = evaluation.reasons.length > 0 && evaluation.reasons.every(reason => reason.type === 'REMOTE_DATA_UNAVAILABLE')
+    return {
+      ...evaluation,
+      label: !evaluation.hasDifference ? 'Rendben' : unavailableOnly ? 'Távoli adat nem elérhető' : `Eltérés – ${[...new Set(evaluation.reasons.map(reason => labels[reason.type]))].join(', ')}`,
+      detail: evaluation.reasons.map(reason => `${labels[reason.type]} (${reason.field}): kívánt ${reason.field === 'price' && typeof reason.desired === 'number' ? formatMoney(reason.desired, listing.currency) : reason.desired ?? '–'}; Allegro ${reason.field === 'price' && typeof reason.remote === 'number' ? formatMoney(reason.remote, listing.currency) : reason.remote ?? 'ismeretlen'}`).concat(remoteErrors[listing.id] ?? []).join('\n'),
+    }
+  }
+
+  // Foreground-only freshness for existing mismatches: at most five stale
+  // offers/minute, each attempted at most once per five minutes. No full scan.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible' || remoteRefreshInFlight.current) return
+      const now = Date.now()
+      const ids = allegroListings.filter(listing =>
+        hasListingDifference(listing) &&
+        (!listing.lastSyncedAt || now - new Date(listing.lastSyncedAt).getTime() >= 300000) &&
+        now - (lastRemoteAttempt.current.get(listing.id) ?? 0) >= 300000,
+      ).slice(0, 5).map(listing => listing.id)
+      if (ids.length) void refreshRemoteRows(ids).catch(() => undefined)
+    }, 60000)
+    return () => window.clearInterval(timer)
+  }, [allegroListings, priceSchedulesByListing, refreshRemoteRows])
+
   const allListingsSelected =
     paginatedAllegroListings.length > 0 &&
     paginatedAllegroListings.every(
@@ -2605,13 +2568,7 @@ Hibás: ${failed}`,
     const changedListings = allegroListings.filter(
       (listing) =>
         selectedListingIds.includes(listing.id) &&
-        (
-          hasPriceDifference(listing) ||
-          (listing.desiredStock !== null &&
-            getEffectiveStockAvailable(listing) !==
-              listing.desiredStock) ||
-          hasPublicationDifference(listing)
-        ),
+        hasListingDifference(listing),
     )
 
     if (changedListings.length === 0) {
@@ -2736,9 +2693,7 @@ Biztosan szinkronizálod őket az Allegróval?`,
             priceChanged:
               hasPriceDifference(listing),
             stockChanged:
-              listing.desiredStock !== null &&
-              getEffectiveStockAvailable(listing) !==
-                listing.desiredStock,
+              hasStockDifference(listing),
             publicationChanged:
               hasPublicationDifference(listing),
           }))
@@ -2808,18 +2763,7 @@ Folyamatban: ${pending}${
     const priceChanged =
       hasPriceDifference(listing)
 
-    const isIntentionallyInactive =
-      listing.desiredPublicationStatus === 'INACTIVE' &&
-      (
-        listing.publicationStatus === 'INACTIVE' ||
-        listing.publicationStatus === 'ENDED'
-      )
-
-    const stockChanged =
-      !isIntentionallyInactive &&
-      listing.desiredStock !== null &&
-      getEffectiveStockAvailable(listing) !==
-        listing.desiredStock
+    const stockChanged = hasStockDifference(listing)
 
     const publicationChanged =
       hasPublicationDifference(listing)
@@ -4123,16 +4067,18 @@ ${changes.join('\n')}`,
 
                     <td>
                       <div className="difference-cell-content">
-                        {!hasListingDifference(
-                          listing,
-                        ) ? (
-                          <span className="sync-match">
-                            Rendben
-                          </span>
-                        ) : (
-                          <span className="sync-difference">
-                            Eltérés
-                          </span>
+                        <span className={mismatchPresentation(listing).hasDifference ? 'sync-difference' : 'sync-match'}
+                          title={mismatchPresentation(listing).detail}>
+                          {mismatchPresentation(listing).label}
+                        </span>
+                        {mismatchPresentation(listing).hasDifference && (
+                          <button type="button" disabled={refreshingRemoteIds.length > 0}
+                            title="Csak az Allegro aktuális adatainak lekérdezése; kívánt értékeket nem küld."
+                            onClick={() => { void refreshRemoteRows([listing.id]).catch(error => {
+                              setRemoteErrors(previous => ({ ...previous, [listing.id]: error instanceof Error ? error.message : 'Frissítés sikertelen' }))
+                            }) }}>
+                            {refreshingRemoteIds.includes(listing.id) ? 'Lekérdezés…' : 'Távoli frissítés'}
+                          </button>
                         )}
 
                         {(hasUnsavedDesiredPrice(listing) ||
@@ -4232,12 +4178,7 @@ ${changes.join('\n')}`,
                         className="row-sync-button"
                         type="button"
                         disabled={
-                          (!hasPriceDifference(listing) &&
-                            getEffectiveStockAvailable(listing) ===
-                              listing.desiredStock &&
-                            !hasPublicationDifference(
-                              listing,
-                            )) ||
+                          !hasListingDifference(listing) ||
                           syncingWholeListingId ===
                             listing.id
                         }
