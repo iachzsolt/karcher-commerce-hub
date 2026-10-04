@@ -1,9 +1,23 @@
 export type MismatchType = 'STOCK' | 'PRICE' | 'PUBLICATION' | 'REMOTE_DATA_UNAVAILABLE'
+/** Derived by the API's canonical resolver; the web does not resolve precedence. */
+export type ListingPricePolicy = {
+  expectedPriceMinor: number | null
+  observedPriceMinor: number | null
+  source: 'BASE' | 'SCHEDULE' | 'CAMPAIGN_POLICY' | 'LOCKED_PRICE' | 'UNKNOWN'
+  comparison: 'MATCH' | 'MISMATCH' | 'UNAVAILABLE'
+  writeAllowed: boolean
+  automaticWriteAllowed: boolean
+  reason: string
+  computedAt: string
+  nextTransitionAt: string | null
+}
 export type MismatchReason = {
   type: MismatchType
   field: 'stock' | 'price' | 'publication' | 'observation'
   desired: number | string | null
   remote: number | string | null
+  source?: ListingPricePolicy['source']
+  policyReason?: string
 }
 export type MismatchListing = {
   stockAvailable: number | null
@@ -12,6 +26,7 @@ export type MismatchListing = {
   publicationStatus: string | null
   desiredPublicationStatus: string | null
   priceMinor: number | null
+  pricePolicy?: ListingPricePolicy | null
 }
 
 export function effectiveAllegroStock(listing: MismatchListing) {
@@ -30,7 +45,19 @@ export function evaluateAllegroMismatch(
     if (remote === null || remote === 'UNKNOWN') reasons.push({ type: 'REMOTE_DATA_UNAVAILABLE', field, desired, remote })
     else if (desired !== remote) reasons.push({ type, field, desired, remote })
   }
-  compare('price', 'PRICE', effectiveDesiredPrice, listing.priceMinor)
+  if ('pricePolicy' in listing) {
+    const policy = listing.pricePolicy
+    if (!policy || policy.comparison === 'UNAVAILABLE') {
+      reasons.push({ type: 'REMOTE_DATA_UNAVAILABLE', field: 'price', desired: policy?.expectedPriceMinor ?? null,
+        remote: policy?.observedPriceMinor ?? listing.priceMinor, source: policy?.source ?? 'UNKNOWN', policyReason: policy?.reason ?? 'PRICE_POLICY_UNAVAILABLE' })
+    } else if (policy.comparison === 'MISMATCH') {
+      reasons.push({ type: 'PRICE', field: 'price', desired: policy.expectedPriceMinor, remote: policy.observedPriceMinor,
+        source: policy.source, policyReason: policy.reason })
+    }
+  } else {
+    // Legacy callers without a policy contract (non-page comparison fixtures).
+    compare('price', 'PRICE', effectiveDesiredPrice, listing.priceMinor)
+  }
   const intentionallyInactive = listing.desiredPublicationStatus === 'INACTIVE' && ['INACTIVE', 'ENDED'].includes(listing.publicationStatus ?? '')
   if (!intentionallyInactive) compare('stock', 'STOCK', listing.desiredStock, effectiveAllegroStock(listing))
   const desired = listing.desiredPublicationStatus

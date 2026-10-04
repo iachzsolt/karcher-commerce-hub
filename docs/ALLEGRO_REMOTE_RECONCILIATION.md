@@ -19,7 +19,8 @@ is issued. Reconciliation does not run catalog import/adoption.
 
 `utils/allegroMismatch.ts` is the central mismatch evaluator. It reports STOCK,
 PRICE, PUBLICATION and REMOTE_DATA_UNAVAILABLE, with field and desired/remote
-values. Price resolution remains the existing schedule-before-base policy.
+values. Listing-price resolution now consumes the canonical backend policy
+described in `ALLEGRO_PRICE_POLICY.md`.
 Effective-stock zeroing and intentional-INACTIVE stock suppression are retained.
 Locks never suppress a genuine stock mismatch. Unknown data is not presented as
 a confirmed command failure. The row tooltip shows monetary values in HUF rather
@@ -45,8 +46,7 @@ existing offers independently of new/renamed catalog discovery.
 
 ## Deployment and boundaries
 
-Deploy API and web together; no database migration is required. Campaign versus
-schedule/base price precedence remains a separate follow-up. A genuine mismatch,
+Deploy API and web together; no database migration is required. A genuine mismatch,
 manual inactive decision, stock lock, disabled automation or duplicate-SKU
 automation guard is not repaired by remote observation. Stale `stockAutoPaused`
 is likewise not cleared here. Reconciliation observes; it does not apply intent.

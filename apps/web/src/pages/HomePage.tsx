@@ -6,7 +6,12 @@ import {
 } from 'react'
 import '../CommerceHub.css'
 import { API_BASE_URL } from '../config/api'
-import { convergeAllegroListings, effectiveAllegroStock, evaluateAllegroMismatch } from '../utils/allegroMismatch'
+import { convergeAllegroListings, effectiveAllegroStock, evaluateAllegroMismatch, type ListingPricePolicy } from '../utils/allegroMismatch'
+
+const pricePolicyLabels = {
+  BASE: 'alapár', SCHEDULE: 'aktív időzítés', CAMPAIGN_POLICY: 'Allegro-kampány – megfigyelt listaár elfogadva',
+  LOCKED_PRICE: 'kézzel rögzített ár', UNKNOWN: 'nem meghatározható',
+}
 
 type HealthResponse = {
   status: string
@@ -51,6 +56,7 @@ type AllegroListing = {
   accountName: string
   environment: string
   priceMinor: number | null
+  pricePolicy: ListingPricePolicy | null
   currency: string
   stockAvailable: number | null
   stockSold: number | null
@@ -1230,6 +1236,7 @@ function HomePage({
                   result.data.desiredPriceMinor,
                 priceLocked:
                   result.data.priceLocked,
+                pricePolicy: null,
               }
             : item,
         ),
@@ -1241,6 +1248,7 @@ function HomePage({
         return next
       })
 
+      await reloadAllegroListings()
       return true
     } catch (error) {
       console.error(
@@ -1565,54 +1573,15 @@ function HomePage({
     schedule.startAppliedAt !== null &&
     schedule.endAppliedAt === null
 
-  const isPriceScheduleCurrentlyActive = (
-    schedule: ListingPriceSchedule,
-  ) => {
-    const now = Date.now()
-    const validFrom =
-      new Date(schedule.validFrom).getTime()
-    const validTo =
-      new Date(schedule.validTo).getTime()
-
-    return (
-      schedule.enabled &&
-      Number.isFinite(validFrom) &&
-      Number.isFinite(validTo) &&
-      validFrom <= now &&
-      validTo >= now
-    )
-  }
-
   const getEffectiveDesiredPriceMinor = (
     listing: AllegroListing,
-  ) => {
-    const activeSchedule =
-      (
-        priceSchedulesByListing[listing.id] ??
-        []
-      )
-        .filter(
-          isPriceScheduleCurrentlyActive,
-        )
-        .sort(
-          (left, right) =>
-            new Date(
-              right.validFrom,
-            ).getTime() -
-            new Date(
-              left.validFrom,
-            ).getTime(),
-        )[0] ?? null
-
-    return (
-      activeSchedule?.promotionalPriceMinor ??
-      listing.desiredPriceMinor
-    )
-  }
+  ) => listing.pricePolicy?.expectedPriceMinor ?? null
+  const evaluateListing = (listing: AllegroListing, unavailable = false) =>
+    evaluateAllegroMismatch({ ...listing, pricePolicy: listing.pricePolicy ?? null }, null, unavailable)
   const hasPriceDifference = (
     listing: AllegroListing,
   ) => {
-    return evaluateAllegroMismatch(listing, getEffectiveDesiredPriceMinor(listing)).reasons.some(reason => reason.field === 'price')
+    return evaluateListing(listing).reasons.some(reason => reason.field === 'price')
   }
   const getEffectiveStockAvailable = (
     listing: AllegroListing,
@@ -1623,7 +1592,7 @@ function HomePage({
   const hasListingDifference = (
     listing: AllegroListing,
   ) => {
-    return evaluateAllegroMismatch(listing, getEffectiveDesiredPriceMinor(listing)).hasDifference
+    return evaluateListing(listing).hasDifference
   }
   const hasStockDifference = (listing: AllegroListing) =>
     evaluateAllegroMismatch(listing, null).reasons.some(reason => reason.field === 'stock')
@@ -1663,7 +1632,7 @@ function HomePage({
     const evaluation = evaluateAllegroMismatch({ ...listing,
       desiredStock: target.stockChanged ? target.intendedStock : null,
     }, target.priceChanged ? target.intendedPriceMinor : null)
-    return !evaluation.reasons.some(reason => reason.field !== 'publication' || target.publicationChanged)
+    return !evaluation.reasons.some(reason => reason.field === 'publication' ? target.publicationChanged : reason.field === 'price' ? target.priceChanged : true)
   }
 
   const reloadAllegroListings = useCallback(async (): Promise<
@@ -1686,6 +1655,26 @@ function HomePage({
 
     return data.data
   }, [])
+
+  // The server owns the clock and precedence. Re-fetch at its next transition,
+  // rather than inventing a browser-side schedule winner.
+  const pricePolicyDeadlines = useRef(new Map<string, number>())
+  useEffect(() => {
+    const deadlines = new Map<string, number>()
+    const delays = allegroListings.flatMap(listing => {
+      const policy = listing.pricePolicy
+      if (!policy?.nextTransitionAt) return []
+      const key = `${listing.id}:${policy.computedAt}`
+      const deadline = pricePolicyDeadlines.current.get(key) ?? performance.now() +
+        new Date(policy.nextTransitionAt).getTime() - new Date(policy.computedAt).getTime()
+      deadlines.set(key, deadline)
+      return [deadline - performance.now()]
+    }).filter(Number.isFinite)
+    pricePolicyDeadlines.current = deadlines
+    if (!delays.length) return
+    const timer = window.setTimeout(() => { void reloadAllegroListings().catch(() => undefined) }, Math.min(2147483647, Math.max(250, Math.min(...delays) + 100)))
+    return () => window.clearTimeout(timer)
+  }, [allegroListings, reloadAllegroListings])
 
   const [remoteErrors, setRemoteErrors] = useState<Record<string, string>>({})
   const [refreshingRemoteIds, setRefreshingRemoteIds] = useState<string[]>([])
@@ -1916,6 +1905,7 @@ Hibás: ${failed}`,
         return current
       }, {}),
     )
+    await reloadAllegroListings()
   }
 
   const resetPriceScheduleDraft = () => {
@@ -2526,13 +2516,13 @@ Hibás: ${failed}`,
   }
 
   const mismatchPresentation = (listing: AllegroListing) => {
-    const evaluation = evaluateAllegroMismatch(listing, getEffectiveDesiredPriceMinor(listing), Boolean(remoteErrors[listing.id]))
+    const evaluation = evaluateListing(listing, Boolean(remoteErrors[listing.id]))
     const labels = { STOCK: 'készlet', PRICE: 'ár', PUBLICATION: 'státusz', REMOTE_DATA_UNAVAILABLE: 'távoli adat nem elérhető' }
     const unavailableOnly = evaluation.reasons.length > 0 && evaluation.reasons.every(reason => reason.type === 'REMOTE_DATA_UNAVAILABLE')
     return {
       ...evaluation,
       label: !evaluation.hasDifference ? 'Rendben' : unavailableOnly ? 'Távoli adat nem elérhető' : `Eltérés – ${[...new Set(evaluation.reasons.map(reason => labels[reason.type]))].join(', ')}`,
-      detail: evaluation.reasons.map(reason => `${labels[reason.type]} (${reason.field}): kívánt ${reason.field === 'price' && typeof reason.desired === 'number' ? formatMoney(reason.desired, listing.currency) : reason.desired ?? '–'}; Allegro ${reason.field === 'price' && typeof reason.remote === 'number' ? formatMoney(reason.remote, listing.currency) : reason.remote ?? 'ismeretlen'}`).concat(remoteErrors[listing.id] ?? []).join('\n'),
+      detail: evaluation.reasons.map(reason => `${labels[reason.type]} (${reason.field}): várt ${reason.field === 'price' && typeof reason.desired === 'number' ? formatMoney(reason.desired, listing.currency) : reason.desired ?? '–'}; Allegro ${reason.field === 'price' && typeof reason.remote === 'number' ? formatMoney(reason.remote, listing.currency) : reason.remote ?? 'ismeretlen'}${reason.source ? `; forrás: ${reason.source}; ${reason.policyReason ?? ''}` : ''}`).concat(remoteErrors[listing.id] ?? []).join('\n'),
     }
   }
 
@@ -2691,7 +2681,7 @@ Biztosan szinkronizálod őket az Allegróval?`,
             intendedPublicationStatus:
               listing.desiredPublicationStatus,
             priceChanged:
-              hasPriceDifference(listing),
+              hasPriceDifference(listing) && listing.pricePolicy?.writeAllowed === true,
             stockChanged:
               hasStockDifference(listing),
             publicationChanged:
@@ -2761,7 +2751,7 @@ Folyamatban: ${pending}${
       getEffectiveDesiredPriceMinor(listing)
 
     const priceChanged =
-      hasPriceDifference(listing)
+      hasPriceDifference(listing) && listing.pricePolicy?.writeAllowed === true
 
     const stockChanged = hasStockDifference(listing)
 
@@ -3446,6 +3436,12 @@ ${changes.join('\n')}`,
                         <span className="management-label">
                           Kívánt
                         </span>
+
+                        <small title={listing.pricePolicy?.reason}>
+                          Várt listaár: {formatMoney(listing.pricePolicy?.expectedPriceMinor ?? null, listing.currency)}
+                          {' · '}{pricePolicyLabels[listing.pricePolicy?.source ?? 'UNKNOWN']}
+                          {listing.pricePolicy && !listing.pricePolicy.writeAllowed ? ' · árküldés tiltva' : ''}
+                        </small>
 
                         <div className="desired-price-editor">
                           <div className="price-input-wrapper">

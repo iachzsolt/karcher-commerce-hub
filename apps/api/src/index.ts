@@ -42,6 +42,7 @@ import {
 } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { resolveDiscardStock } from './allegro-discard.js'
+import { loadAllegroPricePolicies } from './allegro-price-policy-store.js'
 import { campaignRejection, reconciledBadgeStatus, refreshCampaignListingPublication } from './allegro-campaign-reconciliation.js'
 import { cors } from 'hono/cors'
 import {
@@ -1134,8 +1135,10 @@ allegroCatalogApi.get('/listings', async (context) => {
       ),
     )
 
+    const pricePolicies = await loadAllegroPricePolicies(db, result.map(listing => listing.id))
     const data = result.map((listing) => ({
       ...listing,
+      pricePolicy: pricePolicies.get(listing.id) ?? null,
 
       inventorySourceStock:
         activeInventoryConnection

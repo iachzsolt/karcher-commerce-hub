@@ -2,6 +2,8 @@
 import { Hono } from 'hono'
 import { and, desc, eq, inArray } from 'drizzle-orm'
 import { reconcileAllegroObservation, type AllegroObservedOffer } from './allegro-remote-observation.js'
+import { loadAllegroPricePolicies } from './allegro-price-policy-store.js'
+import { shouldWriteAllegroPrice } from './allegro-price-policy.js'
 import { getCommerceHubUser } from './access-auth.js'
 import { decryptSecret, encryptSecret } from './token-crypto.js'
 import { applyAllegroDesiredStock, resolveAllegroInventoryRows, syncAllegroInventoryRows } from './allegro-inventory-sync.js'
@@ -6591,109 +6593,13 @@ allegroAuth.post('/push-price/:listingId', async (context) => {
     )
   }
 
-  if (row.desiredPriceMinor === null) {
-    return context.json(
-      {
-        status: 'error',
-        message: 'Desired price is missing',
-      },
-      400,
-    )
+  const pricePolicy = (await loadAllegroPricePolicies(db, [listingId])).get(listingId)
+  const automatic = context.req.header('X-Commerce-Hub-Price-Automation') === 'true'
+  if (!pricePolicy || !shouldWriteAllegroPrice(pricePolicy, automatic)) {
+    return context.json({ status: 'ok', skipped: true, pricePolicy,
+      message: pricePolicy?.reason ?? 'PRICE_POLICY_UNAVAILABLE' })
   }
-
-  const priceResolutionNow = new Date()
-
-  const activeCampaignRowsForPrice =
-    await db
-      .select({
-        desiredPriceMinor:
-          listingCampaigns.desiredPriceMinor,
-
-        validFrom:
-          listingCampaigns.validFrom,
-
-        validTo:
-          listingCampaigns.validTo,
-      })
-      .from(listingCampaigns)
-      .where(
-        and(
-          eq(
-            listingCampaigns.listingId,
-            listingId,
-          ),
-          eq(
-            listingCampaigns.campaignType,
-            'DISCOUNT',
-          ),
-          eq(
-            listingCampaigns.campaignStatus,
-            'ACTIVE',
-          ),
-        ),
-      )
-
-  const hasActiveAllegroCampaign =
-    activeCampaignRowsForPrice.some(
-      (campaign) =>
-        (
-          !campaign.validFrom ||
-          campaign.validFrom <= priceResolutionNow
-        ) &&
-        (
-          !campaign.validTo ||
-          campaign.validTo >= priceResolutionNow
-        ),
-    )
-
-  const enabledPriceSchedules =
-    await db
-      .select({
-        promotionalPriceMinor:
-          listingPriceSchedules
-            .promotionalPriceMinor,
-
-        validFrom:
-          listingPriceSchedules.validFrom,
-
-        validTo:
-          listingPriceSchedules.validTo,
-      })
-      .from(listingPriceSchedules)
-      .where(
-        and(
-          eq(
-            listingPriceSchedules.listingId,
-            listingId,
-          ),
-          eq(
-            listingPriceSchedules.enabled,
-            true,
-          ),
-        ),
-      )
-
-  const activePriceSchedule =
-    enabledPriceSchedules
-      .filter(
-        (schedule) =>
-          schedule.validFrom <=
-            priceResolutionNow &&
-          schedule.validTo >=
-            priceResolutionNow,
-      )
-      .sort(
-        (left, right) =>
-          right.validFrom.getTime() -
-          left.validFrom.getTime(),
-      )[0] ?? null
-
-  const effectiveDesiredPriceMinor =
-    !hasActiveAllegroCampaign &&
-    activePriceSchedule
-      ? activePriceSchedule
-          .promotionalPriceMinor
-      : row.desiredPriceMinor
+  const effectiveDesiredPriceMinor = pricePolicy.expectedPriceMinor!
 
   const desiredPrice =
     effectiveDesiredPriceMinor / 100
@@ -6857,7 +6763,8 @@ allegroAuth.post('/push-price/:listingId', async (context) => {
         marketplace: 'allegro-hu',
 
         desiredPriceMinor:
-          row.desiredPriceMinor,
+          effectiveDesiredPriceMinor,
+        pricePolicy,
 
         desiredPrice,
 
@@ -6882,7 +6789,8 @@ allegroAuth.post('/push-price/:listingId', async (context) => {
       offerId: row.offerId,
 
       desiredPriceMinor:
-        row.desiredPriceMinor,
+        effectiveDesiredPriceMinor,
+      pricePolicy,
     },
     202,
   )
@@ -8422,6 +8330,7 @@ allegroAuth.post(
       const schedules =
         await db
           .select({
+            lastError: listingPriceSchedules.lastError,
             id:
               listingPriceSchedules.id,
 
@@ -8559,50 +8468,11 @@ allegroAuth.post(
           continue
         }
 
-        const activeCampaignRows =
-          await db
-            .select({
-              validFrom:
-                listingCampaigns.validFrom,
+        const pricePolicy = (await loadAllegroPricePolicies(db, [schedule.listingId], now)).get(schedule.listingId)
+        if (!pricePolicy?.automaticWriteAllowed) {
+          const message = pricePolicy?.reason ?? 'PRICE_POLICY_UNAVAILABLE'
 
-              validTo:
-                listingCampaigns.validTo,
-            })
-            .from(listingCampaigns)
-            .where(
-              and(
-                eq(
-                  listingCampaigns.listingId,
-                  schedule.listingId,
-                ),
-                eq(
-                  listingCampaigns.campaignType,
-                  'DISCOUNT',
-                ),
-                eq(
-                  listingCampaigns.campaignStatus,
-                  'ACTIVE',
-                ),
-              ),
-            )
-
-        const hasActiveCampaign =
-          activeCampaignRows.some(
-            (campaign) =>
-              (
-                !campaign.validFrom ||
-                campaign.validFrom <= now
-              ) &&
-              (
-                !campaign.validTo ||
-                campaign.validTo >= now
-              ),
-          )
-
-        if (hasActiveCampaign) {
-          const message =
-            'Price schedule is temporarily blocked by an active Allegro campaign'
-
+          if (schedule.lastError !== message) {
           await db
             .update(listingPriceSchedules)
             .set({
@@ -8615,6 +8485,7 @@ allegroAuth.post(
                 schedule.id,
               ),
             )
+          }
 
           blocked += 1
 
@@ -8631,6 +8502,12 @@ allegroAuth.post(
           continue
         }
 
+        if (shouldStart && pricePolicy.scheduleId !== schedule.id) {
+          skipped += 1
+          results.push({ scheduleId: schedule.id, listingId: schedule.listingId, action: 'SKIP', status: 'SKIPPED', message: 'Another schedule is the canonical winner' })
+          continue
+        }
+
         const response =
           await allegroAuth.request(
             `/push-price/${encodeURIComponent(
@@ -8638,6 +8515,7 @@ allegroAuth.post(
             )}`,
             {
               method: 'POST',
+              headers: { 'X-Commerce-Hub-Price-Automation': 'true' },
             },
           )
 
@@ -8647,6 +8525,8 @@ allegroAuth.post(
             .catch(() => null) as
             | {
                 message?: string
+                skipped?: boolean
+                pricePolicy?: import('./allegro-price-policy.js').AllegroPricePolicy
               }
             | null
 
@@ -8701,6 +8581,16 @@ allegroAuth.post(
           continue
         }
 
+        // A campaign/lock may have changed between schedule evaluation and dispatch.
+        // The single-price route re-resolves; a blocked NO-OP is not an applied schedule.
+        if (responseData?.skipped && (!responseData.pricePolicy?.automaticWriteAllowed || responseData.pricePolicy.comparison !== 'MATCH')) {
+          blocked += 1
+          results.push({ scheduleId: schedule.id, listingId: schedule.listingId,
+            action: shouldStart ? 'START' : 'END', status: 'BLOCKED',
+            message: responseData.message ?? 'Price policy changed before dispatch' })
+          continue
+        }
+
     /*
          * Sikeresen kiment egy automatikus Commerce Hub ár.
          *
@@ -8747,10 +8637,7 @@ allegroAuth.post(
           )
         }
 
-        const appliedPriceMinor =
-          shouldStart
-            ? schedule.promotionalPriceMinor
-            : scheduledState.regularPriceMinor
+        const appliedPriceMinor = responseData?.pricePolicy?.expectedPriceMinor ?? pricePolicy.expectedPriceMinor
 
         if (appliedPriceMinor === null) {
           throw new Error(
@@ -8758,6 +8645,7 @@ allegroAuth.post(
           )
         }
 
+        if (!responseData?.skipped) {
         await db
           .insert(listingAcceptedStates)
           .values({
@@ -8803,10 +8691,10 @@ allegroAuth.post(
             basePriceMinor:
               scheduledState.regularPriceMinor,
 
-            priceType:
-              shouldStart
-                ? 'SCHEDULED_PROMOTION'
-                : 'REGULAR',
+              priceType:
+                (responseData?.pricePolicy ?? pricePolicy).source === 'SCHEDULE'
+                  ? 'SCHEDULED_PROMOTION'
+                  : 'REGULAR',
 
             externalCampaignId: null,
 
@@ -8815,8 +8703,9 @@ allegroAuth.post(
             source:
               'COMMERCE_HUB_SCHEDULE',
 
-            observedAt: now,
-          })
+              observedAt: now,
+            })
+        }
         if (shouldStart) {
           await db
             .update(listingPriceSchedules)
@@ -9047,107 +8936,8 @@ allegroAuth.post('/sync-selected', async (context) => {
       continue
     }
 
-    const priceResolutionNow =
-      new Date()
-
-    const activeCampaignRowsForBulkPrice =
-      await db
-        .select({
-          validFrom:
-            listingCampaigns.validFrom,
-
-          validTo:
-            listingCampaigns.validTo,
-        })
-        .from(listingCampaigns)
-        .where(
-          and(
-            eq(
-              listingCampaigns.listingId,
-              listingId,
-            ),
-            eq(
-              listingCampaigns.campaignType,
-              'DISCOUNT',
-            ),
-            eq(
-              listingCampaigns.campaignStatus,
-              'ACTIVE',
-            ),
-          ),
-        )
-
-    const hasActiveAllegroCampaignForBulkPrice =
-      activeCampaignRowsForBulkPrice.some(
-        (campaign) =>
-          (
-            !campaign.validFrom ||
-            campaign.validFrom <=
-              priceResolutionNow
-          ) &&
-          (
-            !campaign.validTo ||
-            campaign.validTo >=
-              priceResolutionNow
-          ),
-      )
-
-    const enabledSchedulesForBulkPrice =
-      hasActiveAllegroCampaignForBulkPrice
-        ? []
-        : await db
-            .select({
-              promotionalPriceMinor:
-                listingPriceSchedules
-                  .promotionalPriceMinor,
-
-              validFrom:
-                listingPriceSchedules.validFrom,
-
-              validTo:
-                listingPriceSchedules.validTo,
-            })
-            .from(listingPriceSchedules)
-            .where(
-              and(
-                eq(
-                  listingPriceSchedules.listingId,
-                  listingId,
-                ),
-                eq(
-                  listingPriceSchedules.enabled,
-                  true,
-                ),
-              ),
-            )
-
-    const activeScheduleForBulkPrice =
-      enabledSchedulesForBulkPrice
-        .filter(
-          (schedule) =>
-            schedule.validFrom <=
-              priceResolutionNow &&
-            schedule.validTo >=
-              priceResolutionNow,
-        )
-        .sort(
-          (left, right) =>
-            right.validFrom.getTime() -
-            left.validFrom.getTime(),
-        )[0] ?? null
-
-    const effectiveDesiredPriceMinorForBulk =
-      hasActiveAllegroCampaignForBulkPrice
-        ? row.priceMinor
-        : activeScheduleForBulkPrice
-          ? activeScheduleForBulkPrice
-              .promotionalPriceMinor
-          : row.desiredPriceMinor
-
-    const priceChanged =
-      effectiveDesiredPriceMinorForBulk !== null &&
-      row.priceMinor !==
-        effectiveDesiredPriceMinorForBulk
+    const pricePolicy = (await loadAllegroPricePolicies(db, [listingId])).get(listingId)
+    const priceChanged = pricePolicy ? shouldWriteAllegroPrice(pricePolicy) : false
 
     const isIntentionallyInactive =
       row.desiredPublicationStatus === 'INACTIVE' &&
@@ -9181,6 +8971,7 @@ allegroAuth.post('/sync-selected', async (context) => {
         listingId,
         status: 'skipped',
         price: 'not-needed',
+        pricePolicy,
         stock: 'not-needed',
         publication: 'not-needed',
       })
@@ -9231,6 +9022,8 @@ allegroAuth.post('/sync-selected', async (context) => {
         priceStatus = 'failed'
       } else if (response.status === 202) {
         priceStatus = 'pending'
+      } else if ((priceDetails as { skipped?: boolean } | null)?.skipped) {
+        priceStatus = 'not-needed'
       } else {
         priceStatus = 'success'
       }
@@ -9294,10 +9087,14 @@ allegroAuth.post('/sync-selected', async (context) => {
       stockStatus === 'pending' ||
       publicationStatus === 'pending'
 
+    const noWrites = priceStatus === 'not-needed' && stockStatus === 'not-needed' && publicationStatus === 'not-needed'
+
     if (hasFailure) {
       failed += 1
     } else if (hasPending) {
       pending += 1
+    } else if (noWrites) {
+      skipped += 1
     } else {
       succeeded += 1
     }
@@ -9325,7 +9122,7 @@ allegroAuth.post('/sync-selected', async (context) => {
         ? 'failed'
         : hasPending
           ? 'pending'
-          : 'success',
+          : noWrites ? 'skipped' : 'success',
       price: priceStatus,
       stock: stockStatus,
       publication: publicationStatus,
