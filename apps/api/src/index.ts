@@ -38,8 +38,10 @@ import {
   min,
   ne,
   or,
+  sql,
 } from 'drizzle-orm'
 import { Hono } from 'hono'
+import { resolveDiscardStock } from './allegro-discard.js'
 import { campaignRejection, reconciledBadgeStatus, refreshCampaignListingPublication } from './allegro-campaign-reconciliation.js'
 import { cors } from 'hono/cors'
 import {
@@ -5244,6 +5246,9 @@ app.post(
           priceLocked:
             listingDesiredStates.priceLocked,
 
+          stockLocked:
+            listingDesiredStates.stockLocked,
+
       stockAutoPaused:
         listingDesiredStates
           .stockAutoPaused,
@@ -5444,19 +5449,14 @@ app.post(
                 row.desiredPriceMinor
               )
 
-    const nextStock =
-      activeInventoryConnection
-        ? (
-            inventoryStockBySku.get(
-              row.sku,
-            ) ?? 0
-          )
-        : row.stockAutoPaused
-          ? 0
-          : (
-              row.stockAvailable ??
-              row.desiredStock
-            )
+        const nextStock = resolveDiscardStock({
+          stockLocked: row.stockLocked,
+          desiredStock: row.desiredStock,
+          hasInventorySource: Boolean(activeInventoryConnection),
+          sourceStock: inventoryStockBySku.get(row.sku),
+          stockAutoPaused: row.stockAutoPaused,
+          remoteStock: row.stockAvailable,
+        })
 
         const priceChanged =
           nextPriceMinor !==
@@ -5492,7 +5492,11 @@ app.post(
               nextPriceMinor,
 
             desiredStock:
-              nextStock,
+              // Recheck ownership at write time too: a manual edit may
+              // have acquired the lock since the initial SELECT.
+              sql`case when ${listingDesiredStates.stockLocked}
+                then ${listingDesiredStates.desiredStock}
+                else ${nextStock} end`,
 
             desiredPublicationStatus:
               nextPublicationStatus,
@@ -5501,8 +5505,6 @@ app.post(
               priceProtected
                 ? row.priceLocked
                 : false,
-
-            stockLocked: false,
 
             updatedBy:
               'COMMERCE_HUB_DISCARD',
