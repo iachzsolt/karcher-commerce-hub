@@ -1786,6 +1786,11 @@ function AllegroCampaignsPage() {
 
       await loadPreparations(campaign.id, true)
 
+      const listingResponse = await fetch(`${API_BASE_URL}/allegro/listings`)
+      if (!listingResponse.ok) throw new Error('Az ajánlatállapotok frissítése sikertelen.')
+      const listingResult = await listingResponse.json() as { data?: AllegroListing[] }
+      setListings(listingResult.data ?? [])
+
       setPreparationMessage(
         'A kampánystátuszok frissítése befejeződött.',
       )

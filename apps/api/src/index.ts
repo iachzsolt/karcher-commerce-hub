@@ -30,6 +30,8 @@ import {
   eq,
   gte,
   inArray,
+  isNotNull,
+  isNull,
   lt,
   lte,
   like,
@@ -38,6 +40,7 @@ import {
   or,
 } from 'drizzle-orm'
 import { Hono } from 'hono'
+import { campaignRejection, reconciledBadgeStatus, refreshCampaignListingPublication } from './allegro-campaign-reconciliation.js'
 import { cors } from 'hono/cors'
 import {
   dataConnectionsApi,
@@ -7139,7 +7142,7 @@ app.post(
 )
 let campaignApplicationProcessorRunning = false
 
-async function processPendingCampaignApplications() {
+async function processPendingCampaignApplications(forceFinishedRecheck = false) {
   if (!db || campaignApplicationProcessorRunning) {
     return
   }
@@ -7174,6 +7177,18 @@ async function processPendingCampaignApplications() {
       .from(listingCampaigns)
       .where(
         or(
+          // Recheck known applications only during their campaign window.
+          // FINISHED remains terminal for submission; this is observation only.
+          and(
+            eq(listingCampaigns.applicationStatus, 'PROCESSED'),
+            eq(listingCampaigns.campaignStatus, 'FINISHED'),
+            isNotNull(listingCampaigns.externalApplicationId),
+            gte(listingCampaigns.validTo, new Date()),
+            ...(forceFinishedRecheck ? [] : [or(
+              isNull(listingCampaigns.lastSyncedAt),
+              lt(listingCampaigns.lastSyncedAt, new Date(Date.now() - 60 * 60 * 1000)),
+            )]),
+          ),
           eq(
             listingCampaigns.applicationStatus,
             'REQUESTED',
@@ -7219,6 +7234,42 @@ async function processPendingCampaignApplications() {
         const remoteStatus =
           application.process.status
 
+        const [listing] = await db.select({
+          offerId: platformListings.externalListingId,
+          publicationStatus: listingRemoteStates.publicationStatus,
+        }).from(platformListings).leftJoin(listingRemoteStates,
+          eq(listingRemoteStates.listingId, platformListings.id),
+        ).where(eq(platformListings.id, row.listingId)).limit(1)
+
+        // Never apply another offer's application to this listing.
+        if (!listing || listing.offerId !== application.offer.id ||
+          application.campaign.id !== row.externalCampaignId ||
+          application.id !== row.externalApplicationId) continue
+
+        await refreshCampaignListingPublication(
+          listing.offerId,
+          listing.publicationStatus,
+          async (offerId) => {
+            const response = await allegroAuth.request(`/offer-debug/${encodeURIComponent(offerId)}`, { method: 'GET' })
+            if (!response.ok) throw new Error(`Campaign offer read failed: ${response.status}`)
+            const result = await response.json() as { data: { publication?: { status?: string } } }
+            return result.data
+          },
+          async () => {
+            const observedAt = new Date()
+            const changed = await db.update(listingRemoteStates).set({
+              publicationStatus: 'ACTIVE', updatedAt: observedAt,
+            }).where(and(
+              eq(listingRemoteStates.listingId, row.listingId),
+              inArray(listingRemoteStates.publicationStatus, ['ENDED', 'INACTIVE']),
+            )).returning({ listingId: listingRemoteStates.listingId })
+            if (changed.length) await db.insert(allegroChangeEvents).values({
+              listingId: row.listingId, eventType: 'STATUS', source: 'ALLEGRO_CAMPAIGN_SYNC',
+              oldValue: listing.publicationStatus, newValue: 'ACTIVE', occurredAt: observedAt,
+            })
+          },
+        )
+
         if (remoteStatus === 'REQUESTED') {
           continue
         }
@@ -7246,6 +7297,11 @@ async function processPendingCampaignApplications() {
             new Date()
 
           if (!badge) {
+            if (row.campaignStatus === 'FINISHED') {
+              await db.update(listingCampaigns).set({ lastSyncedAt: syncedAt })
+                .where(eq(listingCampaigns.id, row.id))
+              continue
+            }
             if (
               row.campaignStatus ===
                 'FINISH_FAILED'
@@ -7316,21 +7372,7 @@ async function processPendingCampaignApplications() {
             continue
           }
 
-          const knownBadgeStatus =
-            remoteBadgeStatus === 'ACTIVE' ||
-            remoteBadgeStatus ===
-              'IN_VERIFICATION' ||
-            remoteBadgeStatus ===
-              'WAITING_FOR_PUBLICATION' ||
-            remoteBadgeStatus ===
-              'FINISHED' ||
-            remoteBadgeStatus ===
-              'DECLINED'
-
-          const nextCampaignStatus =
-            knownBadgeStatus
-              ? remoteBadgeStatus
-              : 'AWAITING_BADGE'
+          const nextCampaignStatus = reconciledBadgeStatus(row.campaignStatus, remoteBadgeStatus)
 
           const remotePriceAmount =
             Number(
@@ -7364,18 +7406,7 @@ async function processPendingCampaignApplications() {
                 )
               : null
 
-          const badgeRejectionText =
-            remoteBadgeStatus ===
-              'DECLINED'
-              ? badge.process
-                  .rejectionReasons
-                  .length > 0
-                ? JSON.stringify(
-                    badge.process
-                      .rejectionReasons,
-                  )
-                : 'Allegro declined the campaign badge'
-              : null
+          const badgeRejectionText = campaignRejection(remoteBadgeStatus, badge.process.rejectionReasons)
 
 
           const shouldRecordCampaignPrice =
@@ -7701,7 +7732,7 @@ async function processPendingCampaignApplications() {
 app.post(
   '/allegro/campaign-applications/sync',
   async (context) => {
-    await processPendingCampaignApplications()
+    await processPendingCampaignApplications(true)
     await processPendingCampaignFinishOperations()
 
     return context.json({
