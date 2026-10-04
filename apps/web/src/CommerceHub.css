@@ -664,6 +664,7 @@ textarea {
 .bulk-toolbar-right {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 14px;
   color: #666666;
   font-size: 13px;

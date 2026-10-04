@@ -1766,7 +1766,163 @@ function HomePage({
   const unsavedDesiredChangesCount =
     unsavedDesiredListings.length
 
-  const saveAllDesiredChanges = async () => {
+  type SavedPushSummary = {
+    succeeded: number
+    skipped: number
+    failed: number
+    pending: number
+    errors: string[]
+    refreshWarning: string
+    refreshed: AllegroListing[]
+  }
+
+  const pushSavedListings = async (
+    listings: AllegroListing[],
+  ): Promise<SavedPushSummary> => {
+    let succeeded = 0
+    let skipped = 0
+    let failed = 0
+    let pending = 0
+
+    const errors: string[] = []
+
+    for (const listing of listings) {
+      try {
+        const response = await fetch(
+          `${API_BASE_URL}/auth/allegro/sync-selected`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              listingIds: [listing.id],
+            }),
+          },
+        )
+
+        const responseText =
+          await response.text()
+
+        type SavedPushResponse = {
+          status?: string
+          succeeded?: number
+          skipped?: number
+          failed?: number
+          pending?: number
+          message?: string
+        }
+
+        let data: SavedPushResponse | null = null
+
+        if (responseText) {
+          try {
+            data = JSON.parse(
+              responseText,
+            ) as SavedPushResponse
+          } catch {
+            data = null
+          }
+        }
+
+        if (!response.ok || !data) {
+          failed += 1
+
+          const message =
+            data?.message ??
+            `HTTP ${response.status}: nem értelmezhető szerverválasz`
+
+          errors.push(
+            `${listing.sku}: ${message}`,
+          )
+
+          continue
+        }
+
+        succeeded += data.succeeded ?? 0
+        skipped += data.skipped ?? 0
+        failed += data.failed ?? 0
+        pending += data.pending ?? 0
+
+        if ((data.failed ?? 0) > 0) {
+          errors.push(
+            `${listing.sku}: ${
+              data.message ??
+              'A szinkronizálás sikertelen.'
+            }`,
+          )
+        }
+      } catch (error) {
+        failed += 1
+
+        errors.push(
+          `${listing.sku}: ${
+            error instanceof Error
+              ? error.message
+              : 'Ismeretlen hiba'
+          }`,
+        )
+      }
+    }
+
+    let refreshWarning = ''
+    let refreshed: AllegroListing[] = []
+
+    if (succeeded > 0 || pending > 0) {
+      const targets: PushedListingTarget[] =
+        listings.map((listing) => ({
+          id: listing.id,
+          intendedPriceMinor:
+            getEffectiveDesiredPriceMinor(listing),
+          intendedStock: listing.desiredStock,
+          intendedPublicationStatus:
+            listing.desiredPublicationStatus,
+          priceChanged:
+            hasPriceDifference(listing) && listing.pricePolicy?.writeAllowed === true,
+          stockChanged:
+            hasStockDifference(listing),
+          publicationChanged:
+            hasPublicationDifference(listing),
+        }))
+
+      try {
+        refreshed =
+          await reloadAllegroListings()
+      } catch (error) {
+        console.error(
+          'Pending Allegro sync verification failed:',
+          error,
+        )
+        refreshWarning =
+          '\n\nMegjegyzés: az Allegro-állapot frissítését nem sikerült teljesen megerősíteni.'
+      }
+
+      if (!refreshWarning) {
+        const convergence =
+          await waitForListingConvergence(
+            refreshed,
+            targets,
+          )
+
+        if (!convergence.converged) {
+          refreshWarning =
+            '\n\nMegjegyzés: az Allegro még nem mindenhol tükrözi a kérést; a megmaradt Eltérés a következő frissítéskor eltűnik, ha az állapot valóban beállt.'
+        }
+      }
+    }
+
+    return {
+      succeeded,
+      skipped,
+      failed,
+      pending,
+      errors,
+      refreshWarning,
+      refreshed,
+    }
+  }
+
+  const saveAllDesiredChanges = async (withSync: boolean) => {
     if (unsavedDesiredChangesCount === 0) {
       return
     }
@@ -1812,7 +1968,11 @@ function HomePage({
     }
 
     const confirmed = window.confirm(
-      `${unsavedDesiredChangesCount} ajánlatnál van nem mentett módosítás.
+      withSync
+        ? `${unsavedDesiredChangesCount} ajánlatnál van nem mentett módosítás.
+
+Elmented és szinkronizálod őket az Allegro-val?`
+        : `${unsavedDesiredChangesCount} ajánlatnál van nem mentett módosítás.
 
 Elmented ezeket a Commerce Hubba?`,
     )
@@ -1823,8 +1983,14 @@ Elmented ezeket a Commerce Hubba?`,
 
     setBulkSavingDesiredChanges(true)
 
+    if (withSync) {
+      setBulkSyncing(true)
+    }
+
     let succeeded = 0
     let failed = 0
+
+    const savedIds: string[] = []
 
     try {
       for (const listing of unsavedDesiredListings) {
@@ -1859,19 +2025,99 @@ Elmented ezeket a Commerce Hubba?`,
 
         if (listingSucceeded) {
           succeeded += 1
+          savedIds.push(listing.id)
         } else {
           failed += 1
         }
       }
 
-      window.alert(
-        `Mentés kész.
+      if (!withSync) {
+        window.alert(
+          failed === 0
+            ? 'Mentve.'
+            : `Mentve, de ${failed} db mentése sikertelen.`,
+        )
+        return
+      }
 
-Sikeres: ${succeeded}
-Hibás: ${failed}`,
+      if (savedIds.length === 0) {
+        window.alert(
+          'Mentve, de nem szinkronizálható: minden mentés sikertelen.',
+        )
+        return
+      }
+
+      const fresh =
+        await reloadAllegroListings()
+
+      const toPush = fresh.filter(
+        (listing) =>
+          savedIds.includes(listing.id) &&
+          hasListingDifference(listing),
       )
+
+      if (toPush.length === 0) {
+        window.alert(
+          'Mentve, de nem szinkronizálható: nincs szinkronizálandó eltérés.',
+        )
+        return
+      }
+
+      const summary =
+        await pushSavedListings(toPush)
+
+      const campaignBlocked =
+        summary.refreshed.some(
+          (listing) =>
+            savedIds.includes(listing.id) &&
+            hasPriceDifference(listing) &&
+            listing.pricePolicy?.source ===
+              'CAMPAIGN_POLICY',
+        )
+
+      const errorDetails =
+        summary.errors.length > 0
+          ? `
+
+Hibák:
+${summary.errors.slice(0, 5).join('\n')}${
+              summary.errors.length > 5
+                ? `\n+${summary.errors.length - 5} további hiba`
+                : ''
+            }`
+          : ''
+
+      if (summary.failed > 0) {
+        window.alert(
+          `Mentve, de az Allegro szinkronizálás sikertelen.${errorDetails}${summary.refreshWarning}`,
+        )
+      } else if (campaignBlocked) {
+        window.alert(
+          `Mentve, de aktív kampány miatt az ár nem módosítható az Allegro-n.${errorDetails}${summary.refreshWarning}`,
+        )
+      } else if (summary.pending > 0) {
+        window.alert(
+          'Mentve, szinkronizálás folyamatban.',
+        )
+      } else if (summary.refreshWarning) {
+        window.alert(
+          `Szinkronizálva, de eltérés maradt.${summary.refreshWarning}`,
+        )
+      } else if (summary.succeeded === 0) {
+        window.alert(
+          'Mentve, de nem szinkronizálható: nincs végrehajtható módosítás.',
+        )
+      } else {
+        window.alert(
+          'Mentve és szinkronizálva.',
+        )
+      }
     } finally {
       setBulkSavingDesiredChanges(false)
+
+      if (withSync) {
+        setBulkSyncing(false)
+      }
     }
   }
   const loadPriceSchedules = async () => {
@@ -3208,12 +3454,32 @@ ${changes.join('\n')}`,
                     bulkSyncing
                   }
                   onClick={() =>
-                    void saveAllDesiredChanges()
+                    void saveAllDesiredChanges(true)
                   }
+                  title="Mentés és szinkronizálás: az érték az Allegro-ra is elküldésre kerül."
+                >
+                  {bulkSavingDesiredChanges ||
+                  bulkSyncing
+                    ? 'Mentés...'
+                    : `Mentés és szinkronizálás (${unsavedDesiredChangesCount})`}
+                </button>
+
+                <button
+                  className="bulk-sync-button"
+                  type="button"
+                  disabled={
+                    unsavedDesiredChangesCount === 0 ||
+                    bulkSavingDesiredChanges ||
+                    bulkSyncing
+                  }
+                  onClick={() =>
+                    void saveAllDesiredChanges(false)
+                  }
+                  title="Csak mentés: az érték a Commerce Hubban kerül rögzítésre."
                 >
                   {bulkSavingDesiredChanges
                     ? 'Mentés...'
-                    : `Módosítások mentése (${unsavedDesiredChangesCount})`}
+                    : `Csak mentés (${unsavedDesiredChangesCount})`}
                 </button>
 
                 <button
@@ -3442,6 +3708,15 @@ ${changes.join('\n')}`,
                         <span className="management-label">
                           Kívánt
                         </span>
+
+                        {listing.priceLocked && (
+                          <small
+                            className="stock-lock-helper"
+                            title="A kézi ár szinkronizálással az Allegro-ra küldhető; az automatikus szinkron nem írja felül."
+                          >
+                            Kézi érték – az automatikus szinkron nem írja felül.
+                          </small>
+                        )}
 
                         <small title={listing.pricePolicy?.reason}>
                           Várt listaár: {formatMoney(listing.pricePolicy?.expectedPriceMinor ?? null, listing.currency)}
@@ -4059,8 +4334,11 @@ ${changes.join('\n')}`,
                         </label>
 
                         {listing.stockLocked && (
-                          <span className="stock-lock-helper">
-                            Az automatikus készletszinkron nem írja felül.
+                          <span
+                            className="stock-lock-helper"
+                            title="A kézi érték szinkronizálással az Allegro-ra küldhető; az automatikus szinkron nem írja felül."
+                          >
+                            Kézi érték – az automatikus szinkron nem írja felül.
                           </span>
                         )}
 
