@@ -8,9 +8,12 @@ scope validation completes before any offer GET. Partial/out-of-scope sets
 are rejected rather than widened. Offers are read sequentially through the
 existing Allegro fetch wrapper, with a ten-second timeout per GET.
 
-Only `listing_remote_states` is upserted: publication, stock, HU marketplace
-price/currency and observation timestamps. Desired state, locks, auto-pause,
-automation flags, accepted baselines and campaigns are not modified. Unknown
+`listing_remote_states` is upserted: publication, stock, HU marketplace
+price/currency and observation timestamps. Desired targets, locks,
+automation flags, accepted baselines and campaigns are not modified. A separate
+guarded and atomically audited stale `stockAutoPaused` cleanup is now permitted
+only with fresh ACTIVE/equal-stock observation and completed lifecycle evidence;
+see `ALLEGRO_STOCK_POLICY.md`. Ambiguous ownership is retained. Unknown
 fields remain unknown; failed reads (including 404) retain the previous snapshot
 and return a per-listing error. No price, quantity, publication or badge command
 is issued. Reconciliation does not run catalog import/adoption.
@@ -21,7 +24,8 @@ is issued. Reconciliation does not run catalog import/adoption.
 PRICE, PUBLICATION and REMOTE_DATA_UNAVAILABLE, with field and desired/remote
 values. Listing-price resolution now consumes the canonical backend policy
 described in `ALLEGRO_PRICE_POLICY.md`.
-Effective-stock zeroing and intentional-INACTIVE stock suppression are retained.
+Raw observed stock is used for mismatch comparison; sellable quantity is separate.
+Intentional-INACTIVE stock suppression is retained.
 Locks never suppress a genuine stock mismatch. Unknown data is not presented as
 a confirmed command failure. The row tooltip shows monetary values in HUF rather
 than minor units; effective stock is the comparison value.
@@ -37,7 +41,7 @@ attempts (network time is additional). It never repeats the original mutation.
 Requests are sequential chunks of at most ten listing IDs.
 
 While the offers page is visible, background freshness checks run every minute:
-at most five mismatch listings whose observation is at least five minutes old
+at most five mismatch or ACTIVE/ACTIVATING auto-paused listings whose observation is at least five minutes old
 are refreshed. Each listing is attempted at most once per five minutes, even
 on failure. A page-level in-flight guard prevents overlap. The timer is removed
 on unmount. There is no unattended full-catalog polling or new scheduler job.
@@ -48,5 +52,6 @@ existing offers independently of new/renamed catalog discovery.
 
 Deploy API and web together; no database migration is required. A genuine mismatch,
 manual inactive decision, stock lock, disabled automation or duplicate-SKU
-automation guard is not repaired by remote observation. Stale `stockAutoPaused`
-is likewise not cleared here. Reconciliation observes; it does not apply intent.
+automation guard is not bypassed by remote observation. Stale `stockAutoPaused`
+is cleared only under the explicit ownership proof described above. Reconciliation
+does not apply desired stock, price or publication commands.

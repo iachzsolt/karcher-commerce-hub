@@ -4,6 +4,8 @@ import { and, desc, eq, inArray } from 'drizzle-orm'
 import { reconcileAllegroObservation, type AllegroObservedOffer } from './allegro-remote-observation.js'
 import { loadAllegroPricePolicies } from './allegro-price-policy-store.js'
 import { shouldWriteAllegroPrice } from './allegro-price-policy.js'
+import { compareObservedStock, observedStockMatches } from './allegro-stock-policy.js'
+import { readStockOwnershipSnapshot, reconcileStockOwnership } from './allegro-stock-ownership.js'
 import { getCommerceHubUser } from './access-auth.js'
 import { decryptSecret, encryptSecret } from './token-crypto.js'
 import { applyAllegroDesiredStock, resolveAllegroInventoryRows, syncAllegroInventoryRows } from './allegro-inventory-sync.js'
@@ -1187,6 +1189,15 @@ allegroAuth.post('/inventory-sync', async (context) => {
       db,
       rows,
       {
+        reconcileOwnership: async listingId => {
+          const response = await allegroAuth.request('/reconcile-listings', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ listingIds: [listingId] }),
+          })
+          if (!response.ok) return { cleared: false }
+          const result = await response.json() as { results?: Array<{ listingId: string; ownership?: { cleared: boolean } }> }
+          return { cleared: result.results?.find(item => item.listingId === listingId)?.ownership?.cleared === true }
+        },
         pushStock:
           (listingId) =>
             postAllegro(
@@ -5277,7 +5288,8 @@ function normalizeAllegroListingStatus(
   }
 }
 
-// Local observation write only. No desired-state initialization or Allegro mutation.
+// Observation refresh plus separately guarded/audited stale ownership cleanup.
+// No desired targets/locks are changed; no Allegro mutation is dispatched.
 allegroAuth.post('/reconcile-listings', async (context) => {
   const body = await context.req.json().catch(() => null) as { listingIds?: unknown } | null
   if (!Array.isArray(body?.listingIds) || body.listingIds.length < 1 || body.listingIds.length > 10 ||
@@ -5300,10 +5312,11 @@ allegroAuth.post('/reconcile-listings', async (context) => {
       eq(platformListings.marketplace, 'allegro-hu'), eq(platforms.code, 'ALLEGRO'),
       eq(platformAccounts.active, true), eq(platformAccounts.environment, session.environment)))
   if (targets.length !== ids.length) return context.json({ message: 'Target outside connected account scope' }, 409)
-  const results: Array<{ listingId: string; ok: boolean; error?: string }> = []
+  const results: Array<{ listingId: string; ok: boolean; error?: string; ownership?: { cleared: boolean; reason: string } }> = []
   for (const target of targets) {
     try {
-      await reconcileAllegroObservation(target.offerId, async offerId => {
+      const ownershipSnapshot = await readStockOwnershipSnapshot(database, target.id)
+      const observation = await reconcileAllegroObservation(target.offerId, async offerId => {
         const response = await allegroFetch(`${process.env.ALLEGRO_API_URL}/sale/product-offers/${encodeURIComponent(offerId)}`, {
           method: 'GET', signal: AbortSignal.timeout(10000),
           headers: { Authorization: `Bearer ${session.accessToken}`, Accept: 'application/vnd.allegro.public.v1+json' },
@@ -5314,7 +5327,9 @@ allegroAuth.post('/reconcile-listings', async (context) => {
         await database.insert(listingRemoteStates).values({ listingId: target.id, ...observation })
           .onConflictDoUpdate({ target: listingRemoteStates.listingId, set: observation })
       })
-      results.push({ listingId: target.id, ok: true })
+      const ownership = await reconcileStockOwnership(database, ownershipSnapshot, observation)
+        .catch(() => ({ cleared: false, reason: 'OWNERSHIP_CHECK_FAILED' }))
+      results.push({ listingId: target.id, ok: true, ownership })
     } catch (error) {
       results.push({ listingId: target.id, ok: false, error: error instanceof Error ? error.message : 'Remote observation failed' })
     }
@@ -6836,6 +6851,7 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
 
       stockLocked:
         listingDesiredStates.stockLocked,
+      observedStock: listingRemoteStates.stockAvailable,
     })
     .from(platformListings)
     .innerJoin(
@@ -6845,6 +6861,7 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
         platformListings.id,
       ),
     )
+    .leftJoin(listingRemoteStates, eq(listingRemoteStates.listingId, platformListings.id))
     .where(
       eq(platformListings.id, listingId),
     )
@@ -6878,6 +6895,11 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
       },
       400,
     )
+  }
+
+  if (row.observedStock === null) return context.json({ status: 'error', message: 'Observed stock unavailable; reconcile first' }, 409)
+  if (observedStockMatches(row.desiredStock, row.observedStock)) {
+    return context.json({ status: 'ok', skipped: true, message: 'Observed stock already matches desired stock' })
   }
 
   const commandId = randomUUID()
@@ -8939,17 +8961,9 @@ allegroAuth.post('/sync-selected', async (context) => {
     const pricePolicy = (await loadAllegroPricePolicies(db, [listingId])).get(listingId)
     const priceChanged = pricePolicy ? shouldWriteAllegroPrice(pricePolicy) : false
 
-    const isIntentionallyInactive =
-      row.desiredPublicationStatus === 'INACTIVE' &&
-      (
-        row.publicationStatus === 'INACTIVE' ||
-        row.publicationStatus === 'ENDED'
-      )
-
-    const stockChanged =
-      !isIntentionallyInactive &&
-      row.desiredStock !== null &&
-      row.stockAvailable !== row.desiredStock
+    const stockComparison = compareObservedStock(row.desiredStock, row.stockAvailable, row.desiredPublicationStatus, row.publicationStatus)
+    // Unknown observation is not permission to dispatch a quantity command.
+    const stockChanged = stockComparison === 'MISMATCH'
 
     const publicationChanged =
       row.desiredPublicationStatus === 'ACTIVE'
@@ -8973,6 +8987,7 @@ allegroAuth.post('/sync-selected', async (context) => {
         price: 'not-needed',
         pricePolicy,
         stock: 'not-needed',
+        stockComparison,
         publication: 'not-needed',
       })
 
@@ -9048,6 +9063,8 @@ allegroAuth.post('/sync-selected', async (context) => {
         stockStatus = 'failed'
       } else if (response.status === 202) {
         stockStatus = 'pending'
+      } else if ((stockDetails as { skipped?: boolean } | null)?.skipped) {
+        stockStatus = 'not-needed'
       } else {
         stockStatus = 'success'
       }
@@ -9125,6 +9142,7 @@ allegroAuth.post('/sync-selected', async (context) => {
           : noWrites ? 'skipped' : 'success',
       price: priceStatus,
       stock: stockStatus,
+      stockComparison,
       publication: publicationStatus,
       priceDetails,
       stockDetails,

@@ -1,4 +1,16 @@
 export type MismatchType = 'STOCK' | 'PRICE' | 'PUBLICATION' | 'REMOTE_DATA_UNAVAILABLE'
+export type ListingStockPolicy = {
+  observedStock: number | null
+  desiredStock: number | null
+  sellableStock: number | null
+  comparison: string
+  ownership: string
+  stockLocked: boolean
+  stockAutoPaused: boolean
+  autoStockSync: boolean
+  duplicateOfferCount: number
+  automationGuards: string[]
+}
 /** Derived by the API's canonical resolver; the web does not resolve precedence. */
 export type ListingPricePolicy = {
   expectedPriceMinor: number | null
@@ -18,6 +30,7 @@ export type MismatchReason = {
   remote: number | string | null
   source?: ListingPricePolicy['source']
   policyReason?: string
+  stock?: { locked: boolean | null; autoSync: boolean | null; duplicateGuard: boolean | null; autoPaused: boolean }
 }
 export type MismatchListing = {
   stockAvailable: number | null
@@ -27,11 +40,16 @@ export type MismatchListing = {
   desiredPublicationStatus: string | null
   priceMinor: number | null
   pricePolicy?: ListingPricePolicy | null
+  stockPolicy?: ListingStockPolicy | null
+  stockLocked?: boolean | null
+  autoStockSync?: boolean | null
+  duplicateOfferCount?: number
 }
 
 export function effectiveAllegroStock(listing: MismatchListing) {
-  return ['ENDED', 'INACTIVE'].includes(listing.publicationStatus ?? '') || listing.stockAutoPaused
-    ? 0 : listing.stockAvailable
+  if (listing.stockPolicy) return listing.stockPolicy.sellableStock
+  return listing.publicationStatus === 'ACTIVE' ? listing.stockAvailable
+    : ['ENDED', 'INACTIVE', 'ACTIVATING'].includes(listing.publicationStatus ?? '') ? 0 : null
 }
 
 export function evaluateAllegroMismatch(
@@ -58,8 +76,23 @@ export function evaluateAllegroMismatch(
     // Legacy callers without a policy contract (non-page comparison fixtures).
     compare('price', 'PRICE', effectiveDesiredPrice, listing.priceMinor)
   }
-  const intentionallyInactive = listing.desiredPublicationStatus === 'INACTIVE' && ['INACTIVE', 'ENDED'].includes(listing.publicationStatus ?? '')
-  if (!intentionallyInactive) compare('stock', 'STOCK', listing.desiredStock, effectiveAllegroStock(listing))
+  const stockPolicy = listing.stockPolicy
+  if (stockPolicy) {
+    if (stockPolicy.comparison === 'MISMATCH' || stockPolicy.comparison === 'UNAVAILABLE') {
+      compare('stock', 'STOCK', stockPolicy.desiredStock, stockPolicy.observedStock)
+    }
+  } else {
+    const intentionallyInactive = listing.desiredPublicationStatus === 'INACTIVE' && ['INACTIVE', 'ENDED'].includes(listing.publicationStatus ?? '')
+    if (!intentionallyInactive) compare('stock', 'STOCK', listing.desiredStock, listing.stockAvailable)
+  }
+  for (const reason of reasons) {
+    if (reason.field === 'stock') reason.stock = {
+      locked: stockPolicy?.stockLocked ?? listing.stockLocked ?? null,
+      autoSync: stockPolicy?.autoStockSync ?? listing.autoStockSync ?? null,
+      duplicateGuard: stockPolicy ? stockPolicy.duplicateOfferCount > 1 : listing.duplicateOfferCount === undefined ? null : listing.duplicateOfferCount > 1,
+      autoPaused: stockPolicy?.stockAutoPaused ?? listing.stockAutoPaused ?? false,
+    }
+  }
   const desired = listing.desiredPublicationStatus
   if (desired === 'ACTIVE' || desired === 'INACTIVE') {
     const matches = desired === 'ACTIVE'

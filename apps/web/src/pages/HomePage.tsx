@@ -6,7 +6,7 @@ import {
 } from 'react'
 import '../CommerceHub.css'
 import { API_BASE_URL } from '../config/api'
-import { convergeAllegroListings, effectiveAllegroStock, evaluateAllegroMismatch, type ListingPricePolicy } from '../utils/allegroMismatch'
+import { convergeAllegroListings, effectiveAllegroStock, evaluateAllegroMismatch, type ListingPricePolicy, type ListingStockPolicy } from '../utils/allegroMismatch'
 
 const pricePolicyLabels = {
   BASE: 'alapár', SCHEDULE: 'aktív időzítés', CAMPAIGN_POLICY: 'Allegro-kampány – megfigyelt listaár elfogadva',
@@ -57,6 +57,7 @@ type AllegroListing = {
   environment: string
   priceMinor: number | null
   pricePolicy: ListingPricePolicy | null
+  stockPolicy?: ListingStockPolicy | null
   currency: string
   stockAvailable: number | null
   stockSold: number | null
@@ -1331,6 +1332,7 @@ function HomePage({
                   result.data.desiredPublicationStatus,
                 stockAutoPaused:
                   result.data.stockAutoPaused,
+                stockPolicy: null,
               }
             : item,
         ),
@@ -1342,6 +1344,7 @@ function HomePage({
         return next
       })
 
+      await reloadAllegroListings()
       return true
     } catch (error) {
       console.error(
@@ -1398,10 +1401,12 @@ function HomePage({
                 ...item,
                 stockLocked:
                   result.data.stockLocked,
+                stockPolicy: null,
               }
             : item,
         ),
       )
+      await reloadAllegroListings()
     } catch (error) {
       console.error(
         'Stock lock update failed:',
@@ -1469,6 +1474,7 @@ function HomePage({
                 ...item,
                 desiredPublicationStatus:
                   result.data.desiredPublicationStatus,
+                stockPolicy: null,
               }
             : item,
         ),
@@ -1480,6 +1486,7 @@ function HomePage({
         return next
       })
 
+      await reloadAllegroListings()
       return true
     } catch (error) {
       console.error(
@@ -1629,10 +1636,8 @@ function HomePage({
     listing: AllegroListing,
     target: PushedListingTarget,
   ): boolean => {
-    const evaluation = evaluateAllegroMismatch({ ...listing,
-      desiredStock: target.stockChanged ? target.intendedStock : null,
-    }, target.priceChanged ? target.intendedPriceMinor : null)
-    return !evaluation.reasons.some(reason => reason.field === 'publication' ? target.publicationChanged : reason.field === 'price' ? target.priceChanged : true)
+    const evaluation = evaluateListing(listing)
+    return !evaluation.reasons.some(reason => reason.field === 'publication' ? target.publicationChanged : reason.field === 'price' ? target.priceChanged : reason.field === 'stock' ? target.stockChanged : true)
   }
 
   const reloadAllegroListings = useCallback(async (): Promise<
@@ -2522,7 +2527,7 @@ Hibás: ${failed}`,
     return {
       ...evaluation,
       label: !evaluation.hasDifference ? 'Rendben' : unavailableOnly ? 'Távoli adat nem elérhető' : `Eltérés – ${[...new Set(evaluation.reasons.map(reason => labels[reason.type]))].join(', ')}`,
-      detail: evaluation.reasons.map(reason => `${labels[reason.type]} (${reason.field}): várt ${reason.field === 'price' && typeof reason.desired === 'number' ? formatMoney(reason.desired, listing.currency) : reason.desired ?? '–'}; Allegro ${reason.field === 'price' && typeof reason.remote === 'number' ? formatMoney(reason.remote, listing.currency) : reason.remote ?? 'ismeretlen'}${reason.source ? `; forrás: ${reason.source}; ${reason.policyReason ?? ''}` : ''}`).concat(remoteErrors[listing.id] ?? []).join('\n'),
+      detail: evaluation.reasons.map(reason => `${labels[reason.type]} (${reason.field}): várt ${reason.field === 'price' && typeof reason.desired === 'number' ? formatMoney(reason.desired, listing.currency) : reason.desired ?? '–'}; Allegro ${reason.field === 'price' && typeof reason.remote === 'number' ? formatMoney(reason.remote, listing.currency) : reason.remote ?? 'ismeretlen'}${reason.source ? `; forrás: ${reason.source}; ${reason.policyReason ?? ''}` : ''}${reason.stock ? `; zárolt: ${reason.stock.locked}; automatikus készlet: ${reason.stock.autoSync}; duplikált SKU: ${reason.stock.duplicateGuard}; automatikus szünet: ${reason.stock.autoPaused}` : ''}`).concat(remoteErrors[listing.id] ?? []).join('\n'),
     }
   }
 
@@ -2533,10 +2538,11 @@ Hibás: ${failed}`,
       if (document.visibilityState !== 'visible' || remoteRefreshInFlight.current) return
       const now = Date.now()
       const ids = allegroListings.filter(listing =>
-        hasListingDifference(listing) &&
+        (hasListingDifference(listing) || (listing.stockAutoPaused && ['ACTIVE', 'ACTIVATING'].includes(listing.publicationStatus))) &&
         (!listing.lastSyncedAt || now - new Date(listing.lastSyncedAt).getTime() >= 300000) &&
         now - (lastRemoteAttempt.current.get(listing.id) ?? 0) >= 300000,
-      ).slice(0, 5).map(listing => listing.id)
+      ).sort((left, right) => (lastRemoteAttempt.current.get(left.id) ?? 0) - (lastRemoteAttempt.current.get(right.id) ?? 0))
+        .slice(0, 5).map(listing => listing.id)
       if (ids.length) void refreshRemoteRows(ids).catch(() => undefined)
     }, 60000)
     return () => window.clearInterval(timer)
@@ -2782,7 +2788,7 @@ Folyamatban: ${pending}${
 
     if (stockChanged) {
       changes.push(
-        `Készlet: ${getEffectiveStockAvailable(listing) ?? 0} db → ${listing.desiredStock} db`,
+        `Allegro készlet: ${listing.stockAvailable ?? 'ismeretlen'} db → ${listing.desiredStock} db`,
       )
     }
 
@@ -3992,8 +3998,10 @@ ${changes.join('\n')}`,
                         </span>
 
                         <strong>
-                          {getEffectiveStockAvailable(listing) ?? '–'} db
+                          {listing.stockAvailable ?? '–'} db
                         </strong>
+                        <small>Eladható készlet: {getEffectiveStockAvailable(listing) ?? '–'} db</small>
+                        {listing.stockPolicy?.automationGuards.length ? <small title="A különbség nem jelent automatikus javítást.">{listing.stockPolicy.automationGuards.join(', ')}</small> : null}
                       </div>
 
                       <div className="management-desired">
@@ -4067,7 +4075,10 @@ ${changes.join('\n')}`,
                           title={mismatchPresentation(listing).detail}>
                           {mismatchPresentation(listing).label}
                         </span>
-                        {mismatchPresentation(listing).hasDifference && (
+                        {listing.stockAutoPaused && (
+                          <small>Automatikus szünet: {listing.stockPolicy?.ownership === 'AUTO_PAUSED' ? 'nyilvántartva' : 'ellenőrzés szükséges'} (a megfigyelt készletet nem módosítja)</small>
+                        )}
+                        {(mismatchPresentation(listing).hasDifference || listing.stockAutoPaused) && (
                           <button type="button" disabled={refreshingRemoteIds.length > 0}
                             title="Csak az Allegro aktuális adatainak lekérdezése; kívánt értékeket nem küld."
                             onClick={() => { void refreshRemoteRows([listing.id]).catch(error => {

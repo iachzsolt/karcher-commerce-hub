@@ -15,7 +15,8 @@ for (const [desired, remote, mismatch] of [['ACTIVE', 'ACTIVE', false], ['ACTIVE
 test('stock mismatch remains real with or without a manual lock', () => {
   for (const stockLocked of [true, false]) {
     const value = { ...listing, stockLocked, stockAvailable: 20 }
-    assert.deepEqual(evaluateAllegroMismatch(value, 10000).reasons, [{ type: 'STOCK', field: 'stock', desired: 50, remote: 20 }])
+    assert.deepEqual(evaluateAllegroMismatch(value, 10000).reasons, [{ type: 'STOCK', field: 'stock', desired: 50, remote: 20,
+      stock: { locked: stockLocked, autoSync: null, duplicateGuard: null, autoPaused: false } }])
   }
   assert.equal(evaluateAllegroMismatch(listing, 10000).hasDifference, false)
 })
@@ -25,7 +26,7 @@ test('intentionally inactive stock is suppressed', () => {
 test('price and multiple mismatch reasons retain existing comparison semantics', () => {
   assert.deepEqual(evaluateAllegroMismatch(listing, 20000).reasons, [{ type: 'PRICE', field: 'price', desired: 20000, remote: 10000 }])
   const reasons = evaluateAllegroMismatch({ ...listing, publicationStatus: 'ENDED' }, 20000).reasons
-  assert.deepEqual(reasons.map(r => r.type), ['PRICE', 'STOCK', 'PUBLICATION'])
+  assert.deepEqual(reasons.map(r => r.type), ['PRICE', 'PUBLICATION'])
 })
 test('unknown values and fetch failure are distinct from confirmed mismatches', () => {
   const result = evaluateAllegroMismatch({ ...listing, publicationStatus: 'UNKNOWN', stockAvailable: null, priceMinor: null }, 10000)
@@ -34,8 +35,8 @@ test('unknown values and fetch failure are distinct from confirmed mismatches', 
   assert.equal(evaluateAllegroMismatch(listing, 10000, true).reasons[0].field, 'observation')
   assert.equal(evaluateAllegroMismatch({ ...listing, desiredStock: null }, null).hasDifference, false)
 })
-test('auto-paused effective stock semantics stay intact', () => {
-  assert.equal(evaluateAllegroMismatch({ ...listing, stockAutoPaused: true }, 10000).reasons[0].remote, 0)
+test('auto-pause ownership does not manufacture a quantity difference', () => {
+  assert.equal(evaluateAllegroMismatch({ ...listing, stockAutoPaused: true }, 10000).reasons.length, 0)
 })
 
 const offer = { id: 'offer', publication: { status: 'ACTIVE', marketplaces: { base: { id: 'allegro-hu' } } }, stock: { available: 50 }, sellingMode: { price: { amount: '100.00', currency: 'HUF' } } }

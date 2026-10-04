@@ -43,6 +43,7 @@ import {
 import { Hono } from 'hono'
 import { resolveDiscardStock } from './allegro-discard.js'
 import { loadAllegroPricePolicies } from './allegro-price-policy-store.js'
+import { resolveAllegroStockPolicy } from './allegro-stock-policy.js'
 import { campaignRejection, reconciledBadgeStatus, refreshCampaignListingPublication } from './allegro-campaign-reconciliation.js'
 import { cors } from 'hono/cors'
 import {
@@ -976,6 +977,7 @@ allegroCatalogApi.get('/listings', async (context) => {
 
         offerId: platformListings.externalListingId,
         marketplace: platformListings.marketplace,
+        accountId: platformListings.accountId,
         categoryId: platformListings.categoryId,
 
         sku: products.sku,
@@ -1136,9 +1138,21 @@ allegroCatalogApi.get('/listings', async (context) => {
     )
 
     const pricePolicies = await loadAllegroPricePolicies(db, result.map(listing => listing.id))
+    const duplicateCounts = new Map<string, number>()
+    for (const listing of result) {
+      const key = `${listing.accountId}:${listing.marketplace}:${listing.sku}`
+      duplicateCounts.set(key, (duplicateCounts.get(key) ?? 0) + 1)
+    }
     const data = result.map((listing) => ({
       ...listing,
       pricePolicy: pricePolicies.get(listing.id) ?? null,
+      stockPolicy: resolveAllegroStockPolicy({
+        observedStock: listing.stockAvailable, desiredStock: listing.desiredStock,
+        publicationStatus: listing.publicationStatus, desiredPublicationStatus: listing.desiredPublicationStatus,
+        stockAutoPaused: listing.stockAutoPaused ?? false, stockLocked: listing.stockLocked ?? false,
+        autoStockSync: listing.autoStockSync ?? false,
+        duplicateOfferCount: duplicateCounts.get(`${listing.accountId}:${listing.marketplace}:${listing.sku}`) ?? 1,
+      }),
 
       inventorySourceStock:
         activeInventoryConnection

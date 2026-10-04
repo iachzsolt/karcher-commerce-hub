@@ -20,6 +20,7 @@ import {
 import {
   extractFailedInventoryListingDiagnostic,
 } from './inventory-automation-diagnostics.js'
+import { observedStockMatches } from './allegro-stock-policy.js'
 
 type Database =
   ReturnType<typeof createDatabase>
@@ -35,6 +36,7 @@ export type AllegroInventorySyncRow = {
 
   stockLocked: boolean
   stockAutoPaused: boolean
+  autoStockSync?: boolean
 
   publicationStatus:
     string | null
@@ -164,6 +166,7 @@ export async function resolveAllegroInventoryRows(
         stockAutoPaused:
           listingDesiredStates
             .stockAutoPaused,
+        autoStockSync: listingDesiredStates.autoStockSync,
 
         publicationStatus:
           listingRemoteStates
@@ -294,6 +297,7 @@ export async function resolveAllegroInventoryRows(
           stockAutoPaused:
             listing.stockAutoPaused ??
             false,
+          autoStockSync: listing.autoStockSync ?? false,
 
           publicationStatus:
             listing.publicationStatus,
@@ -360,6 +364,7 @@ export async function applyAllegroDesiredStock(
   let duplicateSkuSkipped = 0
   let remoteStockUnknown = 0
   let missingDesiredState = 0
+  let automationDisabled = 0
 
   const results: Array<{
     sku: string
@@ -371,6 +376,12 @@ export async function applyAllegroDesiredStock(
   }> = []
 
   for (const row of rows) {
+    if (row.autoStockSync === false) {
+      automationDisabled += 1
+      results.push({ sku: row.sku, listingId: row.listingId, offerId: row.offerId,
+        previousDesiredStock: row.desiredStock, newDesiredStock: row.desiredStock, status: 'AUTO_STOCK_SYNC_DISABLED' })
+      continue
+    }
     /*
      * 1. Manuálisan rögzített készlet.
      */
@@ -601,6 +612,7 @@ export async function applyAllegroDesiredStock(
       duplicateSkuSkipped,
       remoteStockUnknown,
       missingDesiredState,
+      automationDisabled,
     },
     results,
   }
@@ -615,6 +627,7 @@ export type AllegroInventoryActionResult = {
 }
 
 export type AllegroInventoryAdapter = {
+  reconcileOwnership?: (listingId: string) => Promise<{ cleared: boolean }>
   pushStock:
     (
       listingId: string,
@@ -1068,6 +1081,11 @@ export async function syncAllegroInventoryRows(
   )
 
   for (const row of rows) {
+    if (row.autoStockSync === false) {
+      skipped += 1
+      results.push({ sku: row.sku, listingId: row.listingId, action: 'SKIP', status: 'AUTO_STOCK_SYNC_DISABLED' })
+      continue
+    }
     if (row.stockLocked) {
       skipped += 1
 
@@ -1122,6 +1140,13 @@ export async function syncAllegroInventoryRows(
      * ezért az ajánlatot END állapotba tesszük.
      */
     if (row.targetStock === 0) {
+      // An explicit manual inactive intent must not become automation-owned
+      // merely because its END has not yet appeared in the observation.
+      if (!row.stockAutoPaused && row.desiredPublicationStatus === 'INACTIVE') {
+        skipped += 1
+        results.push({ sku: row.sku, listingId: row.listingId, action: 'SKIP', status: 'MANUAL_INACTIVE' })
+        continue
+      }
       if (
         row.stockAutoPaused &&
         remoteEnded
@@ -1166,45 +1191,9 @@ export async function syncAllegroInventoryRows(
           continue
         }
 
-        /*
-         * Legacy, már leállított 0 készletes ajánlat.
-         * Átvesszük auto-pause kezelésbe, hogy
-         * készlet-visszatéréskor újraaktiválható legyen.
-         */
-        await database
-          .update(
-            listingDesiredStates,
-          )
-          .set({
-            stockAutoPaused:
-              true,
-
-            desiredPublicationStatus:
-              'INACTIVE',
-
-            updatedBy:
-              'COMMERCE_HUB_INVENTORY',
-
-            updatedAt:
-              new Date(),
-          })
-          .where(
-            eq(
-              listingDesiredStates.listingId,
-              row.listingId,
-            ),
-          )
-
-        row.stockAutoPaused = true
-
-        autoPaused += 1
-
-        results.push({
-          sku: row.sku,
-          listingId: row.listingId,
-          action: 'ADOPT_AUTO_PAUSE',
-          status: 'SUCCESS',
-        })
+        // Imported/externally ended is not proof of inventory ownership.
+        skipped += 1
+        results.push({ sku: row.sku, listingId: row.listingId, action: 'SKIP', status: 'OWNERSHIP_UNRESOLVED' })
 
         continue
       }
@@ -1387,34 +1376,9 @@ export async function syncAllegroInventoryRows(
         continue
       }
 
-      /*
-       * Legacy készlethiány miatt leállt ajánlat.
-       * Auto-pause kezelésbe vesszük.
-       * A meglévő logika ezután frissíti a készletet
-       * és ACTIVATE parancsot küld.
-       */
-      await database
-        .update(
-          listingDesiredStates,
-        )
-        .set({
-          stockAutoPaused:
-            true,
-
-          updatedBy:
-            'COMMERCE_HUB_INVENTORY',
-
-          updatedAt:
-            new Date(),
-        })
-        .where(
-          eq(
-            listingDesiredStates.listingId,
-            row.listingId,
-          ),
-        )
-
-      row.stockAutoPaused = true
+      skipped += 1
+      results.push({ sku: row.sku, listingId: row.listingId, action: 'SKIP', status: 'OWNERSHIP_UNRESOLVED' })
+      continue
     }
 
     if (row.remoteStock === null) {
@@ -1432,10 +1396,7 @@ export async function syncAllegroInventoryRows(
 
     let stockChanged = false
 
-    if (
-      row.remoteStock !==
-      row.targetStock
-    ) {
+    if (!observedStockMatches(row.targetStock, row.remoteStock)) {
       attempted += 1
 
       writtenListingIds.add(row.listingId)
@@ -1515,31 +1476,9 @@ export async function syncAllegroInventoryRows(
       row.stockAutoPaused &&
       row.publicationStatus === 'ACTIVE'
     ) {
-      await database
-        .update(
-          listingDesiredStates,
-        )
-        .set({
-          stockAutoPaused:
-            false,
-
-          desiredPublicationStatus:
-            'ACTIVE',
-
-          updatedBy:
-            'COMMERCE_HUB_INVENTORY',
-
-          updatedAt:
-            new Date(),
-        })
-        .where(
-          eq(
-            listingDesiredStates.listingId,
-            row.listingId,
-          ),
-        )
-
-      reactivated += 1
+      const ownership = await adapter.reconcileOwnership?.(row.listingId)
+      if (ownership?.cleared) reactivated += 1
+      else skipped += 1
 
       results.push({
         sku: row.sku,
@@ -1550,7 +1489,7 @@ export async function syncAllegroInventoryRows(
             ? 'STOCK_UPDATE_AND_REACTIVATION_CONFIRMED'
             : 'REACTIVATION_CONFIRMED',
 
-        status: 'SUCCESS',
+        status: ownership?.cleared ? 'SUCCESS' : 'OWNERSHIP_RECONCILIATION_REQUIRED',
         ...(stockChanged
           ? {
               fromStock: row.remoteStock,
@@ -1663,26 +1602,8 @@ export async function syncAllegroInventoryRows(
         continue
       }
 
-      await database
-        .update(
-          listingDesiredStates,
-        )
-        .set({
-          stockAutoPaused:
-            false,
-
-          updatedBy:
-            'COMMERCE_HUB_INVENTORY',
-
-          updatedAt:
-            new Date(),
-        })
-        .where(
-          eq(
-            listingDesiredStates.listingId,
-            row.listingId,
-          ),
-        )
+      // Keep ownership until a fresh observation + terminal evidence proves
+      // completion. The guarded reconciliation path clears only the flag.
 
       reactivated += 1
 
