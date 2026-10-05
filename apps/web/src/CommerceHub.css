@@ -8015,6 +8015,13 @@ input:checked + span::after {
   font-weight: 650;
 }
 
+.allegro-campaign-performance-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .allegro-campaign-performance-metrics {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
@@ -8260,6 +8267,10 @@ input:checked + span::after {
   }
 
   .allegro-campaign-performance-heading select {
+    width: 100%;
+  }
+
+  .allegro-campaign-performance-controls {
     width: 100%;
   }
 

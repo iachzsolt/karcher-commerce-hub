@@ -4,6 +4,8 @@ import { API_BASE_URL } from '../config/api'
 
 type RangeMode = 'week' | 'month' | 'year' | 'custom'
 type ChartMode = 'revenue' | 'orders'
+type CampaignViewMode = 'all' | 'campaign' | 'nonCampaign'
+type CampaignSortKey = 'revenue' | 'orders' | 'name'
 
 type DashboardSeriesItem = {
   key: string
@@ -438,24 +440,34 @@ function SalesChart({
 }
 
 function CampaignPerformanceChart({
-  analysis,
+  products,
+  viewMode,
   currency,
 }: {
-  analysis: CampaignPerformanceAnalysis
+  products: CampaignProductPerformance[]
+  viewMode: CampaignViewMode
   currency: string
 }) {
   const [mode, setMode] = useState<ChartMode>('orders')
-  const products = analysis.products
+  const showCampaign = viewMode !== 'nonCampaign'
+  const showOutside = viewMode !== 'campaign'
+  const valueOf = (
+    product: CampaignProductPerformance,
+    side: 'campaign' | 'outside',
+  ) =>
+    mode === 'revenue'
+      ? side === 'campaign'
+        ? product.campaignRevenueMinor
+        : product.outsideRevenueMinor
+      : side === 'campaign'
+        ? product.campaignOrders
+        : product.outsideOrders
   const maximum = Math.max(
     1,
-    ...products.flatMap((product) =>
-      mode === 'revenue'
-        ? [
-            product.campaignRevenueMinor,
-            product.outsideRevenueMinor,
-          ]
-        : [product.campaignOrders, product.outsideOrders],
-    ),
+    ...products.flatMap((product) => [
+      ...(showCampaign ? [valueOf(product, 'campaign')] : []),
+      ...(showOutside ? [valueOf(product, 'outside')] : []),
+    ]),
   )
   const formatValue = (value: number) =>
     mode === 'revenue'
@@ -465,8 +477,11 @@ function CampaignPerformanceChart({
   if (products.length === 0) {
     return (
       <div className="allegro-campaign-performance-empty">
-        A kiválasztott időszakban a kampány ajánlatai közül nem volt
-        fizetett rendelés.
+        {viewMode === 'campaign'
+          ? 'Nincs kampányhoz köthető rendelés a kiválasztott időszakban.'
+          : viewMode === 'nonCampaign'
+            ? 'Nincs kampányon kívüli rendelés a kiválasztott időszakban.'
+            : 'Nincs rendelési adat a kiválasztott időszakban.'}
       </div>
     )
   }
@@ -475,8 +490,12 @@ function CampaignPerformanceChart({
     <div className="allegro-campaign-performance-chart">
       <div className="allegro-campaign-performance-toolbar">
         <div className="allegro-sales-chart-legend">
-          <span className="is-campaign-sale">Kampányban</span>
-          <span className="is-outside-sale">Kampányon kívül</span>
+          {showCampaign ? (
+            <span className="is-campaign-sale">Kampányban</span>
+          ) : null}
+          {showOutside ? (
+            <span className="is-outside-sale">Kampányon kívül</span>
+          ) : null}
         </div>
         <div className="allegro-sales-chart-mode" aria-label="Kampánygrafikon adata">
           <button
@@ -500,14 +519,8 @@ function CampaignPerformanceChart({
 
       <div className="allegro-campaign-product-list">
         {products.map((product) => {
-          const campaignValue =
-            mode === 'revenue'
-              ? product.campaignRevenueMinor
-              : product.campaignOrders
-          const outsideValue =
-            mode === 'revenue'
-              ? product.outsideRevenueMinor
-              : product.outsideOrders
+          const campaignValue = valueOf(product, 'campaign')
+          const outsideValue = valueOf(product, 'outside')
 
           return (
             <div className="allegro-campaign-product-row" key={product.offerId}>
@@ -529,6 +542,7 @@ function CampaignPerformanceChart({
                 </span>
               </div>
               <div className="allegro-campaign-product-bars">
+                {showCampaign ? (
                 <div className="allegro-campaign-product-bar-row">
                   <div className="allegro-campaign-product-track">
                     <span
@@ -538,6 +552,8 @@ function CampaignPerformanceChart({
                   </div>
                   <strong>{formatValue(campaignValue)}</strong>
                 </div>
+                ) : null}
+                {showOutside ? (
                 <div className="allegro-campaign-product-bar-row">
                   <div className="allegro-campaign-product-track">
                     <span
@@ -547,6 +563,7 @@ function CampaignPerformanceChart({
                   </div>
                   <strong>{formatValue(outsideValue)}</strong>
                 </div>
+                ) : null}
               </div>
             </div>
           )
@@ -567,6 +584,10 @@ function AllegroOverviewPage() {
   const [customTo, setCustomTo] = useState(getCurrentDateValue)
   const [summary, setSummary] = useState<DashboardSummary | null>(null)
   const [selectedCampaignId, setSelectedCampaignId] = useState('')
+  const [campaignViewMode, setCampaignViewMode] =
+    useState<CampaignViewMode>('all')
+  const [campaignSortKey, setCampaignSortKey] =
+    useState<CampaignSortKey>('revenue')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -684,6 +705,60 @@ function AllegroOverviewPage() {
     summary?.campaignPerformance.analyses.find(
       (analysis) => analysis.campaignId === selectedCampaignId,
     ) ?? null
+
+  const campaignViewProducts = useMemo(() => {
+    if (!selectedCampaignAnalysis) return []
+
+    const visible = selectedCampaignAnalysis.products.filter(
+      (product) =>
+        campaignViewMode === 'campaign'
+          ? product.campaignOrders > 0 ||
+            product.campaignRevenueMinor > 0
+          : campaignViewMode === 'nonCampaign'
+            ? product.outsideOrders > 0 ||
+              product.outsideRevenueMinor > 0
+            : true,
+    )
+    const ordersOf = (product: CampaignProductPerformance) =>
+      campaignViewMode === 'campaign'
+        ? product.campaignOrders
+        : campaignViewMode === 'nonCampaign'
+          ? product.outsideOrders
+          : product.campaignOrders + product.outsideOrders
+    const revenueOf = (product: CampaignProductPerformance) =>
+      campaignViewMode === 'campaign'
+        ? product.campaignRevenueMinor
+        : campaignViewMode === 'nonCampaign'
+          ? product.outsideRevenueMinor
+          : product.campaignRevenueMinor +
+            product.outsideRevenueMinor
+
+    return [...visible].sort((left, right) =>
+      campaignSortKey === 'name'
+        ? left.name.localeCompare(right.name, 'hu')
+        : campaignSortKey === 'orders'
+          ? ordersOf(right) - ordersOf(left)
+          : revenueOf(right) - revenueOf(left),
+    )
+  }, [campaignViewMode, campaignSortKey, selectedCampaignAnalysis])
+
+  const campaignViewTotals = useMemo(() => {
+    const totals = { orders: 0, units: 0, revenueMinor: 0 }
+
+    for (const product of campaignViewProducts) {
+      if (campaignViewMode === 'nonCampaign') {
+        totals.orders += product.outsideOrders
+        totals.units += product.outsideUnits
+        totals.revenueMinor += product.outsideRevenueMinor
+      } else {
+        totals.orders += product.campaignOrders
+        totals.units += product.campaignUnits
+        totals.revenueMinor += product.campaignRevenueMinor
+      }
+    }
+
+    return totals
+  }, [campaignViewMode, campaignViewProducts])
 
   return (
     <div className="allegro-overview-page">
@@ -807,17 +882,51 @@ function AllegroOverviewPage() {
             </p>
           </div>
           {summary?.campaignPerformance.campaigns.length ? (
-            <select
-              aria-label="Kampány kiválasztása"
-              value={selectedCampaignId}
-              onChange={(event) => setSelectedCampaignId(event.target.value)}
-            >
-              {summary.campaignPerformance.campaigns.map((campaign) => (
-                <option value={campaign.id} key={campaign.id}>
-                  {campaign.name} · {campaign.offerCount} ajánlat
-                </option>
-              ))}
-            </select>
+            <div className="allegro-campaign-performance-controls">
+              <select
+                aria-label="Kampány kiválasztása"
+                value={selectedCampaignId}
+                onChange={(event) => setSelectedCampaignId(event.target.value)}
+              >
+                {summary.campaignPerformance.campaigns.map((campaign) => (
+                  <option value={campaign.id} key={campaign.id}>
+                    {campaign.name} · {campaign.offerCount} ajánlat
+                  </option>
+                ))}
+              </select>
+              <div className="allegro-sales-chart-mode" aria-label="Kampánynézet">
+                {(
+                  [
+                    ['all', 'Együtt'],
+                    ['campaign', 'Kampányos'],
+                    ['nonCampaign', 'Normál'],
+                  ] as Array<[CampaignViewMode, string]>
+                ).map(([value, label]) => (
+                  <button
+                    type="button"
+                    className={campaignViewMode === value ? 'is-active' : ''}
+                    aria-pressed={campaignViewMode === value}
+                    key={value}
+                    onClick={() => setCampaignViewMode(value)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <select
+                aria-label="Termékek rendezése"
+                value={campaignSortKey}
+                onChange={(event) =>
+                  setCampaignSortKey(
+                    event.target.value as CampaignSortKey,
+                  )
+                }
+              >
+                <option value="revenue">Bevétel</option>
+                <option value="orders">Rendelésszám</option>
+                <option value="name">Terméknév</option>
+              </select>
+            </div>
           ) : null}
         </div>
 
@@ -828,31 +937,71 @@ function AllegroOverviewPage() {
         ) : selectedCampaignAnalysis ? (
           <>
             <div className="allegro-overview-metrics allegro-campaign-performance-metrics">
-              <MetricCard
-                label="Kampányos rendelések"
-                value={String(selectedCampaignAnalysis.totals.campaignOrders)}
-                detail="CAMPAIGN jelöléssel, az aktív időablakban"
-                tone="active"
-              />
-              <MetricCard
-                label="Kampányon kívüli rendelések"
-                value={String(selectedCampaignAnalysis.totals.outsideOrders)}
-                detail="Ugyanezen ajánlatok külön eladásai"
-              />
-              <MetricCard
-                label="Kampányos bevétel"
-                value={formatMoney(selectedCampaignAnalysis.totals.campaignRevenueMinor, summary.sales.currency)}
-                detail="Allegro-hozzájárulással együtt"
-                tone="active"
-              />
-              <MetricCard
-                label="Kampányon kívüli bevétel"
-                value={formatMoney(selectedCampaignAnalysis.totals.outsideRevenueMinor, summary.sales.currency)}
-                detail="Ugyanezen ajánlatok külön bevétele"
-              />
+              {campaignViewMode === 'all' ? (
+                <>
+                  <MetricCard
+                    label="Kampányos rendelések"
+                    value={String(selectedCampaignAnalysis.totals.campaignOrders)}
+                    detail="CAMPAIGN jelöléssel, az aktív időablakban"
+                    tone="active"
+                  />
+                  <MetricCard
+                    label="Kampányon kívüli rendelések"
+                    value={String(selectedCampaignAnalysis.totals.outsideOrders)}
+                    detail="Ugyanezen ajánlatok külön eladásai"
+                  />
+                  <MetricCard
+                    label="Kampányos bevétel"
+                    value={formatMoney(selectedCampaignAnalysis.totals.campaignRevenueMinor, summary.sales.currency)}
+                    detail="Allegro-hozzájárulással együtt"
+                    tone="active"
+                  />
+                  <MetricCard
+                    label="Kampányon kívüli bevétel"
+                    value={formatMoney(selectedCampaignAnalysis.totals.outsideRevenueMinor, summary.sales.currency)}
+                    detail="Ugyanezen ajánlatok külön bevétele"
+                  />
+                </>
+              ) : (
+                <>
+                  <MetricCard
+                    label={campaignViewMode === 'campaign' ? 'Kampányos rendelések' : 'Normál rendelések'}
+                    value={String(campaignViewTotals.orders)}
+                    detail={campaignViewMode === 'campaign' ? 'CAMPAIGN jelöléssel, az aktív időablakban' : 'Kampányon kívüli eladások'}
+                    tone={campaignViewMode === 'campaign' ? 'active' : 'neutral'}
+                  />
+                  <MetricCard
+                    label={campaignViewMode === 'campaign' ? 'Kampányos bevétel' : 'Normál bevétel'}
+                    value={formatMoney(campaignViewTotals.revenueMinor, summary.sales.currency)}
+                    detail="Allegro-hozzájárulással együtt"
+                    tone={campaignViewMode === 'campaign' ? 'active' : 'neutral'}
+                  />
+                  <MetricCard
+                    label="Eladott darab"
+                    value={String(campaignViewTotals.units)}
+                    detail="Összes terméksor mennyisége"
+                  />
+                  <MetricCard
+                    label="Átlagos rendelési érték"
+                    value={
+                      campaignViewTotals.orders > 0
+                        ? formatMoney(
+                            Math.round(
+                              campaignViewTotals.revenueMinor /
+                                campaignViewTotals.orders,
+                            ),
+                            summary.sales.currency,
+                          )
+                        : '—'
+                    }
+                    detail="Bevétel / rendelésszám"
+                  />
+                </>
+              )}
             </div>
             <CampaignPerformanceChart
-              analysis={selectedCampaignAnalysis}
+              products={campaignViewProducts}
+              viewMode={campaignViewMode}
               currency={summary.sales.currency}
             />
             <p className="allegro-campaign-performance-note">
