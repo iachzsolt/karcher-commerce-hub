@@ -8022,6 +8022,26 @@ input:checked + span::after {
   flex-wrap: wrap;
 }
 
+.allegro-product-performance-dates {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #777777;
+  font-size: 12px;
+}
+
+.allegro-campaign-performance-controls input[type="date"] {
+  min-height: 34px;
+  padding: 6px 9px;
+  border: 1px solid #d6d6d6;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #222222;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .allegro-campaign-performance-metrics {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
@@ -8059,9 +8079,31 @@ input:checked + span::after {
 
 .allegro-campaign-product-row {
   display: grid;
-  grid-template-columns: minmax(180px, 32%) minmax(0, 1fr);
+  grid-template-columns: minmax(180px, 30%) minmax(0, 1fr) minmax(140px, 32%);
   align-items: center;
   gap: 16px;
+}
+
+.allegro-campaign-product-figures {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  min-width: 0;
+  font-size: 10px;
+  color: #777777;
+}
+
+.allegro-campaign-product-figures strong {
+  color: #222222;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.allegro-campaign-product-figures .is-breakdown {
+  flex-basis: 100%;
+  font-size: 9px;
+  color: #888888;
 }
 
 .allegro-campaign-product-name {
@@ -8272,6 +8314,15 @@ input:checked + span::after {
 
   .allegro-campaign-performance-controls {
     width: 100%;
+  }
+
+  .allegro-product-performance-dates {
+    width: 100%;
+  }
+
+  .allegro-product-performance-dates input[type="date"] {
+    flex: 1;
+    min-width: 0;
   }
 
   .allegro-campaign-performance-toolbar {

@@ -4,8 +4,8 @@ import { API_BASE_URL } from '../config/api'
 
 type RangeMode = 'week' | 'month' | 'year' | 'custom'
 type ChartMode = 'revenue' | 'orders'
-type CampaignViewMode = 'all' | 'campaign' | 'nonCampaign'
-type CampaignSortKey = 'revenue' | 'orders' | 'name'
+type PerfAttribution = 'all' | 'campaign' | 'nonCampaign'
+type PerfSortKey = 'revenue' | 'orders' | 'units' | 'name'
 
 type DashboardSeriesItem = {
   key: string
@@ -41,6 +41,9 @@ type CampaignPerformanceAnalysis = {
     outsideUnits: number
     campaignRevenueMinor: number
     outsideRevenueMinor: number
+    totalOrders?: number
+    totalUnits?: number
+    totalRevenueMinor?: number
   }
   products: CampaignProductPerformance[]
 }
@@ -273,15 +276,107 @@ function formatFulfillmentStatus(status: string) {
   return labels[status] ?? status
 }
 
-function formatCampaignOfferStatus(status: string) {
-  const labels: Record<string, string> = {
-    CAMPAIGN: 'Kampányos',
-    ACTIVE: 'Aktív',
-    FINISHED: 'Lezárva',
-    DECLINED: 'Elutasítva',
-  }
+type ProductPerformanceRow = {
+  offerId: string
+  name: string
+  orders: number
+  units: number
+  revenueMinor: number
+  campaignOrders: number
+  campaignRevenueMinor: number
+  outsideOrders: number
+  outsideRevenueMinor: number
+}
 
-  return labels[status] ?? status
+function ProductPerformanceList({
+  rows,
+  detailed,
+  barTone,
+  currency,
+}: {
+  rows: ProductPerformanceRow[]
+  detailed: boolean
+  barTone: 'campaign' | 'outside'
+  currency: string
+}) {
+  const maximum = Math.max(
+    1,
+    ...rows.flatMap((row) =>
+      detailed
+        ? [row.campaignRevenueMinor, row.outsideRevenueMinor]
+        : [row.revenueMinor],
+    ),
+  )
+
+  return (
+    <div className="allegro-campaign-product-list">
+      {rows.map((row) => (
+        <div className="allegro-campaign-product-row is-performance" key={row.offerId}>
+          <div className="allegro-campaign-product-name" title={row.name}>
+            <div>
+              <strong>{row.name}</strong>
+            </div>
+            <span>Offer {row.offerId}</span>
+          </div>
+          <div className="allegro-campaign-product-figures">
+            <span>
+              <strong>{row.orders}</strong> rendelés
+            </span>
+            <span>
+              <strong>{row.units}</strong> db
+            </span>
+            <span>
+              <strong>{formatMoney(row.revenueMinor, currency)}</strong>
+            </span>
+            {detailed ? (
+              <span className="is-breakdown">
+                ebből kampányos: {row.campaignOrders} rendelés ·{' '}
+                {formatMoney(row.campaignRevenueMinor, currency)}
+              </span>
+            ) : null}
+          </div>
+          <div className="allegro-campaign-product-bars">
+            {detailed ? (
+              <>
+                <div className="allegro-campaign-product-bar-row">
+                  <div className="allegro-campaign-product-track">
+                    <span
+                      className="is-campaign-sale"
+                      style={{ width: `${(row.campaignRevenueMinor / maximum) * 100}%` }}
+                    />
+                  </div>
+                  <strong>{formatMoney(row.campaignRevenueMinor, currency)}</strong>
+                </div>
+                <div className="allegro-campaign-product-bar-row">
+                  <div className="allegro-campaign-product-track">
+                    <span
+                      className="is-outside-sale"
+                      style={{ width: `${(row.outsideRevenueMinor / maximum) * 100}%` }}
+                    />
+                  </div>
+                  <strong>{formatMoney(row.outsideRevenueMinor, currency)}</strong>
+                </div>
+              </>
+            ) : (
+              <div className="allegro-campaign-product-bar-row">
+                <div className="allegro-campaign-product-track">
+                  <span
+                    className={
+                      barTone === 'campaign'
+                        ? 'is-campaign-sale'
+                        : 'is-outside-sale'
+                    }
+                    style={{ width: `${(row.revenueMinor / maximum) * 100}%` }}
+                  />
+                </div>
+                <strong>{formatMoney(row.revenueMinor, currency)}</strong>
+              </div>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 function MetricCard({
@@ -439,141 +534,6 @@ function SalesChart({
   )
 }
 
-function CampaignPerformanceChart({
-  products,
-  viewMode,
-  currency,
-}: {
-  products: CampaignProductPerformance[]
-  viewMode: CampaignViewMode
-  currency: string
-}) {
-  const [mode, setMode] = useState<ChartMode>('orders')
-  const showCampaign = viewMode !== 'nonCampaign'
-  const showOutside = viewMode !== 'campaign'
-  const valueOf = (
-    product: CampaignProductPerformance,
-    side: 'campaign' | 'outside',
-  ) =>
-    mode === 'revenue'
-      ? side === 'campaign'
-        ? product.campaignRevenueMinor
-        : product.outsideRevenueMinor
-      : side === 'campaign'
-        ? product.campaignOrders
-        : product.outsideOrders
-  const maximum = Math.max(
-    1,
-    ...products.flatMap((product) => [
-      ...(showCampaign ? [valueOf(product, 'campaign')] : []),
-      ...(showOutside ? [valueOf(product, 'outside')] : []),
-    ]),
-  )
-  const formatValue = (value: number) =>
-    mode === 'revenue'
-      ? formatMoney(value, currency)
-      : `${value} rendelés`
-
-  if (products.length === 0) {
-    return (
-      <div className="allegro-campaign-performance-empty">
-        {viewMode === 'campaign'
-          ? 'Nincs kampányhoz köthető rendelés a kiválasztott időszakban.'
-          : viewMode === 'nonCampaign'
-            ? 'Nincs kampányon kívüli rendelés a kiválasztott időszakban.'
-            : 'Nincs rendelési adat a kiválasztott időszakban.'}
-      </div>
-    )
-  }
-
-  return (
-    <div className="allegro-campaign-performance-chart">
-      <div className="allegro-campaign-performance-toolbar">
-        <div className="allegro-sales-chart-legend">
-          {showCampaign ? (
-            <span className="is-campaign-sale">Kampányban</span>
-          ) : null}
-          {showOutside ? (
-            <span className="is-outside-sale">Kampányon kívül</span>
-          ) : null}
-        </div>
-        <div className="allegro-sales-chart-mode" aria-label="Kampánygrafikon adata">
-          <button
-            type="button"
-            className={mode === 'orders' ? 'is-active' : ''}
-            aria-pressed={mode === 'orders'}
-            onClick={() => setMode('orders')}
-          >
-            Rendelésszám
-          </button>
-          <button
-            type="button"
-            className={mode === 'revenue' ? 'is-active' : ''}
-            aria-pressed={mode === 'revenue'}
-            onClick={() => setMode('revenue')}
-          >
-            Bevétel
-          </button>
-        </div>
-      </div>
-
-      <div className="allegro-campaign-product-list">
-        {products.map((product) => {
-          const campaignValue = valueOf(product, 'campaign')
-          const outsideValue = valueOf(product, 'outside')
-
-          return (
-            <div className="allegro-campaign-product-row" key={product.offerId}>
-              <div className="allegro-campaign-product-name" title={product.name}>
-                <div>
-                  <strong>{product.name}</strong>
-                  <span className={`allegro-campaign-product-status is-${product.campaignStatus.toLowerCase()}`}>
-                    {formatCampaignOfferStatus(product.campaignStatus)}
-                  </span>
-                </div>
-                <span>
-                  Offer {product.offerId}
-                  {product.campaignPriceMinor !== null
-                    ? ` · Kampányár: ${formatMoney(product.campaignPriceMinor, currency)}`
-                    : ''}
-                  {product.referencePriceMinor !== null
-                    ? ` · Referenciaár: ${formatMoney(product.referencePriceMinor, currency)}`
-                    : ''}
-                </span>
-              </div>
-              <div className="allegro-campaign-product-bars">
-                {showCampaign ? (
-                <div className="allegro-campaign-product-bar-row">
-                  <div className="allegro-campaign-product-track">
-                    <span
-                      className="is-campaign-sale"
-                      style={{ width: `${(campaignValue / maximum) * 100}%` }}
-                    />
-                  </div>
-                  <strong>{formatValue(campaignValue)}</strong>
-                </div>
-                ) : null}
-                {showOutside ? (
-                <div className="allegro-campaign-product-bar-row">
-                  <div className="allegro-campaign-product-track">
-                    <span
-                      className="is-outside-sale"
-                      style={{ width: `${(outsideValue / maximum) * 100}%` }}
-                    />
-                  </div>
-                  <strong>{formatValue(outsideValue)}</strong>
-                </div>
-                ) : null}
-              </div>
-            </div>
-          )
-        })}
-      </div>
-
-    </div>
-  )
-}
-
 function AllegroOverviewPage() {
   const currentDate = useMemo(getCurrentDateValue, [])
   const [rangeMode, setRangeMode] = useState<RangeMode>('month')
@@ -583,11 +543,18 @@ function AllegroOverviewPage() {
   const [customFrom, setCustomFrom] = useState(() => `${getCurrentMonthValue()}-01`)
   const [customTo, setCustomTo] = useState(getCurrentDateValue)
   const [summary, setSummary] = useState<DashboardSummary | null>(null)
-  const [selectedCampaignId, setSelectedCampaignId] = useState('')
-  const [campaignViewMode, setCampaignViewMode] =
-    useState<CampaignViewMode>('all')
-  const [campaignSortKey, setCampaignSortKey] =
-    useState<CampaignSortKey>('revenue')
+  const [perfFrom, setPerfFrom] = useState('')
+  const [perfTo, setPerfTo] = useState('')
+  const [perfRangeReady, setPerfRangeReady] = useState(false)
+  const [perfAttribution, setPerfAttribution] =
+    useState<PerfAttribution>('all')
+  const [perfCampaignId, setPerfCampaignId] = useState('')
+  const [perfSortKey, setPerfSortKey] =
+    useState<PerfSortKey>('revenue')
+  const [perfSummary, setPerfSummary] =
+    useState<DashboardSummary | null>(null)
+  const [perfLoading, setPerfLoading] = useState(false)
+  const [perfError, setPerfError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -684,15 +651,172 @@ function AllegroOverviewPage() {
   }, [loadSummary])
 
   useEffect(() => {
-    const campaignIds =
-      summary?.campaignPerformance.campaigns.map(
-        (campaign) => campaign.id,
-      ) ?? []
-
-    if (!campaignIds.includes(selectedCampaignId)) {
-      setSelectedCampaignId(campaignIds[0] ?? '')
+    if (!perfRangeReady && selectedRange && !rangeValidationError) {
+      setPerfFrom(selectedRange.from)
+      setPerfTo(selectedRange.to)
+      setPerfRangeReady(true)
     }
-  }, [selectedCampaignId, summary])
+  }, [perfRangeReady, rangeValidationError, selectedRange])
+
+  const perfRangeError = useMemo(() => {
+    if (!perfFrom || !perfTo) {
+      return 'Adj meg érvényes időszakot.'
+    }
+
+    const difference = getDayDifference(perfFrom, perfTo)
+
+    if (difference < 0) return 'A kezdő dátum nem lehet későbbi a záró dátumnál.'
+    if (difference > 366) return 'Legfeljebb 367 napos időszak választható.'
+    return null
+  }, [perfFrom, perfTo])
+
+  const loadPerformance = useCallback(async () => {
+    if (!perfFrom || !perfTo || perfRangeError) return
+
+    setPerfLoading(true)
+    setPerfError(null)
+
+    try {
+      const params = new URLSearchParams({
+        from: perfFrom,
+        to: perfTo,
+        groupBy:
+          getDayDifference(perfFrom, perfTo) > 62
+            ? 'month'
+            : 'day',
+      })
+      const response = await fetch(
+        `${API_BASE_URL}/auth/allegro/dashboard-summary?${params.toString()}`,
+      )
+      const body = (await response.json()) as
+        | DashboardSummary
+        | { status?: string; message?: string }
+
+      if (!response.ok || body.status !== 'ok') {
+        throw new Error(
+          'message' in body && body.message
+            ? body.message
+            : 'Nem sikerült betölteni a termékteljesítményt.',
+        )
+      }
+
+      setPerfSummary(body as DashboardSummary)
+    } catch (loadError) {
+      setPerfError(
+        loadError instanceof Error
+          ? loadError.message
+          : 'Nem sikerült betölteni a termékteljesítményt.',
+      )
+    } finally {
+      setPerfLoading(false)
+    }
+  }, [perfFrom, perfRangeError, perfTo])
+
+  useEffect(() => {
+    void loadPerformance()
+  }, [loadPerformance])
+
+  const perfCampaigns =
+    perfSummary?.campaignPerformance.campaigns.filter(
+      (campaign) => campaign.id !== 'ALL_ALLEGRO_CAMPAIGNS',
+    ) ?? []
+  const perfAllProducts =
+    perfSummary?.campaignPerformance.analyses.find(
+      (analysis) => analysis.campaignId === 'ALL_PRODUCTS',
+    ) ?? null
+  const perfAllCampaigns =
+    perfSummary?.campaignPerformance.analyses.find(
+      (analysis) => analysis.campaignId === 'ALL_ALLEGRO_CAMPAIGNS',
+    ) ?? null
+  const perfSpecificCampaign =
+    perfAttribution === 'campaign' && perfCampaignId
+      ? (perfSummary?.campaignPerformance.analyses.find(
+          (analysis) => analysis.campaignId === perfCampaignId,
+        ) ?? perfAllCampaigns)
+      : null
+  const perfSource =
+    perfAttribution === 'campaign'
+      ? (perfSpecificCampaign ?? perfAllCampaigns)
+      : perfAllProducts
+
+  const perfRows = useMemo((): ProductPerformanceRow[] => {
+    if (!perfSource) return []
+
+    const rows = perfSource.products
+      .map((product) => {
+        if (perfAttribution === 'campaign') {
+          return {
+            offerId: product.offerId,
+            name: product.name,
+            orders: product.campaignOrders,
+            units: product.campaignUnits,
+            revenueMinor: product.campaignRevenueMinor,
+            campaignOrders: product.campaignOrders,
+            campaignRevenueMinor: product.campaignRevenueMinor,
+            outsideOrders: product.outsideOrders,
+            outsideRevenueMinor: product.outsideRevenueMinor,
+          }
+        }
+
+        if (perfAttribution === 'nonCampaign') {
+          return {
+            offerId: product.offerId,
+            name: product.name,
+            orders: product.outsideOrders,
+            units: product.outsideUnits,
+            revenueMinor: product.outsideRevenueMinor,
+            campaignOrders: product.campaignOrders,
+            campaignRevenueMinor: product.campaignRevenueMinor,
+            outsideOrders: product.outsideOrders,
+            outsideRevenueMinor: product.outsideRevenueMinor,
+          }
+        }
+
+        return {
+          offerId: product.offerId,
+          name: product.name,
+          orders: product.campaignOrders + product.outsideOrders,
+          units: product.campaignUnits + product.outsideUnits,
+          revenueMinor:
+            product.campaignRevenueMinor + product.outsideRevenueMinor,
+          campaignOrders: product.campaignOrders,
+          campaignRevenueMinor: product.campaignRevenueMinor,
+          outsideOrders: product.outsideOrders,
+          outsideRevenueMinor: product.outsideRevenueMinor,
+        }
+      })
+      .filter(
+        (row) => row.orders > 0 || row.revenueMinor > 0,
+      )
+
+    return [...rows].sort((left, right) =>
+      perfSortKey === 'name'
+        ? left.name.localeCompare(right.name, 'hu')
+        : perfSortKey === 'orders'
+          ? right.orders - left.orders
+          : perfSortKey === 'units'
+            ? right.units - left.units
+            : right.revenueMinor - left.revenueMinor,
+    )
+  }, [perfAttribution, perfSortKey, perfSource])
+
+  const perfTotals = useMemo(() => {
+    const totals = {
+      orders: 0,
+      units: 0,
+      revenueMinor: 0,
+      campaignRevenueMinor: 0,
+    }
+
+    for (const row of perfRows) {
+      totals.orders += row.orders
+      totals.units += row.units
+      totals.revenueMinor += row.revenueMinor
+      totals.campaignRevenueMinor += row.campaignRevenueMinor
+    }
+
+    return totals
+  }, [perfRows])
 
   const needsReauthorization = Boolean(
     summary &&
@@ -701,64 +825,6 @@ function AllegroOverviewPage() {
   const waitingOrders = summary
     ? summary.orderStatuses.bought + summary.orderStatuses.filledIn
     : 0
-  const selectedCampaignAnalysis =
-    summary?.campaignPerformance.analyses.find(
-      (analysis) => analysis.campaignId === selectedCampaignId,
-    ) ?? null
-
-  const campaignViewProducts = useMemo(() => {
-    if (!selectedCampaignAnalysis) return []
-
-    const visible = selectedCampaignAnalysis.products.filter(
-      (product) =>
-        campaignViewMode === 'campaign'
-          ? product.campaignOrders > 0 ||
-            product.campaignRevenueMinor > 0
-          : campaignViewMode === 'nonCampaign'
-            ? product.outsideOrders > 0 ||
-              product.outsideRevenueMinor > 0
-            : true,
-    )
-    const ordersOf = (product: CampaignProductPerformance) =>
-      campaignViewMode === 'campaign'
-        ? product.campaignOrders
-        : campaignViewMode === 'nonCampaign'
-          ? product.outsideOrders
-          : product.campaignOrders + product.outsideOrders
-    const revenueOf = (product: CampaignProductPerformance) =>
-      campaignViewMode === 'campaign'
-        ? product.campaignRevenueMinor
-        : campaignViewMode === 'nonCampaign'
-          ? product.outsideRevenueMinor
-          : product.campaignRevenueMinor +
-            product.outsideRevenueMinor
-
-    return [...visible].sort((left, right) =>
-      campaignSortKey === 'name'
-        ? left.name.localeCompare(right.name, 'hu')
-        : campaignSortKey === 'orders'
-          ? ordersOf(right) - ordersOf(left)
-          : revenueOf(right) - revenueOf(left),
-    )
-  }, [campaignViewMode, campaignSortKey, selectedCampaignAnalysis])
-
-  const campaignViewTotals = useMemo(() => {
-    const totals = { orders: 0, units: 0, revenueMinor: 0 }
-
-    for (const product of campaignViewProducts) {
-      if (campaignViewMode === 'nonCampaign') {
-        totals.orders += product.outsideOrders
-        totals.units += product.outsideUnits
-        totals.revenueMinor += product.outsideRevenueMinor
-      } else {
-        totals.orders += product.campaignOrders
-        totals.units += product.campaignUnits
-        totals.revenueMinor += product.campaignRevenueMinor
-      }
-    }
-
-    return totals
-  }, [campaignViewMode, campaignViewProducts])
 
   return (
     <div className="allegro-overview-page">
@@ -875,122 +941,157 @@ function AllegroOverviewPage() {
       <section className="allegro-overview-section allegro-overview-section-campaign">
         <div className="allegro-overview-section-heading allegro-campaign-performance-heading">
           <div>
-            <h3>Kampány teljesítménye termékenként</h3>
-            <p>
-              A kampányban részt vevő ajánlatok kampányos és külön,
-              kampányon kívüli eladásainak összehasonlítása.
-            </p>
+            <h3>Termékteljesítmény</h3>
+            <p>Rendelések és bevétel termékenként a kiválasztott időszakban.</p>
           </div>
-          {summary?.campaignPerformance.campaigns.length ? (
-            <div className="allegro-campaign-performance-controls">
+          <div className="allegro-campaign-performance-controls">
+            <div className="allegro-product-performance-dates">
+              <input
+                aria-label="Kezdő dátum"
+                type="date"
+                max={perfTo || currentDate}
+                value={perfFrom}
+                onChange={(event) => setPerfFrom(event.target.value)}
+              />
+              <span>–</span>
+              <input
+                aria-label="Záró dátum"
+                type="date"
+                min={perfFrom}
+                max={currentDate}
+                value={perfTo}
+                onChange={(event) => setPerfTo(event.target.value)}
+              />
+            </div>
+            <div className="allegro-sales-chart-mode" aria-label="Megoszlás">
+              {(
+                [
+                  ['all', 'Összes'],
+                  ['campaign', 'Kampányos'],
+                  ['nonCampaign', 'Nem kampányos'],
+                ] as Array<[PerfAttribution, string]>
+              ).map(([value, label]) => (
+                <button
+                  type="button"
+                  className={perfAttribution === value ? 'is-active' : ''}
+                  aria-pressed={perfAttribution === value}
+                  key={value}
+                  onClick={() => setPerfAttribution(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {perfAttribution === 'campaign' ? (
               <select
                 aria-label="Kampány kiválasztása"
-                value={selectedCampaignId}
-                onChange={(event) => setSelectedCampaignId(event.target.value)}
+                value={perfCampaignId}
+                onChange={(event) => setPerfCampaignId(event.target.value)}
               >
-                {summary.campaignPerformance.campaigns.map((campaign) => (
+                <option value="">Összes kampány</option>
+                {perfCampaigns.map((campaign) => (
                   <option value={campaign.id} key={campaign.id}>
                     {campaign.name} · {campaign.offerCount} ajánlat
                   </option>
                 ))}
               </select>
-              <div className="allegro-sales-chart-mode" aria-label="Kampánynézet">
-                {(
-                  [
-                    ['all', 'Együtt'],
-                    ['campaign', 'Kampányos'],
-                    ['nonCampaign', 'Normál'],
-                  ] as Array<[CampaignViewMode, string]>
-                ).map(([value, label]) => (
-                  <button
-                    type="button"
-                    className={campaignViewMode === value ? 'is-active' : ''}
-                    aria-pressed={campaignViewMode === value}
-                    key={value}
-                    onClick={() => setCampaignViewMode(value)}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-              <select
-                aria-label="Termékek rendezése"
-                value={campaignSortKey}
-                onChange={(event) =>
-                  setCampaignSortKey(
-                    event.target.value as CampaignSortKey,
-                  )
-                }
-              >
-                <option value="revenue">Bevétel</option>
-                <option value="orders">Rendelésszám</option>
-                <option value="name">Terméknév</option>
-              </select>
-            </div>
-          ) : null}
+            ) : null}
+            <select
+              aria-label="Termékek rendezése"
+              value={perfSortKey}
+              onChange={(event) =>
+                setPerfSortKey(
+                  event.target.value as PerfSortKey,
+                )
+              }
+            >
+              <option value="revenue">Bevétel</option>
+              <option value="orders">Rendelésszám</option>
+              <option value="units">Eladott darab</option>
+              <option value="name">Terméknév</option>
+            </select>
+          </div>
         </div>
 
-        {!summary?.permissions.orders ? (
+        {perfRangeError ? (
+          <div className="allegro-campaign-performance-empty">
+            {perfRangeError}
+          </div>
+        ) : perfLoading && !perfSummary ? (
+          <div className="allegro-campaign-performance-empty">
+            Betöltés…
+          </div>
+        ) : perfError ? (
+          <div className="allegro-overview-message allegro-overview-message-error">
+            <span>{perfError}</span>
+            <button type="button" onClick={() => void loadPerformance()}>
+              Újrapróbálás
+            </button>
+          </div>
+        ) : !perfSummary?.permissions.orders ? (
           <div className="allegro-campaign-performance-empty">
             A kampányeredményekhez rendelésolvasási jogosultság szükséges.
           </div>
-        ) : selectedCampaignAnalysis ? (
+        ) : (
           <>
             <div className="allegro-overview-metrics allegro-campaign-performance-metrics">
-              {campaignViewMode === 'all' ? (
+              {perfAttribution === 'all' ? (
                 <>
                   <MetricCard
-                    label="Kampányos rendelések"
-                    value={String(selectedCampaignAnalysis.totals.campaignOrders)}
-                    detail="CAMPAIGN jelöléssel, az aktív időablakban"
+                    label="Összes rendelés"
+                    value={String(perfTotals.orders)}
+                    detail={`A kiválasztott időszak rendelései${perfLoading ? ' · Frissítés…' : ''}`}
+                  />
+                  <MetricCard
+                    label="Eladott darab"
+                    value={String(perfTotals.units)}
+                    detail="Összes terméksor mennyisége"
+                  />
+                  <MetricCard
+                    label="Összes bevétel"
+                    value={formatMoney(perfTotals.revenueMinor, perfSummary.sales.currency)}
+                    detail="Termékárbevétel a kiválasztott időszakban"
                     tone="active"
                   />
                   <MetricCard
-                    label="Kampányon kívüli rendelések"
-                    value={String(selectedCampaignAnalysis.totals.outsideOrders)}
-                    detail="Ugyanezen ajánlatok külön eladásai"
-                  />
-                  <MetricCard
-                    label="Kampányos bevétel"
-                    value={formatMoney(selectedCampaignAnalysis.totals.campaignRevenueMinor, summary.sales.currency)}
-                    detail="Allegro-hozzájárulással együtt"
-                    tone="active"
-                  />
-                  <MetricCard
-                    label="Kampányon kívüli bevétel"
-                    value={formatMoney(selectedCampaignAnalysis.totals.outsideRevenueMinor, summary.sales.currency)}
-                    detail="Ugyanezen ajánlatok külön bevétele"
+                    label="Kampányos arány"
+                    value={
+                      perfTotals.revenueMinor > 0
+                        ? `${Math.round((perfTotals.campaignRevenueMinor / perfTotals.revenueMinor) * 100)}%`
+                        : '—'
+                    }
+                    detail="Kampányos bevétel aránya"
                   />
                 </>
               ) : (
                 <>
                   <MetricCard
-                    label={campaignViewMode === 'campaign' ? 'Kampányos rendelések' : 'Normál rendelések'}
-                    value={String(campaignViewTotals.orders)}
-                    detail={campaignViewMode === 'campaign' ? 'CAMPAIGN jelöléssel, az aktív időablakban' : 'Kampányon kívüli eladások'}
-                    tone={campaignViewMode === 'campaign' ? 'active' : 'neutral'}
-                  />
-                  <MetricCard
-                    label={campaignViewMode === 'campaign' ? 'Kampányos bevétel' : 'Normál bevétel'}
-                    value={formatMoney(campaignViewTotals.revenueMinor, summary.sales.currency)}
-                    detail="Allegro-hozzájárulással együtt"
-                    tone={campaignViewMode === 'campaign' ? 'active' : 'neutral'}
+                    label={perfAttribution === 'campaign' ? 'Kampányos rendelések' : 'Nem kampányos rendelések'}
+                    value={String(perfTotals.orders)}
+                    detail={perfAttribution === 'campaign' ? 'CAMPAIGN jelöléssel a kiválasztott időszakban' : 'Kampányjelölés nélküli eladások'}
+                    tone={perfAttribution === 'campaign' ? 'active' : 'neutral'}
                   />
                   <MetricCard
                     label="Eladott darab"
-                    value={String(campaignViewTotals.units)}
+                    value={String(perfTotals.units)}
                     detail="Összes terméksor mennyisége"
+                  />
+                  <MetricCard
+                    label={perfAttribution === 'campaign' ? 'Kampányos bevétel' : 'Nem kampányos bevétel'}
+                    value={formatMoney(perfTotals.revenueMinor, perfSummary.sales.currency)}
+                    detail="Termékárbevétel a kiválasztott időszakban"
+                    tone={perfAttribution === 'campaign' ? 'active' : 'neutral'}
                   />
                   <MetricCard
                     label="Átlagos rendelési érték"
                     value={
-                      campaignViewTotals.orders > 0
+                      perfTotals.orders > 0
                         ? formatMoney(
                             Math.round(
-                              campaignViewTotals.revenueMinor /
-                                campaignViewTotals.orders,
+                              perfTotals.revenueMinor /
+                                perfTotals.orders,
                             ),
-                            summary.sales.currency,
+                            perfSummary.sales.currency,
                           )
                         : '—'
                     }
@@ -999,23 +1100,31 @@ function AllegroOverviewPage() {
                 </>
               )}
             </div>
-            <CampaignPerformanceChart
-              products={campaignViewProducts}
-              viewMode={campaignViewMode}
-              currency={summary.sales.currency}
-            />
+            {perfRows.length === 0 ? (
+              <div className="allegro-campaign-performance-empty">
+                {perfAttribution === 'campaign'
+                  ? perfCampaignId
+                    ? 'Nincs ehhez a kampányhoz köthető rendelés a kiválasztott időszakban.'
+                    : 'Nincs kampányhoz köthető rendelés a kiválasztott időszakban.'
+                  : perfAttribution === 'nonCampaign'
+                    ? 'Nincs kampányon kívüli rendelés a kiválasztott időszakban.'
+                    : 'Nincs rendelési adat a kiválasztott időszakban.'}
+              </div>
+            ) : (
+              <ProductPerformanceList
+                rows={perfRows}
+                detailed={perfAttribution === 'all'}
+                barTone={perfAttribution === 'nonCampaign' ? 'outside' : 'campaign'}
+                currency={perfSummary.sales.currency}
+              />
+            )}
             <p className="allegro-campaign-performance-note">
               Kampányosnak csak az a rendelési sor számít, amelyet az Allegro
-              CAMPAIGN jelöléssel adott vissza, és az ajánlat a kiválasztott
-              kampány aktív időablakában szerepelt. A név szerinti
+              CAMPAIGN jelöléssel adott vissza. A név szerinti
               kampánykövetés 2026. szeptember 1-től, a Commerce Hubban
               rögzített kampánytagságok alapján indul.
             </p>
           </>
-        ) : (
-          <div className="allegro-campaign-performance-empty">
-            Ebben az időszakban nincs aktív vagy lezárt, mérhető kampány.
-          </div>
         )}
       </section>
 

@@ -4256,7 +4256,158 @@ function buildAllCampaignSalesAnalysis(
   }
 }
 
-function buildDashboardCampaignPerformance(
+export function buildAllProductsAnalysis(
+  orders: AllegroDashboardOrder[],
+) {
+  const productsByOfferId = new Map<
+    string,
+    {
+      offerId: string
+      name: string
+      campaignOrderIds: Set<string>
+      outsideOrderIds: Set<string>
+      campaignUnits: number
+      outsideUnits: number
+      campaignRevenueMinor: number
+      outsideRevenueMinor: number
+    }
+  >()
+
+  for (const order of orders) {
+    for (const lineItem of order.lineItems ?? []) {
+      const offerId = lineItem.offer?.id
+
+      if (!offerId) continue
+
+      const quantity =
+        Number.isFinite(lineItem.quantity) &&
+        (lineItem.quantity ?? 0) > 0
+          ? lineItem.quantity ?? 0
+          : 0
+      const reconciliationQuantity =
+        Number.isFinite(lineItem.reconciliation?.quantity) &&
+        (lineItem.reconciliation?.quantity ?? 0) > 0
+          ? lineItem.reconciliation?.quantity ?? 0
+          : 0
+      const revenueMinor =
+        moneyToMinor(lineItem.price?.amount) * quantity +
+        moneyToMinor(
+          lineItem.reconciliation?.value?.amount,
+        ) * reconciliationQuantity
+      const isCampaignSale =
+        lineItem.discounts?.some(
+          (discount) => discount.type === 'CAMPAIGN',
+        ) ?? false
+      const product = productsByOfferId.get(offerId) ?? {
+        offerId,
+        name: lineItem.offer?.name ?? offerId,
+        campaignOrderIds: new Set<string>(),
+        outsideOrderIds: new Set<string>(),
+        campaignUnits: 0,
+        outsideUnits: 0,
+        campaignRevenueMinor: 0,
+        outsideRevenueMinor: 0,
+      }
+
+      if (isCampaignSale) {
+        product.campaignOrderIds.add(order.id)
+        product.campaignUnits += quantity
+        product.campaignRevenueMinor += revenueMinor
+      } else {
+        product.outsideOrderIds.add(order.id)
+        product.outsideUnits += quantity
+        product.outsideRevenueMinor += revenueMinor
+      }
+
+      productsByOfferId.set(offerId, product)
+    }
+  }
+
+  const products = [...productsByOfferId.values()]
+    .map((product) => ({
+      offerId: product.offerId,
+      name: product.name,
+      campaignOrders: product.campaignOrderIds.size,
+      outsideOrders: product.outsideOrderIds.size,
+      campaignUnits: product.campaignUnits,
+      outsideUnits: product.outsideUnits,
+      campaignRevenueMinor: product.campaignRevenueMinor,
+      outsideRevenueMinor: product.outsideRevenueMinor,
+      campaignStatus:
+        product.campaignOrderIds.size > 0
+          ? 'CAMPAIGN'
+          : 'OUTSIDE',
+      campaignPriceMinor: null,
+      referencePriceMinor: null,
+    }))
+    .sort(
+      (left, right) =>
+        right.campaignRevenueMinor + right.outsideRevenueMinor -
+          (left.campaignRevenueMinor + left.outsideRevenueMinor) ||
+        right.campaignOrders + right.outsideOrders -
+          (left.campaignOrders + left.outsideOrders) ||
+        left.name.localeCompare(right.name, 'hu-HU'),
+    )
+  const allOrderIds = new Set<string>()
+
+  for (const product of productsByOfferId.values()) {
+    for (const orderId of product.campaignOrderIds) {
+      allOrderIds.add(orderId)
+    }
+
+    for (const orderId of product.outsideOrderIds) {
+      allOrderIds.add(orderId)
+    }
+  }
+
+  return {
+    campaignId: 'ALL_PRODUCTS',
+    campaignName: 'Összes termék',
+    offerCount: productsByOfferId.size,
+    totals: {
+      campaignOrders: products.reduce(
+        (total, product) => total + product.campaignOrders,
+        0,
+      ),
+      outsideOrders: products.reduce(
+        (total, product) => total + product.outsideOrders,
+        0,
+      ),
+      campaignUnits: products.reduce(
+        (total, product) => total + product.campaignUnits,
+        0,
+      ),
+      outsideUnits: products.reduce(
+        (total, product) => total + product.outsideUnits,
+        0,
+      ),
+      campaignRevenueMinor: products.reduce(
+        (total, product) => total + product.campaignRevenueMinor,
+        0,
+      ),
+      outsideRevenueMinor: products.reduce(
+        (total, product) => total + product.outsideRevenueMinor,
+        0,
+      ),
+      totalOrders: allOrderIds.size,
+      totalUnits: products.reduce(
+        (total, product) =>
+          total + product.campaignUnits + product.outsideUnits,
+        0,
+      ),
+      totalRevenueMinor: products.reduce(
+        (total, product) =>
+          total +
+          product.campaignRevenueMinor +
+          product.outsideRevenueMinor,
+        0,
+      ),
+    },
+    products,
+  }
+}
+
+export function buildDashboardCampaignPerformance(
   orders: AllegroDashboardOrder[],
   memberships: DashboardCampaignMembership[],
   periodStart: Date,
@@ -4514,6 +4665,8 @@ function buildDashboardCampaignPerformance(
   const allCampaignSales =
     buildAllCampaignSalesAnalysis(orders)
 
+  const allProducts = buildAllProductsAnalysis(orders)
+
   return {
     campaigns: [
       ...(allCampaignSales
@@ -4540,6 +4693,7 @@ function buildDashboardCampaignPerformance(
       })),
     ],
     analyses: [
+      allProducts,
       ...(allCampaignSales ? [allCampaignSales] : []),
       ...analyses,
     ],
