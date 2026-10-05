@@ -112,11 +112,45 @@ export function selectRelatedImportForWrapper<
 }
 
 /*
+ * Stale-run age thresholds. Chosen from observed production
+ * runtimes (44 successful catalog runs peak at 33 s; wrapper
+ * COMPLETED runs peak near 55 min):
+ *
+ * - catalog sync does fixed work (offer pagination plus
+ *   targeted syncs), so 15 minutes is a wide margin that a
+ *   legitimate run cannot reach;
+ * - inventory wrappers legitimately run for most of an hour,
+ *   so 30 minutes only reaps rows no live run could still be
+ *   using once a newer run for the same scope finalizes.
+ *
+ * Neither table carries an updatedAt/heartbeat column, so
+ * startedAt is the consistent staleness anchor for both.
+ * A falsely reaped but still-alive run heals itself: its own
+ * finalize overwrites INTERRUPTED with its real outcome.
+ */
+export const CATALOG_SYNC_STALE_THRESHOLD_MS =
+  15 * 60 * 1000
+
+export const DATA_CONNECTION_RUN_STALE_THRESHOLD_MS =
+  30 * 60 * 1000
+
+export function staleReapCutoff(
+  now: Date,
+  thresholdMs: number,
+): Date {
+  return new Date(
+    now.getTime() - thresholdMs,
+  )
+}
+
+/*
  * Mirror of the dataConnectionRuns orphan reaper below:
  * when a catalog sync run finalizes, any older run still
  * stuck at RUNNING belongs to a dead runtime and can
  * never finish itself. Mark it INTERRUPTED so History
- * distinguishes it from a live run. Self-healing: if the
+ * distinguishes it from a live run. Only rows older than
+ * the staleness threshold are touched, so a merely slow
+ * legitimate run is never reaped. Self-healing: if the
  * older runtime is somehow still alive, its own finalize
  * overwrites this. The current run id is always excluded,
  * so fresh RUNNING jobs are never touched.
@@ -125,6 +159,7 @@ export async function reapStaleCatalogSyncRuns(
   database: ReturnType<typeof createDatabase>,
   currentRunId: string,
   currentStartedAt: Date,
+  now: Date = new Date(),
 ): Promise<{ reaped: number }> {
   try {
     await database
@@ -143,6 +178,13 @@ export async function reapStaleCatalogSyncRuns(
             catalogSyncRuns.startedAt,
             currentStartedAt,
           ),
+          lt(
+            catalogSyncRuns.startedAt,
+            staleReapCutoff(
+              now,
+              CATALOG_SYNC_STALE_THRESHOLD_MS,
+            ),
+          ),
         ),
       )
 
@@ -151,6 +193,72 @@ export async function reapStaleCatalogSyncRuns(
     console.error(
       'Catalog sync orphan run reap failed:',
       reapError,
+    )
+
+    return { reaped: 0 }
+  }
+}
+
+/*
+ * Inventory-wrapper twin of reapStaleCatalogSyncRuns:
+ * when a wrapper run for a connection finalizes, any older
+ * run for the same connection that is still RUNNING belongs
+ * to a dead runtime. Same threshold guard, same message, same
+ * self-healing finalize. Connection scoping keeps unrelated
+ * connections untouched.
+ */
+export async function reapStaleDataConnectionRuns(
+  database: ReturnType<typeof createDatabase>,
+  connectionId: string,
+  currentRunId: string,
+  currentStartedAt: Date,
+  now: Date = new Date(),
+): Promise<{ reaped: number }> {
+  try {
+    await database
+      .update(dataConnectionRuns)
+      .set({
+        status: 'INTERRUPTED',
+        error:
+          'A futást a runtime leállása szakította meg; egy újabb futás zárta le.',
+        finishedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(
+            dataConnectionRuns.connectionId,
+            connectionId,
+          ),
+          eq(
+            dataConnectionRuns.status,
+            'RUNNING',
+          ),
+          ne(
+            dataConnectionRuns.id,
+            currentRunId,
+          ),
+          lt(
+            dataConnectionRuns.startedAt,
+            currentStartedAt,
+          ),
+          lt(
+            dataConnectionRuns.startedAt,
+            staleReapCutoff(
+              now,
+              DATA_CONNECTION_RUN_STALE_THRESHOLD_MS,
+            ),
+          ),
+        ),
+      )
+
+    return { reaped: 1 }
+  } catch (reapError) {
+    console.error(
+      'Inventory refresh orphan run reap failed:',
+      {
+        connectionId,
+        error: reapError,
+      },
     )
 
     return { reaped: 0 }
@@ -1619,45 +1727,12 @@ export async function processDueDataConnectionSchedules(
          * Self-healing: if the older runtime is somehow
          * still alive, its own finalize overwrites this.
          */
-        try {
-          await db
-            .update(dataConnectionRuns)
-            .set({
-              status: 'INTERRUPTED',
-              error:
-                'A futást a runtime leállása szakította meg; egy újabb futás zárta le.',
-              finishedAt,
-            })
-            .where(
-              and(
-                eq(
-                  dataConnectionRuns.connectionId,
-                  item.connection.id,
-                ),
-                eq(
-                  dataConnectionRuns.status,
-                  'RUNNING',
-                ),
-                ne(
-                  dataConnectionRuns.id,
-                  connectionRun.id,
-                ),
-                lt(
-                  dataConnectionRuns.startedAt,
-                  startedAt,
-                ),
-              ),
-            )
-        } catch (reapError) {
-          console.error(
-            'Inventory refresh orphan run reap failed:',
-            {
-              connectionId:
-                item.connection.id,
-              error: reapError,
-            },
-          )
-        }
+        await reapStaleDataConnectionRuns(
+          db,
+          item.connection.id,
+          connectionRun.id,
+          startedAt,
+        )
 
         const nextRunAt =
           calculateNextRunAt(
