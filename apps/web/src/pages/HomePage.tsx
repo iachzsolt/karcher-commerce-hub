@@ -9,7 +9,7 @@ import { API_BASE_URL } from '../config/api'
 import { convergeAllegroListings, effectiveAllegroStock, evaluateAllegroMismatch, type ListingPricePolicy, type ListingStockPolicy } from '../utils/allegroMismatch'
 
 const pricePolicyLabels = {
-  BASE: 'alapár', SCHEDULE: 'aktív időzítés', CAMPAIGN_POLICY: 'Allegro-kampány – megfigyelt listaár elfogadva',
+  BASE: 'alapár', SCHEDULE: 'aktív kedvezmény', CAMPAIGN_POLICY: 'Allegro-kampány – megfigyelt listaár elfogadva',
   LOCKED_PRICE: 'kézzel rögzített ár', UNKNOWN: 'nem meghatározható',
 }
 
@@ -3712,9 +3712,9 @@ ${changes.join('\n')}`,
                         {listing.priceLocked && (
                           <small
                             className="stock-lock-helper"
-                            title="A kézi ár szinkronizálással az Allegro-ra küldhető; az automatikus szinkron nem írja felül."
+                            title="A kézi alapár szinkronizálással az Allegro-ra küldhető; az automatikus alapár-szinkron nem írja felül."
                           >
-                            Kézi érték – az automatikus szinkron nem írja felül.
+                            Kézi alapár – az automatikus alapár-szinkron nem írja felül.
                           </small>
                         )}
 

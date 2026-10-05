@@ -67,8 +67,12 @@ export function resolveAllegroPricePolicy(input: PricePolicyInput): AllegroPrice
     campaign.applicationStatus === 'PROCESSED' &&
     ['ACTIVE', 'WAITING_FOR_PUBLICATION'].includes(campaign.campaignStatus ?? ''),
   )
-  let source: AllegroPricePolicy['source'] = input.priceLocked ? 'LOCKED_PRICE' : schedule ? 'SCHEDULE' : 'BASE'
-  let expected = input.priceLocked ? input.basePriceMinor : schedule?.promotionalPriceMinor ?? input.basePriceMinor
+  // Precedence: campaign ownership (below) > active schedule >
+  // locked manual base > normal base. The lock protects the stored
+  // base value itself; it never suppresses an explicitly configured
+  // promotional schedule.
+  let source: AllegroPricePolicy['source'] = schedule ? 'SCHEDULE' : input.priceLocked ? 'LOCKED_PRICE' : 'BASE'
+  let expected: number | null = schedule?.promotionalPriceMinor ?? input.basePriceMinor
   let reason: string = source
   if (campaigns.length) {
     if (!trustedCampaign) {
@@ -91,7 +95,10 @@ export function resolveAllegroPricePolicy(input: PricePolicyInput): AllegroPrice
     source: validPrice(expected) ? source : 'UNKNOWN',
     comparison: !resolved ? 'UNAVAILABLE' : expected === input.observedPriceMinor ? 'MATCH' : 'MISMATCH',
     writeAllowed,
-    automaticWriteAllowed: writeAllowed && !input.priceLocked,
+    // Automated writers (schedule processor) may apply an explicit
+    // schedule even over a locked base. A locked base without a
+    // schedule stays manual-only. Campaign ownership blocks everything.
+    automaticWriteAllowed: writeAllowed && source !== 'LOCKED_PRICE',
     reason: campaigns.length ? trustedCampaign ? input.priceLocked ? 'CAMPAIGN_BLOCKS_LOCKED_INTENT' : 'CAMPAIGN_ACCEPTS_OBSERVED_MARKETPLACE_PRICE' : 'CAMPAIGN_EVIDENCE_UNRESOLVED' : !resolved ? 'PRICE_DATA_UNAVAILABLE' : reason,
     campaignIds: campaigns.map(campaign => campaign.id),
     scheduleId: source === 'SCHEDULE' ? schedule?.id ?? null : null,

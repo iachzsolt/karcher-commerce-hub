@@ -48,16 +48,44 @@ test('terminal/expired campaign releases price control without modifying records
 })
 test('locked manual expectation remains visible during campaigns but cannot be pushed', () => {
   const result = resolveAllegroPricePolicy({ ...fixture(), priceLocked: true, campaigns: [campaign], schedules: [schedule] })
-  assert.equal(result.expectedPriceMinor, 10000)
-  assert.equal(result.source, 'LOCKED_PRICE')
+  assert.equal(result.expectedPriceMinor, 9000)
+  assert.equal(result.source, 'SCHEDULE')
   assert.equal(result.comparison, 'MISMATCH')
   assert.equal(shouldWriteAllegroPrice(result), false)
 })
+test('active schedule overrides locked base; lock and base survive untouched', () => {
+  const input = { ...fixture(), priceLocked: true, schedules: [schedule] }
+  const before = structuredClone(input)
+  const result = resolveAllegroPricePolicy(input)
+  assert.equal(result.expectedPriceMinor, 9000)
+  assert.equal(result.source, 'SCHEDULE')
+  assert.equal(result.scheduleId, 's1')
+  assert.equal(result.comparison, 'MISMATCH')
+  assert.deepEqual(input, before)
+})
+test('locked base without schedule still expects the locked base', () => {
+  const result = resolveAllegroPricePolicy({ ...fixture(), priceLocked: true })
+  assert.equal(result.expectedPriceMinor, 10000)
+  assert.equal(result.source, 'LOCKED_PRICE')
+})
+test('expired schedule restores locked base policy', () => {
+  const result = resolveAllegroPricePolicy({ ...fixture(), priceLocked: true, schedules: [schedule], now: new Date('2026-10-05T12:00Z') })
+  assert.equal(result.expectedPriceMinor, 10000)
+  assert.equal(result.source, 'LOCKED_PRICE')
+})
 test('price lock owns base target; explicit push may apply it, automated schedule may not', () => {
-  const result = resolveAllegroPricePolicy({ ...fixture(), priceLocked: true, schedules: [schedule] })
+  const result = resolveAllegroPricePolicy({ ...fixture(), priceLocked: true })
   assert.equal(result.expectedPriceMinor, 10000)
   assert.equal(shouldWriteAllegroPrice(result), true)
   assert.equal(shouldWriteAllegroPrice(result, true), false)
+})
+test('single, bulk and save+sync resolve the schedule price during an active schedule', () => {
+  for (const priceLocked of [false, true]) {
+    const result = resolveAllegroPricePolicy({ ...fixture(), priceLocked, schedules: [schedule] })
+    assert.equal(result.expectedPriceMinor, 9000)
+    assert.equal(shouldWriteAllegroPrice(result), true)
+    assert.equal(shouldWriteAllegroPrice(result, true), true)
+  }
 })
 test('missing remote or campaign evidence never implies equality or permits a write', () => {
   for (const campaigns of [[], [campaign], [{ ...campaign, externalApplicationId: null }]]) {

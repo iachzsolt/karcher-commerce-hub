@@ -64,17 +64,24 @@ remote observation refreshes also reload it.
    With no manual price lock, its currently observed normal listing price is
    accepted under CAMPAIGN_POLICY (the old bulk no-write policy). No bargain price
    is copied to the listing target.
-4. A manual price lock remains explicit numeric intent. Its base target is shown
-   as LOCKED_PRICE, even with an active schedule. If it differs during a known
-   campaign, the mismatch remains visible but all price writes stay blocked.
+4. A manual price lock protects the stored base value: no base-price process
+   may overwrite it, and the lock itself is never cleared by this policy.
+   The lock does NOT suppress an explicitly configured promotional schedule:
+   while a schedule is active the expected listing price is the schedule
+   price (source SCHEDULE). If it differs during a known campaign, the
+   mismatch remains visible but all price writes stay blocked.
 5. Uncertain campaign evidence is UNKNOWN/UNAVAILABLE, never permission to write.
-6. Outside campaign ownership: locked base, otherwise active schedule, otherwise
-   base. Schedule start and end are inclusive UTC instants. Latest `validFrom`
+6. Outside campaign ownership: active schedule, otherwise locked base,
+   otherwise base. Schedule start and end are inclusive UTC instants. Latest `validFrom`
    wins; equal start timestamps use ascending schedule ID for a stable tie-break.
+   After schedule expiry the expectation falls back to the locked (or normal) base.
 7. A missing/invalid expected or observed price is UNAVAILABLE and blocks writes.
    Equality is never inferred from a missing observation.
-8. Matching prices are NO-OPs. An explicit single/bulk action may apply a locked
-   base outside campaigns. Automated scheduling cannot override a manual lock.
+8. Matching prices are NO-OPs. An explicit single/bulk action may apply the
+   canonical expected price (schedule price while a schedule is active,
+   locked base otherwise) outside campaigns. The schedule processor may
+   apply an active schedule even over a locked base; it never clears the
+   lock and never rewrites the stored base value.
 
 The lock represents manual base-price ownership; this policy additionally
 enforces it at automated write decisions. It never changes the lock or the base
