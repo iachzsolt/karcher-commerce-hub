@@ -42,6 +42,7 @@ import {
 } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { resolveDiscardStock } from './allegro-discard.js'
+import { resolveDesiredStockUpdate } from './allegro-stock-lock.js'
 import { loadAllegroPricePolicies } from './allegro-price-policy-store.js'
 import { resolveAllegroStockPolicy } from './allegro-stock-policy.js'
 import { campaignRejection, reconciledBadgeStatus, refreshCampaignListingPublication } from './allegro-campaign-reconciliation.js'
@@ -5827,26 +5828,21 @@ app.patch('/allegro/listings/:id/desired-stock', async (context) => {
      * beállítás veszi át az irányítást: a kívánt státusz
      * ACTIVE-ra vált és az automatikus pause megszűnik.
      *
+     * A készletzárolás (stockLocked) kizárólag a külön
+     * zárolás-vezérlőn keresztül változhat; a készlet
+     * szerkesztése sem be-, sem kikapcsolni nem tudja.
+     *
      * A manuálisan (nem rendszer által) leállított
      * ajánlatoknál stockAutoPaused=false, így azok
      * érintetlenek maradnak.
      */
-    const reactivatingFromStockPause =
-      current.stockAutoPaused === true &&
-      desiredStock > 0
-
     const [updated] = await db
       .update(listingDesiredStates)
       .set({
-        desiredStock,
-        stockLocked: true,
-        ...(reactivatingFromStockPause
-          ? {
-              desiredPublicationStatus:
-                'ACTIVE',
-              stockAutoPaused: false,
-            }
-          : {}),
+        ...resolveDesiredStockUpdate(
+          current,
+          desiredStock,
+        ),
         updatedBy: 'COMMERCE_HUB_UI',
         updatedAt: new Date(),
       })

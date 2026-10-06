@@ -7,6 +7,7 @@ import {
 import '../CommerceHub.css'
 import { API_BASE_URL } from '../config/api'
 import { convergeAllegroListings, effectiveAllegroStock, evaluateAllegroMismatch, type ListingPricePolicy, type ListingStockPolicy } from '../utils/allegroMismatch'
+import { buildBulkFinishMessage, formatBulkProgress, isBackgroundRefreshAllowed, type BulkProgress } from '../utils/bulkSyncOperation'
 
 const pricePolicyLabels = {
   BASE: 'alapár', SCHEDULE: 'aktív kedvezmény', CAMPAIGN_POLICY: 'Allegro-kampány – megfigyelt listaár elfogadva',
@@ -1183,6 +1184,7 @@ function HomePage({
   }
   const saveDesiredPrice = async (
     listing: AllegroListing,
+    options?: { skipReload?: boolean },
   ) => {
     const draft = desiredPriceDrafts[listing.id] ?? ''
 
@@ -1249,7 +1251,10 @@ function HomePage({
         return next
       })
 
-      await reloadAllegroListings()
+      if (!options?.skipReload) {
+        await reloadAllegroListings()
+      }
+
       return true
     } catch (error) {
       console.error(
@@ -1268,6 +1273,7 @@ function HomePage({
   }
   const saveDesiredStock = async (
     listing: AllegroListing,
+    options?: { skipReload?: boolean },
   ) => {
     const draft =
       desiredStockDrafts[listing.id] ?? ''
@@ -1344,7 +1350,10 @@ function HomePage({
         return next
       })
 
-      await reloadAllegroListings()
+      if (!options?.skipReload) {
+        await reloadAllegroListings()
+      }
+
       return true
     } catch (error) {
       console.error(
@@ -1423,6 +1432,7 @@ function HomePage({
 
   const saveDesiredStatus = async (
     listing: AllegroListing,
+    options?: { skipReload?: boolean },
   ) => {
     const desiredStatus =
       desiredStatusDrafts[listing.id] ??
@@ -1486,7 +1496,10 @@ function HomePage({
         return next
       })
 
-      await reloadAllegroListings()
+      if (!options?.skipReload) {
+        await reloadAllegroListings()
+      }
+
       return true
     } catch (error) {
       console.error(
@@ -1684,16 +1697,25 @@ function HomePage({
   const [remoteErrors, setRemoteErrors] = useState<Record<string, string>>({})
   const [refreshingRemoteIds, setRefreshingRemoteIds] = useState<string[]>([])
   const remoteRefreshInFlight = useRef(false)
+  const remoteInFlightIds = useRef<Set<string>>(new Set())
+  const [bulkProgress, setBulkProgress] = useState<BulkProgress | null>(null)
+  const bulkOpIdsRef = useRef<Set<string>>(new Set())
   const lastRemoteAttempt = useRef(new Map<string, number>())
 
   const reconcileRemoteListings = useCallback(async (ids: string[]) => {
-    if (remoteRefreshInFlight.current) throw new Error('Távoli frissítés már folyamatban.')
+    const actionable = ids.filter(
+      (id) => !remoteInFlightIds.current.has(id),
+    )
+
+    if (actionable.length === 0) throw new Error('Távoli frissítés már folyamatban.')
+
+    actionable.forEach((id) => remoteInFlightIds.current.add(id))
     remoteRefreshInFlight.current = true
-    setRefreshingRemoteIds(ids)
+    setRefreshingRemoteIds((current) => Array.from(new Set([...current, ...actionable])))
     let failed = false
     try {
-      for (let offset = 0; offset < ids.length; offset += 10) {
-        const batch = ids.slice(offset, offset + 10)
+      for (let offset = 0; offset < actionable.length; offset += 10) {
+        const batch = actionable.slice(offset, offset + 10)
         batch.forEach(id => lastRemoteAttempt.current.set(id, Date.now()))
         try {
           const response = await fetch(`${API_BASE_URL}/auth/allegro/reconcile-listings`, {
@@ -1719,8 +1741,11 @@ function HomePage({
         }
       }
     } finally {
-      remoteRefreshInFlight.current = false
-      setRefreshingRemoteIds([])
+      actionable.forEach((id) => remoteInFlightIds.current.delete(id))
+      remoteRefreshInFlight.current = remoteInFlightIds.current.size > 0
+      setRefreshingRemoteIds((current) =>
+        current.filter((id) => remoteInFlightIds.current.has(id)),
+      )
     }
     if (failed) throw new Error('Egyes távoli adatok nem elérhetők.')
   }, [])
@@ -1766,19 +1791,31 @@ function HomePage({
   const unsavedDesiredChangesCount =
     unsavedDesiredListings.length
 
-  type SavedPushSummary = {
+  type BulkSyncResult = {
     succeeded: number
     skipped: number
     failed: number
     pending: number
     errors: string[]
     refreshWarning: string
-    refreshed: AllegroListing[]
+    finalRows: AllegroListing[]
   }
 
-  const pushSavedListings = async (
+  /*
+   * One user click = one logical operation. The runner owns its
+   * target listings end to end: every write batch, every
+   * reconciliation batch, bounded convergence, then exactly one
+   * final user-visible reload. Loading and progress stay active
+   * until all five steps complete; no final state is shown early.
+   */
+  const runBulkSyncOperation = async (
     listings: AllegroListing[],
-  ): Promise<SavedPushSummary> => {
+    targets: PushedListingTarget[],
+  ): Promise<BulkSyncResult> => {
+    const ids = listings.map((listing) => listing.id)
+    bulkOpIdsRef.current = new Set(ids)
+    setBulkProgress({ done: 0, total: ids.length, phase: 'write' })
+
     let succeeded = 0
     let skipped = 0
     let failed = 0
@@ -1786,139 +1823,142 @@ function HomePage({
 
     const errors: string[] = []
 
-    for (const listing of listings) {
-      try {
-        const response = await fetch(
-          `${API_BASE_URL}/auth/allegro/sync-selected`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
+    try {
+      let done = 0
+
+      for (const listing of listings) {
+        try {
+          const response = await fetch(
+            `${API_BASE_URL}/auth/allegro/sync-selected`,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                listingIds: [listing.id],
+              }),
             },
-            body: JSON.stringify({
-              listingIds: [listing.id],
-            }),
-          },
-        )
-
-        const responseText =
-          await response.text()
-
-        type SavedPushResponse = {
-          status?: string
-          succeeded?: number
-          skipped?: number
-          failed?: number
-          pending?: number
-          message?: string
-        }
-
-        let data: SavedPushResponse | null = null
-
-        if (responseText) {
-          try {
-            data = JSON.parse(
-              responseText,
-            ) as SavedPushResponse
-          } catch {
-            data = null
-          }
-        }
-
-        if (!response.ok || !data) {
-          failed += 1
-
-          const message =
-            data?.message ??
-            `HTTP ${response.status}: nem értelmezhető szerverválasz`
-
-          errors.push(
-            `${listing.sku}: ${message}`,
           )
 
-          continue
-        }
+          const responseText =
+            await response.text()
 
-        succeeded += data.succeeded ?? 0
-        skipped += data.skipped ?? 0
-        failed += data.failed ?? 0
-        pending += data.pending ?? 0
+          type BulkSyncResponse = {
+            status?: string
+            succeeded?: number
+            skipped?: number
+            failed?: number
+            pending?: number
+            message?: string
+          }
 
-        if ((data.failed ?? 0) > 0) {
+          let data: BulkSyncResponse | null = null
+
+          if (responseText) {
+            try {
+              data = JSON.parse(
+                responseText,
+              ) as BulkSyncResponse
+            } catch {
+              data = null
+            }
+          }
+
+          if (!response.ok || !data) {
+            failed += 1
+
+            const message =
+              data?.message ??
+              `HTTP ${response.status}: nem értelmezhető szerverválasz`
+
+            errors.push(
+              `${listing.sku}: ${message}`,
+            )
+
+            continue
+          }
+
+          succeeded += data.succeeded ?? 0
+          skipped += data.skipped ?? 0
+          failed += data.failed ?? 0
+          pending += data.pending ?? 0
+
+          if ((data.failed ?? 0) > 0) {
+            errors.push(
+              `${listing.sku}: ${
+                data.message ??
+                'A szinkronizálás sikertelen.'
+              }`,
+            )
+          }
+        } catch (error) {
+          failed += 1
+
           errors.push(
             `${listing.sku}: ${
-              data.message ??
-              'A szinkronizálás sikertelen.'
+              error instanceof Error
+                ? error.message
+                : 'Ismeretlen hiba'
             }`,
           )
         }
-      } catch (error) {
-        failed += 1
 
-        errors.push(
-          `${listing.sku}: ${
-            error instanceof Error
-              ? error.message
-              : 'Ismeretlen hiba'
-          }`,
-        )
+        done += 1
+        setBulkProgress({ done, total: ids.length, phase: 'write' })
       }
-    }
 
-    let refreshWarning = ''
-    let refreshed: AllegroListing[] = []
+      setBulkProgress({ done: ids.length, total: ids.length, phase: 'check' })
 
-    if (succeeded > 0 || pending > 0) {
-      const targets: PushedListingTarget[] =
-        listings.map((listing) => ({
-          id: listing.id,
-          intendedPriceMinor:
-            getEffectiveDesiredPriceMinor(listing),
-          intendedStock: listing.desiredStock,
-          intendedPublicationStatus:
-            listing.desiredPublicationStatus,
-          priceChanged:
-            hasPriceDifference(listing) && listing.pricePolicy?.writeAllowed === true,
-          stockChanged:
-            hasStockDifference(listing),
-          publicationChanged:
-            hasPublicationDifference(listing),
-        }))
+      let refreshWarning = ''
 
       try {
-        refreshed =
-          await reloadAllegroListings()
+        await reconcileRemoteListings(ids)
       } catch (error) {
         console.error(
-          'Pending Allegro sync verification failed:',
+          'Bulk reconcile failed:',
           error,
         )
         refreshWarning =
           '\n\nMegjegyzés: az Allegro-állapot frissítését nem sikerült teljesen megerősíteni.'
       }
 
-      if (!refreshWarning) {
-        const convergence =
-          await waitForListingConvergence(
-            refreshed,
-            targets,
-          )
+      const convergence =
+        await waitForListingConvergence(
+          [],
+          targets,
+        )
 
-        if (!convergence.converged) {
-          refreshWarning =
-            '\n\nMegjegyzés: az Allegro még nem mindenhol tükrözi a kérést; a megmaradt Eltérés a következő frissítéskor eltűnik, ha az állapot valóban beállt.'
-        }
+      if (!convergence.converged && !refreshWarning) {
+        refreshWarning =
+          '\n\nMegjegyzés: az Allegro még nem mindenhol tükrözi a kérést; a megmaradt Eltérés a következő frissítéskor eltűnik, ha az állapot valóban beállt.'
       }
-    }
 
-    return {
-      succeeded,
-      skipped,
-      failed,
-      pending,
-      errors,
-      refreshWarning,
-      refreshed,
+      let finalRows: AllegroListing[] = []
+
+      try {
+        finalRows = await reloadAllegroListings()
+      } catch (error) {
+        console.error(
+          'Final Allegro reload failed:',
+          error,
+        )
+        refreshWarning =
+          '\n\nMegjegyzés: az Allegro-állapot frissítését nem sikerült teljesen megerősíteni.'
+      }
+
+      return {
+        succeeded,
+        skipped,
+        failed,
+        pending,
+        errors,
+        refreshWarning,
+        finalRows,
+      }
+    } finally {
+      bulkOpIdsRef.current = new Set()
+      setBulkProgress(null)
     }
   }
 
@@ -1998,7 +2038,7 @@ Elmented ezeket a Commerce Hubba?`,
 
         if (hasUnsavedDesiredPrice(listing)) {
           const saved =
-            await saveDesiredPrice(listing)
+            await saveDesiredPrice(listing, { skipReload: true })
 
           if (saved !== true) {
             listingSucceeded = false
@@ -2007,7 +2047,7 @@ Elmented ezeket a Commerce Hubba?`,
 
         if (hasUnsavedDesiredStock(listing)) {
           const saved =
-            await saveDesiredStock(listing)
+            await saveDesiredStock(listing, { skipReload: true })
 
           if (saved !== true) {
             listingSucceeded = false
@@ -2016,7 +2056,7 @@ Elmented ezeket a Commerce Hubba?`,
 
         if (hasUnsavedDesiredStatus(listing)) {
           const saved =
-            await saveDesiredStatus(listing)
+            await saveDesiredStatus(listing, { skipReload: true })
 
           if (saved !== true) {
             listingSucceeded = false
@@ -2032,6 +2072,12 @@ Elmented ezeket a Commerce Hubba?`,
       }
 
       if (!withSync) {
+        try {
+          await reloadAllegroListings()
+        } catch {
+          /* Saved state stays visible even if the refresh fails. */
+        }
+
         window.alert(
           failed === 0
             ? 'Mentve.'
@@ -2063,11 +2109,27 @@ Elmented ezeket a Commerce Hubba?`,
         return
       }
 
+      const targets: PushedListingTarget[] =
+        toPush.map((listing) => ({
+          id: listing.id,
+          intendedPriceMinor:
+            getEffectiveDesiredPriceMinor(listing),
+          intendedStock: listing.desiredStock,
+          intendedPublicationStatus:
+            listing.desiredPublicationStatus,
+          priceChanged:
+            hasPriceDifference(listing) && listing.pricePolicy?.writeAllowed === true,
+          stockChanged:
+            hasStockDifference(listing),
+          publicationChanged:
+            hasPublicationDifference(listing),
+        }))
+
       const summary =
-        await pushSavedListings(toPush)
+        await runBulkSyncOperation(toPush, targets)
 
       const campaignBlocked =
-        summary.refreshed.some(
+        summary.finalRows.some(
           (listing) =>
             savedIds.includes(listing.id) &&
             hasPriceDifference(listing) &&
@@ -2075,43 +2137,18 @@ Elmented ezeket a Commerce Hubba?`,
               'CAMPAIGN_POLICY',
         )
 
-      const errorDetails =
-        summary.errors.length > 0
-          ? `
-
-Hibák:
-${summary.errors.slice(0, 5).join('\n')}${
-              summary.errors.length > 5
-                ? `\n+${summary.errors.length - 5} további hiba`
-                : ''
-            }`
-          : ''
-
-      if (summary.failed > 0) {
-        window.alert(
-          `Mentve, de az Allegro szinkronizálás sikertelen.${errorDetails}${summary.refreshWarning}`,
-        )
-      } else if (campaignBlocked) {
-        window.alert(
-          `Mentve, de aktív kampány miatt az ár nem módosítható az Allegro-n.${errorDetails}${summary.refreshWarning}`,
-        )
-      } else if (summary.pending > 0) {
-        window.alert(
-          'Mentve, szinkronizálás folyamatban.',
-        )
-      } else if (summary.refreshWarning) {
-        window.alert(
-          `Szinkronizálva, de eltérés maradt.${summary.refreshWarning}`,
-        )
-      } else if (summary.succeeded === 0) {
-        window.alert(
-          'Mentve, de nem szinkronizálható: nincs végrehajtható módosítás.',
-        )
-      } else {
-        window.alert(
-          'Mentve és szinkronizálva.',
-        )
-      }
+      window.alert(
+        buildBulkFinishMessage({
+          succeeded: summary.succeeded,
+          skipped: summary.skipped,
+          failed: summary.failed,
+          pending: summary.pending,
+          errors: summary.errors,
+          refreshWarning: summary.refreshWarning,
+          campaignBlocked,
+          saved: true,
+        }),
+      )
     } finally {
       setBulkSavingDesiredChanges(false)
 
@@ -2785,6 +2822,7 @@ ${summary.errors.slice(0, 5).join('\n')}${
       const now = Date.now()
       const ids = allegroListings.filter(listing =>
         (hasListingDifference(listing) || (listing.stockAutoPaused && ['ACTIVE', 'ACTIVATING'].includes(listing.publicationStatus))) &&
+        isBackgroundRefreshAllowed(listing.id, bulkOpIdsRef.current) &&
         (!listing.lastSyncedAt || now - new Date(listing.lastSyncedAt).getTime() >= 300000) &&
         now - (lastRemoteAttempt.current.get(listing.id) ?? 0) >= 300000,
       ).sort((left, right) => (lastRemoteAttempt.current.get(left.id) ?? 0) - (lastRemoteAttempt.current.get(right.id) ?? 0))
@@ -2834,163 +2872,39 @@ Biztosan szinkronizálod őket az Allegróval?`,
 
     setBulkSyncing(true)
 
-    let succeeded = 0
-    let skipped = 0
-    let failed = 0
-    let pending = 0
-
-    const errors: string[] = []
-
     try {
-      for (const listing of changedListings) {
-        try {
-          const response = await fetch(
-            `${API_BASE_URL}/auth/allegro/sync-selected`,
-            {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                listingIds: [listing.id],
-              }),
-            },
-          )
+      const targets: PushedListingTarget[] =
+        changedListings.map((listing) => ({
+          id: listing.id,
+          intendedPriceMinor:
+            getEffectiveDesiredPriceMinor(listing),
+          intendedStock: listing.desiredStock,
+          intendedPublicationStatus:
+            listing.desiredPublicationStatus,
+          priceChanged:
+            hasPriceDifference(listing) && listing.pricePolicy?.writeAllowed === true,
+          stockChanged:
+            hasStockDifference(listing),
+          publicationChanged:
+            hasPublicationDifference(listing),
+        }))
 
-          const responseText =
-            await response.text()
-
-          type BulkSyncResponse = {
-            status?: string
-            succeeded?: number
-            skipped?: number
-            failed?: number
-            pending?: number
-            message?: string
-          }
-
-          let data: BulkSyncResponse | null = null
-
-          if (responseText) {
-            try {
-              data = JSON.parse(
-                responseText,
-              ) as BulkSyncResponse
-            } catch {
-              data = null
-            }
-          }
-
-          if (!response.ok || !data) {
-            failed += 1
-
-            const message =
-              data?.message ??
-              `HTTP ${response.status}: nem értelmezhető szerverválasz`
-
-            errors.push(
-              `${listing.sku}: ${message}`,
-            )
-
-            continue
-          }
-
-          succeeded += data.succeeded ?? 0
-          skipped += data.skipped ?? 0
-          failed += data.failed ?? 0
-          pending += data.pending ?? 0
-
-          if ((data.failed ?? 0) > 0) {
-            errors.push(
-              `${listing.sku}: ${
-                data.message ??
-                'A szinkronizálás sikertelen.'
-              }`,
-            )
-          }
-        } catch (error) {
-          failed += 1
-
-          errors.push(
-            `${listing.sku}: ${
-              error instanceof Error
-                ? error.message
-                : 'Ismeretlen hiba'
-            }`,
-          )
-        }
-      }
-
-      let refreshWarning = ''
-
-      if (succeeded > 0 || pending > 0) {
-        const targets: PushedListingTarget[] =
-          changedListings.map((listing) => ({
-            id: listing.id,
-            intendedPriceMinor:
-              getEffectiveDesiredPriceMinor(listing),
-            intendedStock: listing.desiredStock,
-            intendedPublicationStatus:
-              listing.desiredPublicationStatus,
-            priceChanged:
-              hasPriceDifference(listing) && listing.pricePolicy?.writeAllowed === true,
-            stockChanged:
-              hasStockDifference(listing),
-            publicationChanged:
-              hasPublicationDifference(listing),
-          }))
-
-        let refreshedListings: AllegroListing[] = []
-
-        try {
-          refreshedListings =
-            await reloadAllegroListings()
-        } catch (error) {
-          console.error(
-            'Pending Allegro sync verification failed:',
-            error,
-          )
-          refreshWarning =
-            '\n\nMegjegyzés: az Allegro-állapot frissítését nem sikerült teljesen megerősíteni.'
-        }
-
-        if (!refreshWarning) {
-          const convergence =
-            await waitForListingConvergence(
-              refreshedListings,
-              targets,
-            )
-
-          if (!convergence.converged) {
-            refreshWarning =
-              '\n\nMegjegyzés: az Allegro még nem mindenhol tükrözi a kérést; a megmaradt Eltérés a következő frissítéskor eltűnik, ha az állapot valóban beállt.'
-          }
-        }
-      }
-
-      const errorDetails =
-        errors.length > 0
-          ? `
-
-Hibák:
-${errors.slice(0, 5).join('\n')}${
-              errors.length > 5
-                ? `\n+${errors.length - 5} további hiba`
-                : ''
-            }`
-          : ''
+      const summary = await runBulkSyncOperation(
+        changedListings,
+        targets,
+      )
 
       window.alert(
-        `Szinkronizálás kész.
-
-Sikeres: ${succeeded}
-Kihagyva: ${skipped}
-Hibás: ${failed}
-Folyamatban: ${pending}${
-          pending > 0
-            ? ' (az Allegro elfogadta, az állapot frissítése folyamatban)'
-            : ''
-        }${errorDetails}${refreshWarning}`,
+        buildBulkFinishMessage({
+          succeeded: summary.succeeded,
+          skipped: summary.skipped,
+          failed: summary.failed,
+          pending: summary.pending,
+          errors: summary.errors,
+          refreshWarning: summary.refreshWarning,
+          campaignBlocked: false,
+          saved: false,
+        }),
       )
     } finally {
       setBulkSyncing(false)
@@ -3062,6 +2976,7 @@ ${changes.join('\n')}`,
     }
 
     setSyncingWholeListingId(listing.id)
+    bulkOpIdsRef.current = new Set([listing.id])
 
     try {
       if (priceChanged) {
@@ -3173,6 +3088,15 @@ ${changes.join('\n')}`,
           ? 'Az ajánlat sikeresen szinkronizálva.'
           : 'Az ajánlat elküldve, de az Allegro még nem mindenhol tükrözi a kérést; az Eltérés a következő frissítéskor eltűnik, ha az állapot valóban beállt.',
       )
+
+      try {
+        await reloadAllegroListings()
+      } catch (error) {
+        console.error(
+          'Final listing reload failed:',
+          error,
+        )
+      }
     } catch (error) {
       console.error('Listing sync failed:', error)
 
@@ -3182,6 +3106,7 @@ ${changes.join('\n')}`,
           : 'A szinkronizálás sikertelen.',
       )
     } finally {
+      bulkOpIdsRef.current = new Set()
       setSyncingWholeListingId(null)
     }
   }
@@ -3451,17 +3376,20 @@ ${changes.join('\n')}`,
                   disabled={
                     unsavedDesiredChangesCount === 0 ||
                     bulkSavingDesiredChanges ||
-                    bulkSyncing
+                    bulkSyncing ||
+                    bulkProgress !== null
                   }
                   onClick={() =>
                     void saveAllDesiredChanges(true)
                   }
                   title="Mentés és szinkronizálás: az érték az Allegro-ra is elküldésre kerül."
                 >
-                  {bulkSavingDesiredChanges ||
-                  bulkSyncing
-                    ? 'Mentés...'
-                    : `Mentés és szinkronizálás (${unsavedDesiredChangesCount})`}
+                  {bulkProgress
+                    ? formatBulkProgress(bulkProgress)
+                    : bulkSavingDesiredChanges ||
+                        bulkSyncing
+                      ? 'Mentés...'
+                      : `Mentés és szinkronizálás (${unsavedDesiredChangesCount})`}
                 </button>
 
                 <button
@@ -3470,7 +3398,8 @@ ${changes.join('\n')}`,
                   disabled={
                     unsavedDesiredChangesCount === 0 ||
                     bulkSavingDesiredChanges ||
-                    bulkSyncing
+                    bulkSyncing ||
+                    bulkProgress !== null
                   }
                   onClick={() =>
                     void saveAllDesiredChanges(false)
@@ -3508,15 +3437,18 @@ ${changes.join('\n')}`,
                     selectedListingIds.length === 0 ||
                     selectedChangedListingsCount === 0 ||
                     bulkSyncing ||
-                    bulkSavingDesiredChanges
+                    bulkSavingDesiredChanges ||
+                    bulkProgress !== null
                   }
                   onClick={() =>
                     void syncSelectedListingsToAllegro()
                   }
                 >
-                  {bulkSyncing
-                    ? 'Szinkronizálás...'
-                    : 'Kijelöltek szinkronizálása'}
+                  {bulkProgress
+                    ? formatBulkProgress(bulkProgress)
+                    : bulkSyncing
+                      ? 'Szinkronizálás...'
+                      : 'Kijelöltek szinkronizálása'}
                 </button>
 
             </div>
@@ -4329,16 +4261,16 @@ ${changes.join('\n')}`,
                           />
 
                           <span>
-                            Készlet rögzítve
+                            Kézi készletrögzítés
                           </span>
                         </label>
 
                         {listing.stockLocked && (
                           <span
                             className="stock-lock-helper"
-                            title="A kézi érték szinkronizálással az Allegro-ra küldhető; az automatikus szinkron nem írja felül."
+                            title="A kézi érték szinkronizálással az Allegro-ra küldhető; az automatikus készletszinkron nem írja felül."
                           >
-                            Kézi érték – az automatikus szinkron nem írja felül.
+                            Kézi készletrögzítés – az automatikus készletszinkron nem írja felül.
                           </span>
                         )}
 
