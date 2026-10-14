@@ -45,6 +45,7 @@ import { resolveDiscardStock } from './allegro-discard.js'
 import { resolveDesiredStockUpdate } from './allegro-stock-lock.js'
 import { loadAllegroPricePolicies } from './allegro-price-policy-store.js'
 import { resolveAllegroStockPolicy } from './allegro-stock-policy.js'
+import { savePublicationIntent } from './allegro-publication-store.js'
 import { campaignRejection, reconciledBadgeStatus, refreshCampaignListingPublication } from './allegro-campaign-reconciliation.js'
 import { cors } from 'hono/cors'
 import {
@@ -998,6 +999,7 @@ allegroCatalogApi.get('/listings', async (context) => {
 
         lastSyncedAt:
           listingRemoteStates.lastSyncedAt,
+        publicationObservedAt: listingRemoteStates.updatedAt,
 
         desiredPriceMinor:
           listingDesiredStates.regularPriceMinor,
@@ -6157,42 +6159,9 @@ app.patch('/allegro/listings/:id/desired-status', async (context) => {
       )
     }
 
-    const [updated] = await db
-      .update(listingDesiredStates)
-      .set({
-        desiredPublicationStatus:
-          desiredStatus,
-
-        /*
-         * Kézi státuszváltás átveszi az irányítást
-         * az automatikus pause fölött, hogy a későbbi
-         * inventory automatizáció ne írja felül
-         * a felhasználó döntését.
-         */
-        stockAutoPaused: false,
-
-        updatedBy: 'COMMERCE_HUB_UI',
-        updatedAt: new Date(),
-      })
-      .where(
-        eq(
-          listingDesiredStates.listingId,
-          listingId,
-        ),
-      )
-      .returning({
-        listingId:
-          listingDesiredStates.listingId,
-
-        desiredPublicationStatus:
-          listingDesiredStates.desiredPublicationStatus,
-
-        updatedBy:
-          listingDesiredStates.updatedBy,
-
-        updatedAt:
-          listingDesiredStates.updatedAt,
-      })
+    // Preserve the existing explicit-user takeover semantics and record the
+    // old/new publication intent in the same database statement.
+    const updated = await savePublicationIntent(db, listingId, desiredStatus)
 
     if (!updated) {
       return context.json(

@@ -6,6 +6,7 @@ import {
 } from 'react'
 import '../CommerceHub.css'
 import { API_BASE_URL } from '../config/api'
+import { needsInactivePublicationVerification } from '../utils/publicationFreshness'
 import { convergeAllegroListings, effectiveAllegroStock, evaluateAllegroMismatch, type ListingPricePolicy, type ListingStockPolicy } from '../utils/allegroMismatch'
 import { buildBulkFinishMessage, formatBulkProgress, isBackgroundRefreshAllowed, type BulkProgress } from '../utils/bulkSyncOperation'
 
@@ -69,6 +70,7 @@ type AllegroListing = {
     | 'ENDED'
     | 'UNKNOWN'
   lastSyncedAt: string | null
+  publicationObservedAt?: string | null
 
   desiredPriceMinor: number | null
   desiredStock: number | null
@@ -1702,7 +1704,7 @@ function HomePage({
   const bulkOpIdsRef = useRef<Set<string>>(new Set())
   const lastRemoteAttempt = useRef(new Map<string, number>())
 
-  const reconcileRemoteListings = useCallback(async (ids: string[]) => {
+  const reconcileRemoteListings = useCallback(async (ids: string[], options?: { publicationOnly?: boolean }) => {
     const actionable = ids.filter(
       (id) => !remoteInFlightIds.current.has(id),
     )
@@ -1720,7 +1722,7 @@ function HomePage({
         try {
           const response = await fetch(`${API_BASE_URL}/auth/allegro/reconcile-listings`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ listingIds: batch }),
+            body: JSON.stringify({ listingIds: batch, ...(options?.publicationOnly ? { publicationOnly: true } : {}) }),
           })
           if (!response.ok) throw new Error(`Távoli lekérdezés: HTTP ${response.status}`)
           const data = await response.json() as { results: Array<{ listingId: string; ok: boolean; error?: string }> }
@@ -1750,8 +1752,8 @@ function HomePage({
     if (failed) throw new Error('Egyes távoli adatok nem elérhetők.')
   }, [])
 
-  const refreshRemoteRows = useCallback(async (ids: string[]) => {
-    try { await reconcileRemoteListings(ids) } catch { /* Per-row errors remain visible. */ }
+  const refreshRemoteRows = useCallback(async (ids: string[], options?: { publicationOnly?: boolean }) => {
+    try { await reconcileRemoteListings(ids, options) } catch { /* Per-row errors remain visible. */ }
     await reloadAllegroListings()
   }, [reconcileRemoteListings, reloadAllegroListings])
 
@@ -2821,13 +2823,21 @@ Elmented ezeket a Commerce Hubba?`,
       if (document.visibilityState !== 'visible' || remoteRefreshInFlight.current) return
       const now = Date.now()
       const ids = allegroListings.filter(listing =>
-        (hasListingDifference(listing) || (listing.stockAutoPaused && ['ACTIVE', 'ACTIVATING'].includes(listing.publicationStatus))) &&
+        (hasListingDifference(listing) || (listing.stockAutoPaused && ['ACTIVE', 'ACTIVATING'].includes(listing.publicationStatus)) || needsInactivePublicationVerification(listing, now)) &&
         isBackgroundRefreshAllowed(listing.id, bulkOpIdsRef.current) &&
         (!listing.lastSyncedAt || now - new Date(listing.lastSyncedAt).getTime() >= 300000) &&
         now - (lastRemoteAttempt.current.get(listing.id) ?? 0) >= 300000,
       ).sort((left, right) => (lastRemoteAttempt.current.get(left.id) ?? 0) - (lastRemoteAttempt.current.get(right.id) ?? 0))
         .slice(0, 5).map(listing => listing.id)
-      if (ids.length) void refreshRemoteRows(ids).catch(() => undefined)
+      if (ids.length) void (async () => {
+        const publicationOnly = ids.filter(id => {
+          const listing = allegroListings.find(row => row.id === id)!
+          return !hasListingDifference(listing) && needsInactivePublicationVerification(listing, now)
+        })
+        const other = ids.filter(id => !publicationOnly.includes(id))
+        if (publicationOnly.length) await refreshRemoteRows(publicationOnly, { publicationOnly: true })
+        if (other.length) await refreshRemoteRows(other)
+      })().catch(() => undefined)
     }, 60000)
     return () => window.clearInterval(timer)
   }, [allegroListings, priceSchedulesByListing, refreshRemoteRows])
@@ -4288,10 +4298,12 @@ ${changes.join('\n')}`,
                         {listing.stockAutoPaused && (
                           <small>Automatikus szünet: {listing.stockPolicy?.ownership === 'AUTO_PAUSED' ? 'nyilvántartva' : 'ellenőrzés szükséges'} (a megfigyelt készletet nem módosítja)</small>
                         )}
-                        {(mismatchPresentation(listing).hasDifference || listing.stockAutoPaused) && (
+                        {(mismatchPresentation(listing).hasDifference || listing.stockAutoPaused || needsInactivePublicationVerification(listing)) && (
                           <button type="button" disabled={refreshingRemoteIds.length > 0}
                             title="Csak az Allegro aktuális adatainak lekérdezése; kívánt értékeket nem küld."
-                            onClick={() => { void refreshRemoteRows([listing.id]).catch(error => {
+                            onClick={() => { void refreshRemoteRows([listing.id], {
+                              publicationOnly: !hasListingDifference(listing) && needsInactivePublicationVerification(listing),
+                            }).catch(error => {
                               setRemoteErrors(previous => ({ ...previous, [listing.id]: error instanceof Error ? error.message : 'Frissítés sikertelen' }))
                             }) }}>
                             {refreshingRemoteIds.includes(listing.id) ? 'Lekérdezés…' : 'Távoli frissítés'}

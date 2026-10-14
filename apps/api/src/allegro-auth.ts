@@ -6,6 +6,8 @@ import { loadAllegroPricePolicies } from './allegro-price-policy-store.js'
 import { shouldWriteAllegroPrice } from './allegro-price-policy.js'
 import { compareObservedStock, observedStockMatches } from './allegro-stock-policy.js'
 import { readStockOwnershipSnapshot, reconcileStockOwnership } from './allegro-stock-ownership.js'
+import { executePublicationOperation, withPublicationLease, type PublicationTarget, type PublicationResult } from './allegro-publication-operation.js'
+import { createPublicationLeaseStore, readPublicationSnapshot, recordPublicationAudit, latestPublicationCommand, persistPublicationObservation } from './allegro-publication-store.js'
 import { getCommerceHubUser } from './access-auth.js'
 import { decryptSecret, encryptSecret } from './token-crypto.js'
 import { applyAllegroDesiredStock, resolveAllegroInventoryRows, syncAllegroInventoryRows } from './allegro-inventory-sync.js'
@@ -5445,12 +5447,13 @@ function normalizeAllegroListingStatus(
 // Observation refresh plus separately guarded/audited stale ownership cleanup.
 // No desired targets/locks are changed; no Allegro mutation is dispatched.
 allegroAuth.post('/reconcile-listings', async (context) => {
-  const body = await context.req.json().catch(() => null) as { listingIds?: unknown } | null
+  const body = await context.req.json().catch(() => null) as { listingIds?: unknown; publicationOnly?: boolean } | null
   if (!Array.isArray(body?.listingIds) || body.listingIds.length < 1 || body.listingIds.length > 10 ||
     body.listingIds.some(id => typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) {
     return context.json({ message: 'Provide 1–10 explicit listing IDs' }, 400)
   }
   const ids = [...new Set(body.listingIds as string[])]
+  if (body.publicationOnly !== undefined && typeof body.publicationOnly !== 'boolean') return context.json({ message: 'publicationOnly must be boolean' }, 400)
   assertAllegroEnvironmentConfiguration()
   await restoreAllegroSession()
   await refreshAllegroSessionIfNeeded()
@@ -5469,6 +5472,19 @@ allegroAuth.post('/reconcile-listings', async (context) => {
   const results: Array<{ listingId: string; ok: boolean; error?: string; ownership?: { cleared: boolean; reason: string } }> = []
   for (const target of targets) {
     try {
+      if (body.publicationOnly) {
+        const scoped = { listingId: target.id, offerId: target.offerId, accountId: session.platformAccountId }
+        const observed = await withPublicationLease(createPublicationLeaseStore(database), scoped, async assertOwned => {
+          await assertOwned()
+          const state = await readAllegroPublication(target.offerId, session.accessToken)
+          await assertOwned()
+          await persistPublicationObservation(database, scoped, state)
+          await recordPublicationAudit(database, scoped, { action: 'END', status: 'AUTHORITATIVE_READ', publicationStatus: state.status, observedAt: state.observedAt.toISOString() })
+          return state
+        })
+        results.push({ listingId: target.id, ok: observed !== null, ...(observed ? {} : { error: 'PUBLICATION_OPERATION_BUSY' }) })
+        continue
+      }
       const ownershipSnapshot = await readStockOwnershipSnapshot(database, target.id)
       const observation = await reconcileAllegroObservation(target.offerId, async offerId => {
         const response = await allegroFetch(`${process.env.ALLEGRO_API_URL}/sale/product-offers/${encodeURIComponent(offerId)}`, {
@@ -7251,290 +7267,89 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
     202,
   )
 })
-allegroAuth.post('/push-status/:listingId', async (context) => {
-  if (!currentSession) {
-    return context.json(
-      {
-        status: 'error',
-        message: 'Allegro account is not connected',
-      },
-      401,
-    )
-  }
+async function readAllegroPublication(offerId: string, accessToken: string) {
+  const response = await allegroFetch(`${process.env.ALLEGRO_API_URL}/sale/product-offers/${encodeURIComponent(offerId)}`, {
+    method: 'GET', signal: AbortSignal.timeout(10000),
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/vnd.allegro.public.v1+json' },
+  })
+  if (!response.ok) throw new Error(`Allegro publication GET: HTTP ${response.status}`)
+  const offer = await response.json() as { id?: string; publication?: { status?: string } }
+  if (offer.id !== offerId) throw new Error('MAPPING_OR_SCOPE_CHANGED')
+  if (!['ACTIVE', 'ACTIVATING', 'INACTIVE', 'ENDED'].includes(offer.publication?.status ?? '')) throw new Error('UNEXPECTED_PUBLICATION_STATE')
+  return { status: offer.publication!.status!, observedAt: new Date() }
+}
 
-
-  assertAllegroWriteSafety()
-
-  const databaseUrl = process.env.DATABASE_URL
+/** Shared by the normal endpoint and an explicitly approved, exact-target one-time runner. */
+export async function executeAllegroPublicationTarget(target: PublicationTarget,
+  remediation?: { confirm: boolean; expectedIntentVersion: string }): Promise<PublicationResult> {
+  const environment = assertAllegroWriteSafety()
+  const session = currentSession!
   const apiUrl = process.env.ALLEGRO_API_URL
-
-  if (!databaseUrl || !apiUrl) {
-    return context.json(
-      {
-        status: 'error',
-        message:
-          'Database or Allegro API configuration is missing',
-      },
-      500,
-    )
-  }
-
-  const listingId = context.req.param('listingId')
-  const db = createDatabase(databaseUrl)
-
-  const [row] = await db
-    .select({
-      listingId:
-        platformListings.id,
-
-      offerId:
-        platformListings.externalListingId,
-
-      publicationStatus:
-        listingRemoteStates.publicationStatus,
-
-      desiredPublicationStatus:
-        listingDesiredStates.desiredPublicationStatus,
-    })
-    .from(platformListings)
-    .leftJoin(
-      listingRemoteStates,
-      eq(
-        listingRemoteStates.listingId,
-        platformListings.id,
-      ),
-    )
-    .leftJoin(
-      listingDesiredStates,
-      eq(
-        listingDesiredStates.listingId,
-        platformListings.id,
-      ),
-    )
-    .where(
-      eq(
-        platformListings.id,
-        listingId,
-      ),
-    )
-    .limit(1)
-
-  if (!row) {
-    return context.json(
-      {
-        status: 'error',
-        message: 'Listing not found',
-      },
-      404,
-    )
-  }
-
-  if (!row.offerId) {
-    return context.json(
-      {
-        status: 'error',
-        message: 'Allegro offer ID is missing',
-      },
-      400,
-    )
-  }
-
-  if (
-    row.desiredPublicationStatus !== 'ACTIVE' &&
-    row.desiredPublicationStatus !== 'INACTIVE'
-  ) {
-    return context.json(
-      {
-        status: 'error',
-        message:
-          'Desired publication status must be ACTIVE or INACTIVE',
-      },
-      400,
-    )
-  }
-
-  const alreadyMatches =
-    row.desiredPublicationStatus === 'ACTIVE'
-      ? row.publicationStatus === 'ACTIVE' ||
-        row.publicationStatus === 'ACTIVATING'
-      : row.publicationStatus === 'INACTIVE' ||
-        row.publicationStatus === 'ENDED'
-
-  if (alreadyMatches) {
-    return context.json({
-      status: 'ok',
-      message:
-        'Publication status already matches the desired state',
-      skipped: true,
-      listingId: row.listingId,
-      offerId: row.offerId,
-      publicationStatus:
-        row.publicationStatus,
-      desiredPublicationStatus:
-        row.desiredPublicationStatus,
-    })
-  }
-
-  const action =
-    row.desiredPublicationStatus === 'ACTIVE'
-      ? 'ACTIVATE'
-      : 'END'
-
-  const commandId = randomUUID()
-
-  const commandResponse = await allegroFetch(
-    `${apiUrl}/sale/offer-publication-commands/${commandId}`,
-    {
-      method: 'PUT',
-
-      headers: {
-        Authorization:
-          `Bearer ${currentSession.accessToken}`,
-
-        Accept:
-          'application/vnd.allegro.public.v1+json',
-
-        'Content-Type':
-          'application/vnd.allegro.public.v1+json',
-      },
-
-      body: JSON.stringify({
-        publication: {
-          action,
-        },
-
-        offerCriteria: [
-          {
-            type: 'CONTAINS_OFFERS',
-
-            offers: [
-              {
-                id: row.offerId,
-              },
-            ],
-          },
-        ],
-      }),
-    },
-  )
-
-  if (!commandResponse.ok) {
-    const errorBody =
-      await commandResponse.text()
-
-    console.error(
-      'Allegro publication command failed:',
-      commandResponse.status,
-      errorBody,
-    )
-
-    return context.json(
-      {
-        status: 'error',
-        message:
-          'Allegro publication command failed',
-        commandId,
-        details: errorBody,
-      },
-      502,
-    )
-  }
-
-  const sleep = (ms: number) =>
-    new Promise((resolve) =>
-      setTimeout(resolve, ms),
-    )
-
-  for (
-    let attempt = 0;
-    attempt < 10;
-    attempt += 1
-  ) {
-    await sleep(500)
-
-    const taskResponse = await allegroFetch(
-      `${apiUrl}/sale/offer-publication-commands/${commandId}/tasks`,
-      {
-        headers: {
-          Authorization:
-            `Bearer ${currentSession.accessToken}`,
-
-          Accept:
-            'application/vnd.allegro.public.v1+json',
-        },
-      },
-    )
-
-    if (!taskResponse.ok) {
-      continue
-    }
-
-    const taskData =
-      (await taskResponse.json()) as {
-        tasks?: Array<{
-          offer?: {
-            id?: string
-          }
-
-          status?: string
-          message?: string
-          field?: string
-        }>
-      }
-
-    const task = taskData.tasks?.find(
-      (item) =>
-        item.offer?.id === row.offerId,
-    )
-
-    if (!task) {
-      continue
-    }
-
-    if (task.status === 'FAIL' || task.status === 'FAILED') {
-      return context.json(
-        {
-          status: 'error',
-          message:
-            'Allegro publication status update failed',
-          commandId,
-          task,
-        },
-        502,
-      )
-    }
-
-    if (task.status === 'SUCCESS') {
-      return context.json({
-        status: 'ok',
-        message:
-          'Allegro publication status updated successfully',
-        commandId,
-        listingId: row.listingId,
-        offerId: row.offerId,
-        action,
-        desiredPublicationStatus:
-          row.desiredPublicationStatus,
-        allegroTaskStatus:
-          task.status,
+  if (!process.env.DATABASE_URL || !apiUrl) throw new Error('Publication configuration missing')
+  if (target.accountId !== session.platformAccountId || !/^\d+$/.test(target.offerId)) return { outcome: 'SKIPPED_SAFETY', reason: 'MAPPING_OR_SCOPE_CHANGED' }
+  if (remediation && (!remediation.confirm || !remediation.expectedIntentVersion)) return { outcome: 'SKIPPED_SAFETY', reason: 'EXPLICIT_REMEDIATION_APPROVAL_REQUIRED' }
+  const database = createDatabase(process.env.DATABASE_URL)
+  const readLocal = () => readPublicationSnapshot(database, target.listingId, target.accountId, environment)
+  const snapshot = await readLocal()
+  if (!snapshot || !['ACTIVE', 'INACTIVE'].includes(snapshot.desiredPublication ?? '')) return { outcome: 'SKIPPED_SAFETY', reason: 'DESIRED_PUBLICATION_UNSUPPORTED' }
+  const action = remediation || snapshot.desiredPublication === 'INACTIVE' ? 'END' : 'ACTIVATE'
+  return executePublicationOperation(target, {
+    leases: createPublicationLeaseStore(database), readLocal,
+    readRemote: () => readAllegroPublication(target.offerId, session.accessToken),
+    persistObservation: observation => persistPublicationObservation(database, target, observation),
+    latestCommand: () => latestPublicationCommand(database, target),
+    audit: event => recordPublicationAudit(database, target, event),
+    campaignSafe: async () => {
+      const response = await allegroFetch(`${apiUrl}/sale/badges?marketplace.id=allegro-hu&offer.id=${encodeURIComponent(target.offerId)}`, {
+        method: 'GET', signal: AbortSignal.timeout(10000),
+        headers: { Authorization: `Bearer ${session.accessToken}`, Accept: 'application/vnd.allegro.public.v1+json' },
       })
-    }
-  }
-
-  return context.json(
-    {
-      status: 'pending',
-      message:
-        'Allegro accepted the publication command, but it is still processing',
-      commandId,
-      listingId: row.listingId,
-      offerId: row.offerId,
-      action,
-      desiredPublicationStatus:
-        row.desiredPublicationStatus,
+      if (!response.ok) return false
+      const data = await response.json() as { badges?: Array<{ process?: { status?: string } }> }
+      return Array.isArray(data.badges) && data.badges.every(badge => ['FINISHED', 'DECLINED'].includes(badge.process?.status ?? ''))
     },
-    202,
-  )
+    send: async (publicationAction, commandId) => {
+      assertAllegroWriteSafety()
+      if (currentSession?.platformAccountId !== target.accountId) throw new Error('MAPPING_OR_SCOPE_CHANGED')
+      const response = await allegroFetch(`${apiUrl}/sale/offer-publication-commands/${commandId}`, {
+        method: 'PUT', signal: AbortSignal.timeout(10000),
+        headers: { Authorization: `Bearer ${session.accessToken}`, Accept: 'application/vnd.allegro.public.v1+json', 'Content-Type': 'application/vnd.allegro.public.v1+json' },
+        body: JSON.stringify({ publication: { action: publicationAction }, offerCriteria: [{ type: 'CONTAINS_OFFERS', offers: [{ id: target.offerId }] }] }),
+      })
+      // A server error may occur after acceptance. Keep the recorded command ID
+      // unresolved and read it back; never replay the PUT automatically.
+      if (response.status >= 500 || response.status === 408) throw new Error('DISPATCH_RESULT_UNKNOWN')
+      return { accepted: response.ok, reason: response.ok ? undefined : `Allegro publication command: HTTP ${response.status}` }
+    },
+    task: async commandId => {
+      const response = await allegroFetch(`${apiUrl}/sale/offer-publication-commands/${commandId}/tasks`, {
+        method: 'GET', signal: AbortSignal.timeout(10000),
+        headers: { Authorization: `Bearer ${session.accessToken}`, Accept: 'application/vnd.allegro.public.v1+json' },
+      })
+      if (!response.ok) return 'PENDING'
+      const data = await response.json() as { tasks?: Array<{ offer?: { id?: string }; status?: string }> }
+      const task = data.tasks?.find(item => item.offer?.id === target.offerId)
+      return task?.status === 'SUCCESS' ? 'SUCCESS' : ['FAIL', 'FAILED'].includes(task?.status ?? '') ? 'FAILED' : 'PENDING'
+    },
+    wait: () => new Promise(resolve => setTimeout(resolve, 5000)),
+  }, { action, remediation: Boolean(remediation), intentVersion: remediation?.expectedIntentVersion ?? snapshot.intentVersion })
+}
+
+allegroAuth.post('/push-status/:listingId', async (context) => {
+  if (!currentSession) return context.json({ status: 'error', message: 'Allegro account is not connected' }, 401)
+  const environment = assertAllegroWriteSafety()
+  if (!process.env.DATABASE_URL || !process.env.ALLEGRO_API_URL) return context.json({ status: 'error', message: 'Publication configuration missing' }, 503)
+  const row = await readPublicationSnapshot(createDatabase(process.env.DATABASE_URL), context.req.param('listingId'), currentSession.platformAccountId, environment)
+  if (!row) return context.json({ status: 'error', message: 'Listing outside connected account scope' }, 404)
+  if (!['ACTIVE', 'INACTIVE'].includes(row.desiredPublication ?? '')) return context.json({ status: 'error', message: 'Desired publication status must be ACTIVE or INACTIVE' }, 400)
+  const result = await executeAllegroPublicationTarget(row)
+  const ok = result.outcome === 'FIXED' || result.outcome === 'ALREADY_FIXED'
+  return context.json({ ...result, status: ok ? 'ok' : result.outcome === 'PENDING_TIMEOUT' ? 'pending' : 'error',
+    skipped: result.outcome === 'ALREADY_FIXED' || result.outcome === 'SKIPPED_SAFETY',
+    listingId: row.listingId, offerId: row.offerId, desiredPublicationStatus: row.desiredPublication,
+    action: row.desiredPublication === 'ACTIVE' ? 'ACTIVATE' : 'END',
+    message: result.reason ?? result.outcome,
+  }, ok ? 200 : result.outcome === 'PENDING_TIMEOUT' ? 202 : result.outcome === 'SKIPPED_SAFETY' ? 409 : 502)
 })
 allegroAuth.post(
   '/stop-price-schedule/:scheduleId',
