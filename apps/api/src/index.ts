@@ -41,6 +41,7 @@ import {
   sql,
 } from 'drizzle-orm'
 import { Hono } from 'hono'
+import { parseHistorySinceParam } from './history-range.js'
 import { resolveDiscardStock } from './allegro-discard.js'
 import { resolveDesiredStockUpdate } from './allegro-stock-lock.js'
 import { loadAllegroPricePolicies } from './allegro-price-policy-store.js'
@@ -248,22 +249,47 @@ app.get('/allegro/catalog-sync-runs', async (context) => {
     )
   }
 
+  const sinceParam = parseHistorySinceParam(
+    context.req.query('since'),
+  )
+
+  if (!sinceParam.ok) {
+    return context.json(
+      {
+        status: 'error',
+        message: sinceParam.message,
+      },
+      400,
+    )
+  }
+
+  const since = sinceParam.since
+
   const runsQuery = db
     .select()
     .from(catalogSyncRuns)
     .where(
-      range.boundaries
-        ? and(
-            gte(
-              catalogSyncRuns.startedAt,
-              range.boundaries.from,
-            ),
-            lt(
-              catalogSyncRuns.startedAt,
-              range.boundaries.to,
-            ),
-          )
-        : undefined,
+      and(
+        range.boundaries
+          ? and(
+              gte(
+                catalogSyncRuns.startedAt,
+                range.boundaries.from,
+              ),
+              lt(
+                catalogSyncRuns.startedAt,
+                range.boundaries.to,
+              ),
+            )
+          : undefined,
+        since
+          ? or(
+              eq(catalogSyncRuns.status, 'RUNNING'),
+              gte(catalogSyncRuns.startedAt, since),
+              gte(catalogSyncRuns.finishedAt, since),
+            )
+          : undefined,
+      ),
     )
     .orderBy(
       desc(catalogSyncRuns.startedAt),
@@ -304,6 +330,22 @@ app.get('/allegro/inventory-refresh-runs', async (context) => {
     )
   }
 
+  const sinceParam = parseHistorySinceParam(
+    context.req.query('since'),
+  )
+
+  if (!sinceParam.ok) {
+    return context.json(
+      {
+        status: 'error',
+        message: sinceParam.message,
+      },
+      400,
+    )
+  }
+
+  const since = sinceParam.since
+
   const runsQuery = db
     .select({
       id: dataConnectionRuns.id,
@@ -341,6 +383,16 @@ app.get('/allegro/inventory-refresh-runs', async (context) => {
           ? lt(
               dataConnectionRuns.startedAt,
               range.boundaries.to,
+            )
+          : undefined,
+        since
+          ? or(
+              eq(dataConnectionRuns.status, 'RUNNING'),
+              gte(dataConnectionRuns.startedAt, since),
+              gte(
+                dataConnectionRuns.finishedAt,
+                since,
+              ),
             )
           : undefined,
       ),
@@ -382,7 +434,38 @@ app.get('/allegro/inventory-refresh-runs', async (context) => {
     number[]
   >()
 
-  for (const run of storedRuns) {
+  // In since-mode the returned subset may omit a
+  // wrapper's successor, which would widen its child
+  // window and misattribute imports. Fetch the (tiny)
+  // full start sequence per involved connection from
+  // the earliest returned start onward, so successor
+  // bounds stay exact while the response keeps only
+  // matching wrappers.
+  const boundStarts =
+    since && storedRuns.length > 0 && earliestWrapperStart
+      ? await db
+          .select({
+            connectionId:
+              dataConnectionRuns.connectionId,
+            startedAt:
+              dataConnectionRuns.startedAt,
+          })
+          .from(dataConnectionRuns)
+          .where(
+            and(
+              inArray(
+                dataConnectionRuns.connectionId,
+                importRunConnectionIds,
+              ),
+              gte(
+                dataConnectionRuns.startedAt,
+                earliestWrapperStart,
+              ),
+            ),
+          )
+      : null
+
+  for (const run of boundStarts ?? storedRuns) {
     const starts =
       wrapperStartsByConnection.get(
         run.connectionId,
@@ -893,6 +976,21 @@ app.get('/allegro/history', async (context) => {
     nextDay.getUTCMonth(),
     nextDay.getUTCDate(),
   )
+  const sinceParam = parseHistorySinceParam(
+    context.req.query('since'),
+  )
+
+  if (!sinceParam.ok) {
+    return context.json(
+      {
+        status: 'error',
+        message: sinceParam.message,
+      },
+      400,
+    )
+  }
+
+  const since = sinceParam.since
   const limit = 20_000
 
   try {
@@ -929,6 +1027,9 @@ app.get('/allegro/history', async (context) => {
         and(
           gte(allegroChangeEvents.occurredAt, fromBoundary),
           lt(allegroChangeEvents.occurredAt, toBoundary),
+          since
+            ? gte(allegroChangeEvents.occurredAt, since)
+            : undefined,
         ),
       )
       .orderBy(desc(allegroChangeEvents.occurredAt))

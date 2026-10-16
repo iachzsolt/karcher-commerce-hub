@@ -14,6 +14,11 @@ import {
   shouldHistoryBackgroundTick,
   shouldRefreshOnVisible,
 } from '../utils/polling'
+import {
+  hasActiveHistoryRows,
+  mergeHistoryEvents,
+  mergeHistoryRuns,
+} from '../utils/historyMerge'
 const DAY_MS = 24 * 60 * 60 * 1000
 
 type AllegroHistoryEvent = {
@@ -1613,34 +1618,146 @@ function AllegroHistoryPage() {
     }
   }, [loadHistory])
 
+  // Overlap margin so rows committed around the previous
+  // receipt are re-fetched once; duplicates merge by id.
+  // Receipt time of the last successful full or active
+  // load; active merges advance it without a full reload.
+  const lastActivePollAt = useRef<number | null>(null)
+
+  const loadActiveUpdates = useCallback(async () => {
+    // Active rows live in the present. A historical or
+    // invalid range cannot gain new ones, so there is
+    // nothing to poll.
+    if (validationError || to < initialDates.today) {
+      return
+    }
+
+    if (requestInFlight.current) {
+      return
+    }
+
+    requestInFlight.current = true
+
+    // loadHistory manages the shared in-flight flag
+    // itself, so release it before delegating.
+    const release = () => {
+      requestInFlight.current = false
+    }
+
+    try {
+      const baseline =
+        lastActivePollAt.current ?? loadedAt
+      const params = new URLSearchParams({
+        from,
+        to,
+        since: new Date(
+          baseline - 60_000,
+        ).toISOString(),
+      })
+      const [historyResponse, catalogResponse, inventoryResponse] =
+        await Promise.all([
+          fetch(
+            `${API_BASE_URL}/allegro/history?${params.toString()}`,
+          ),
+          fetch(
+            `${API_BASE_URL}/allegro/catalog-sync-runs?${params.toString()}`,
+          ),
+          fetch(
+            `${API_BASE_URL}/allegro/inventory-refresh-runs?${params.toString()}`,
+          ),
+        ])
+      const historyBody =
+        (await historyResponse.json()) as
+          | AllegroHistoryResponse
+          | { message?: string }
+      const catalogBody =
+        (await catalogResponse.json()) as
+          | CatalogSyncRunsResponse
+          | { message?: string }
+      const inventoryBody =
+        (await inventoryResponse.json()) as
+          | InventoryRefreshRunsResponse
+          | { message?: string }
+
+      if (
+        !historyResponse.ok ||
+        !catalogResponse.ok ||
+        !inventoryResponse.ok ||
+        !('status' in historyBody) ||
+        historyBody.status !== 'ok' ||
+        !('status' in catalogBody) ||
+        catalogBody.status !== 'ok' ||
+        !('status' in inventoryBody) ||
+        inventoryBody.status !== 'ok' ||
+        historyBody.truncated
+      ) {
+        // Cannot reconcile safely from a partial or
+        // truncated answer: one silent full reload.
+        release()
+        await loadHistory({ silent: true })
+        lastActivePollAt.current = Date.now()
+
+        return
+      }
+
+      setEvents((previous) =>
+        mergeHistoryEvents(previous, historyBody.data),
+      )
+      setCatalogSyncRuns((previous) =>
+        mergeHistoryRuns(previous, catalogBody.runs),
+      )
+      setInventoryRefreshRuns((previous) =>
+        mergeHistoryRuns(
+          previous,
+          inventoryBody.runs,
+        ),
+      )
+      lastActivePollAt.current = Date.now()
+    } catch {
+      // Network-level failure: one silent full reload
+      // restores a consistent state.
+      release()
+
+      try {
+        await loadHistory({ silent: true })
+        lastActivePollAt.current = Date.now()
+      } catch {
+        // loadHistory already surfaces its own error.
+      }
+    } finally {
+      release()
+    }
+  }, [
+    from,
+    to,
+    initialDates.today,
+    loadedAt,
+    loadHistory,
+    validationError,
+  ])
+
   /*
    * Lightweight auto-refresh: while the loaded result
    * still contains a processing/pending row, silently
-   * refetch about every 60 seconds so completions appear
-   * without manual Retry/date switching — but only while
-   * the tab is visible. Hidden tabs skip ticks without
-   * enqueueing missed refreshes; becoming visible again
-   * triggers one immediate refresh. Stops by itself
-   * once nothing is pending; a focus regain triggers one
-   * immediate background refresh under the same condition.
-   * The in-flight guard inside loadHistory prevents
+   * fetch only active/recently changed rows about every
+   * 60 seconds (?since=) and merge them into the loaded
+   * state, so completions appear without manual
+   * Retry/date switching — but only while the tab is
+   * visible. Hidden tabs skip ticks without enqueueing
+   * missed refreshes; becoming visible again triggers
+   * one immediate small refresh. Stops by itself once
+   * nothing is pending; a focus regain triggers one
+   * immediate background refresh under the same
+   * condition. Unreconciliable answers fall back to one
+   * silent full reload. The in-flight guard prevents
    * overlapping requests; timers/listeners are cleared
    * on unmount and the date range is never touched.
    */
-  const hasProcessingRows =
-    events.some(
-      (event) =>
-        event.eventType === 'SYNC' &&
-        (event.newValue === 'PENDING' ||
-          event.newValue ===
-            'REACTIVATION_IN_PROGRESS'),
-    ) ||
-    catalogSyncRuns.some(
-      (run) => run.status === 'RUNNING',
-    ) ||
-    inventoryRefreshRuns.some(
-      (run) => run.status === 'RUNNING',
-    )
+  const hasProcessingRows = hasActiveHistoryRows({
+    events,
+    catalogRuns: catalogSyncRuns,
+    inventoryRuns: inventoryRefreshRuns,
+  })
 
   useEffect(() => {
     if (!hasProcessingRows) {
@@ -1663,7 +1780,7 @@ function AllegroHistoryPage() {
             document.visibilityState,
         })
       ) {
-        void loadHistory({ silent: true })
+        void loadActiveUpdates()
       }
 
       timeoutId = window.setTimeout(
@@ -1679,7 +1796,7 @@ function AllegroHistoryPage() {
 
     const onFocus = () => {
       if (!disposed) {
-        void loadHistory({ silent: true })
+        void loadActiveUpdates()
       }
     }
 
@@ -1691,7 +1808,7 @@ function AllegroHistoryPage() {
             document.visibilityState,
         })
       ) {
-        void loadHistory({ silent: true })
+        void loadActiveUpdates()
       }
     }
 
@@ -1717,7 +1834,7 @@ function AllegroHistoryPage() {
         onVisible,
       )
     }
-  }, [hasProcessingRows, loadHistory])
+  }, [hasProcessingRows, loadActiveUpdates])
 
   const dayGroups = useMemo(() => {
     const groups = new Map<
