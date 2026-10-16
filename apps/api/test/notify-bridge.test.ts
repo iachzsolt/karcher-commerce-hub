@@ -777,6 +777,7 @@ void describe('order historical-flood bootstrap', () => {
         'messageId',
         'offerId',
         'orderId',
+        'positionCreatedAt',
         'threadId',
       ].sort(),
     )
@@ -896,6 +897,7 @@ void describe('safe order recovery', () => {
       messageId: null,
       cursorBefore: '',
       createdAt: new Date(NOW_MS).toISOString(),
+      positionCreatedAt: null,
     } satisfies BridgePending)
 
     const result = await reseedNotifyOrders({
@@ -1052,6 +1054,8 @@ void describe('message cursor preservation', () => {
     await kv.set(NOTIFY_KV_KEYS.messageCursor, {
       lastId: 'm-15',
       updatedAt: new Date(NOW_MS).toISOString(),
+      lastCreatedAt: '2026-09-19T07:00:00.000Z',
+      v: 2,
     })
     const deps = {
       environment: baseEnvironment(),
@@ -1099,6 +1103,14 @@ void describe('message cursor preservation', () => {
         )
       )?.lastId,
       'm-16',
+    )
+    assert.equal(
+      (
+        await kv.get<StoredCursor>(
+          NOTIFY_KV_KEYS.messageCursor,
+        )
+      )?.lastCreatedAt,
+      '2026-09-19T07:10:00.000Z',
     )
   })
 
@@ -1800,6 +1812,7 @@ void describe('notify diagnostics', () => {
       messageId: null,
       cursorBefore: 'ev-0',
       createdAt: new Date(NOW_MS).toISOString(),
+      positionCreatedAt: null,
     } satisfies BridgePending)
     const events: OrderStubEvent[] = [
       {
@@ -2841,6 +2854,7 @@ void describe('customer returns', () => {
         'messageId',
         'offerId',
         'orderId',
+        'positionCreatedAt',
         'threadId',
       ].sort(),
     )
@@ -2983,6 +2997,7 @@ void describe('return replay', () => {
       messageId: null,
       cursorBefore: 'ret-2',
       createdAt: new Date(NOW_MS).toISOString(),
+      positionCreatedAt: null,
     })
     assert.equal(
       await kv.get(NOTIFY_KV_KEYS.sentReturn('ret-2')),

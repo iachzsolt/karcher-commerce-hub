@@ -29,6 +29,12 @@ The notification session uses its own OAuth client scope set:
 - `allegro:api:orders:read`
 - `allegro:api:messaging`
 - `allegro:api:profile:read`
+- `allegro:api:sale:disputes` (DISCUSSION channel:
+  disputes/claims via `GET /sale/issues` + chat; confirm
+  this exact scope string on the Allegro consent screen
+  during bootstrap — a missing grant surfaces at runtime
+  as `ISSUE_SCOPE_MISSING` in the logs instead of mail,
+  never as a crash)
 
 It needs its own set of OAuth credentials (or the existing
 client with the messaging scope added) and a registered redirect
@@ -52,7 +58,9 @@ Set these (values are examples, never commit real ones):
 - `ALLEGRO_NOTIFY_ORDER_EMAIL` — order mailbox
 - `ALLEGRO_NOTIFY_MESSAGE_EMAIL` — customer service mailbox
 - `ALLEGRO_NOTIFY_CANCELLATION_EMAIL` — order mailbox
-  (future: `ALLEGRO_NOTIFY_ISSUE_EMAIL`)
+- `ALLEGRO_NOTIFY_ISSUE_EMAIL` — discussion/vita mailbox
+  (falls back to `info.hu@karcher.com` when unset, so the
+  DISCUSSION channel is never silently held)
 - `ALLEGRO_NOTIFY_RETURN_EMAIL` — customer-return mailbox
   (`info.hu@karcher.com`; falls back to the message mailbox
   when unset)
@@ -93,8 +101,16 @@ With the secrets deployed, visit (logged in):
 `https://<hub-host>/api/auth/allegro/notify-connect`
 
 Approve the Allegro consent screen (orders + messaging +
-profile read). The callback encrypts the tokens into Deno KV
-(`['allegro-notify','oauth']`). No Neon writes happen.
+profile read + sale disputes). The callback encrypts the
+tokens into Deno KV (`['allegro-notify','oauth']`). No
+Neon writes happen.
+
+Existing installations upgrading to the DISCUSSION
+channel must repeat this bootstrap ONCE so the stored
+grant gains the disputes scope. The current token keeps
+working for orders/messages/returns until then; only
+the discussion stage reports `ISSUE_SCOPE_MISSING`.
+Nothing is silently invalidated.
 
 ## 5. Safe order recovery (run ONCE, while disabled)
 
@@ -137,6 +153,27 @@ the return journal to the current high-water mark, stores
 only the cursor, and sends zero historical emails — only
 new returns after that seed notify `ALLEGRO_NOTIFY_RETURN_EMAIL`,
 one email per return ID, ACK-advanced like orders/messages.
+
+Customer discussions (`[ALLEGRO] VITA – <order or issue>`,
+beta API `GET /sale/issues` + chat) behave the same way:
+the first successful pull seeds the discussion cursor
+silently (`SEEDED`/`DISCUSSION`, zero emails). Afterwards
+every new buyer-authored chat message (`author.role`
+`BUYER` with text or attachments) yields exactly one
+email; seller, admin, and system entries — including
+status-only changes — never notify. The pull priority is
+ORDER → MESSAGE → RETURN → DISCUSSION (existing relative
+order preserved), still at most one EMAIL per pull and 20
+per Apps Script run. Message Center threads stay on
+public.v1: the beta-only `POST_PURCHASE_ISSUE` thread
+variant is deliberately not requested; purchase issues
+are covered by the DISCUSSION channel instead.
+
+Message cursors are chronological (`createdAt` + id
+tie-break, never lexical ID order). Pre-upgrade cursors
+migrate without a flood: only positions created after
+the cursor's last write are delivered on the first new
+run; the first v2 cursor write ends the upgrade.
 
 ## 6. Enable and verify
 
@@ -192,6 +229,16 @@ hub host (the app attaches your Bearer token automatically):
 ```js
 await (await fetch('/api/auth/allegro/notify-diagnostics')).json()
 ```
+
+Beyond the legacy fields, diagnostics now reports a
+`channels` block (`order`, `message`, `discussion`,
+`return`) with per-channel `enabled`, `cursorPresent`,
+`cursorUpdatedAt` (last successful progression),
+`cursorPositionCreatedAt`, and claim-free `pending`
+age/expiry (`ageMs`, `expiresInMs`, `expired`) — so a
+pending claim blocking newer notifications is visible
+without PII. `issueScopeRequested` reports whether the
+disputes scope is part of the bootstrap consent.
 
 `GET /api/auth/allegro/notify-diagnostics` is ADMIN-only,
 never public, and strictly read-only: no email, no cursor

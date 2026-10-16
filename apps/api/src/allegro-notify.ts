@@ -29,16 +29,40 @@ export const ALLEGRO_NOTIFY_SCOPES = [
   'allegro:api:orders:read',
   'allegro:api:messaging',
   'allegro:api:profile:read',
+  // Disputes/issues scope for the DISCUSSION channel
+  // (GET /sale/issues + chat). This is the scope Allegro
+  // documents for the disputes/issues resources; confirm
+  // the exact string on the consent screen during the
+  // one-time re-bootstrap. A missing grant surfaces as
+  // ISSUE_SCOPE_MISSING at runtime, never as a crash.
+  'allegro:api:sale:disputes',
 ] as const
 
 const PUBLIC_V1_ACCEPT =
   'application/vnd.allegro.public.v1+json'
 
-/* Customer returns live under the beta API family. Only
- * the returns calls use this Accept value; everything else
- * stays on public.v1. */
+/* Customer returns and post-purchase issues live under
+ * the beta API family. Only the returns and issues calls
+ * use this Accept value; messaging threads stay on
+ * public.v1 (POST_PURCHASE_ISSUE thread variants are a
+ * beta-only extension we deliberately do not request:
+ * COMMON transaction threads are fully served by
+ * public.v1, and purchase issues are covered by the
+ * dedicated DISCUSSION channel on /sale/issues). */
 const BETA_V1_ACCEPT =
   'application/vnd.allegro.beta.v1+json'
+
+/* Discussion channel bounds: issue volumes are low, so a
+ * handful of full pages is plenty; the chat walk is
+ * bounded the same way. */
+const ISSUES_PAGE_LIMIT = 100
+const ISSUES_PULL_MAX_PAGES = 5
+const ISSUE_CHAT_PAGE_LIMIT = 100
+const ISSUE_CHAT_MAX_PAGES = 3
+
+/* Fallback recipient for the DISCUSSION channel when
+ * ALLEGRO_NOTIFY_ISSUE_EMAIL is unset. */
+const DEFAULT_ISSUE_EMAIL = 'info.hu@karcher.com'
 
 const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000
 const CRON_LEASE_TTL_MS = 8 * 60 * 1000
@@ -95,6 +119,11 @@ export type NotifyConfig = {
    * mailbox when unset, mirroring the cancellation ->
    * order fallback below. */
   returnEmail: string | null
+  /* Discussion/issue mailbox. Falls back to the business
+   * default (info.hu@karcher.com) when unset, so the
+   * channel is never silently held for a missing
+   * recipient. */
+  issueEmail: string
 }
 
 function requiredEnv(
@@ -207,15 +236,20 @@ export function resolveNotifyConfig(
       environment,
       'ALLEGRO_NOTIFY_CANCELLATION_EMAIL',
     ),
-    returnEmail:
-      optionalEmail(
-        environment,
-        'ALLEGRO_NOTIFY_RETURN_EMAIL',
-      ) ??
-      optionalEmail(
-        environment,
-        'ALLEGRO_NOTIFY_MESSAGE_EMAIL',
-      ),
+  returnEmail:
+    optionalEmail(
+      environment,
+      'ALLEGRO_NOTIFY_RETURN_EMAIL',
+    ) ??
+    optionalEmail(
+      environment,
+      'ALLEGRO_NOTIFY_MESSAGE_EMAIL',
+    ),
+  issueEmail:
+    optionalEmail(
+      environment,
+      'ALLEGRO_NOTIFY_ISSUE_EMAIL',
+    ) ?? DEFAULT_ISSUE_EMAIL,
   }
 }
 
@@ -325,6 +359,18 @@ export const NOTIFY_KV_KEYS = {
       'message',
       messageId,
     ] as const,
+  discussionCursor: [
+    'allegro-notify',
+    'cursor',
+    'discussions',
+  ] as const,
+  sentDiscussion: (chatMessageId: string) =>
+    [
+      'allegro-notify',
+      'sent',
+      'discussion',
+      chatMessageId,
+    ] as const,
   returnCursor: [
     'allegro-notify',
     'cursor',
@@ -362,11 +408,146 @@ export type StoredNotifyOAuth = {
 export type StoredCursor = {
   lastId: string
   updatedAt: string
+  /* v2 chronological position. Absent on pre-upgrade
+   * cursors; see isPositionNewerThanCursor for the
+   * migration-safe upgrade path. */
+  lastCreatedAt?: string | null
+  v?: 2
+}
+
+export type ChronoPosition = {
+  createdAt: string | null
+  id: string
+}
+
+function instantOrNull(
+  value: string | null | undefined,
+): number | null {
+  if (typeof value !== 'string' || value === '') {
+    return null
+  }
+
+  const parsed = Date.parse(value)
+
+  return Number.isNaN(parsed) ? null : parsed
+}
+
+/* Chronological "is this position newer than the cursor".
+ * ID lexical order is NEVER used as a proxy for time:
+ * Allegro message/chat IDs are UUID-shaped. Equal
+ * instants with a different id are treated as newer so
+ * same-instant siblings are each delivered once; the
+ * 60-day dedupe markers filter already-processed
+ * siblings, so this cannot resend.
+ *
+ * Pre-upgrade (v1) cursors carry no lastCreatedAt. Only
+ * positions created after the cursor was last written are
+ * certainly unprocessed, so only those are delivered;
+ * everything older is skipped without a flood. The first
+ * v2 cursor write ends the upgrade path. */
+export function isPositionNewerThanCursor(
+  position: ChronoPosition,
+  cursor: StoredCursor,
+): boolean {
+  if (position.id === cursor.lastId) {
+    return false
+  }
+
+  const baseline = instantOrNull(cursor.lastCreatedAt)
+
+  if (baseline !== null) {
+    const at = instantOrNull(position.createdAt)
+
+    if (at === null) {
+      return true
+    }
+
+    return at >= baseline
+  }
+
+  const writtenAt = instantOrNull(cursor.updatedAt)
+
+  if (
+    writtenAt === null ||
+    instantOrNull(position.createdAt) === null
+  ) {
+    return position.id > cursor.lastId
+  }
+
+  return (
+    (instantOrNull(position.createdAt) as number) >
+    writtenAt
+  )
+}
+
+export function cursorForPosition(
+  position: ChronoPosition,
+  nowMs: number,
+): StoredCursor {
+  return {
+    lastId: position.id,
+    updatedAt: new Date(nowMs).toISOString(),
+    lastCreatedAt: position.createdAt,
+    v: 2,
+  }
+}
+
+/* Delivery-order comparator by instant. The id
+ * tie-break only orders same-instant siblings
+ * deterministically; it never decides chronology. */
+export function compareChronoPositions(
+  left: ChronoPosition,
+  right: ChronoPosition,
+): number {
+  const mine = instantOrNull(left.createdAt) ?? 0
+  const theirs = instantOrNull(right.createdAt) ?? 0
+
+  if (mine !== theirs) {
+    return mine - theirs
+  }
+
+  return left.id < right.id
+    ? -1
+    : left.id > right.id
+      ? 1
+      : 0
+}
+
+/* Newest position by instant; the id tie-break is for
+ * processing determinism only, never chronology. */
+export function newestPosition(
+  positions: ChronoPosition[],
+): ChronoPosition | null {
+  let best: ChronoPosition | null = null
+
+  for (const position of positions) {
+    if (!best) {
+      best = position
+      continue
+    }
+
+    const mine = instantOrNull(position.createdAt) ?? -1
+    const theirs = instantOrNull(best.createdAt) ?? -1
+
+    if (
+      mine > theirs ||
+      (mine === theirs && position.id > best.id)
+    ) {
+      best = position
+    }
+  }
+
+  return best
 }
 
 export type StoredDelivery = {
   deliveredAt: string
-  channel: 'order' | 'cancellation' | 'message' | 'return'
+  channel:
+    | 'order'
+    | 'cancellation'
+    | 'message'
+    | 'return'
+    | 'discussion'
 }
 
 export function createMemoryNotifyKv(): NotifyKv {
@@ -3546,7 +3727,7 @@ function isValidCursor(
 
 export type BridgePending = {
   deliveryId: string
-  channel: 'order' | 'message' | 'return'
+  channel: 'order' | 'message' | 'return' | 'discussion'
   eventId: string
   eventType: string
   orderId: string | null
@@ -3555,6 +3736,15 @@ export type BridgePending = {
   messageId: string | null
   cursorBefore: string | null
   createdAt: string
+  /* Authoritative position instant for v2 chronological
+   * cursors (message/discussion heads). Timestamps are
+   * technical metadata, never PII. Null for order/return
+   * claims, whose cursors stay id-based journal
+   * continuations. */
+  positionCreatedAt: string | null
+  /* Issue status snapshot for discussion-claim rebuilds
+   * (technical metadata, no PII). */
+  issueStatus?: string | null
 }
 
 export type BridgeEmail = {
@@ -3571,7 +3761,7 @@ export type NotifyPullResult =
   | { action: 'PONG' }
   | {
       action: 'SEEDED'
-      channel: 'ORDER' | 'MESSAGE' | 'RETURN'
+      channel: 'ORDER' | 'MESSAGE' | 'RETURN' | 'DISCUSSION'
     }
   | {
       action: 'EMAIL'
@@ -3598,10 +3788,16 @@ function returnDeliveryId(returnId: string): string {
   return `return:${returnId}`
 }
 
+function discussionDeliveryId(
+  chatMessageId: string,
+): string {
+  return `discussion:${chatMessageId}`
+}
+
 function parseDeliveryId(
   deliveryId: unknown,
 ): {
-  channel: 'order' | 'message' | 'return'
+  channel: 'order' | 'message' | 'return' | 'discussion'
   eventId: string
 } | null {
   if (typeof deliveryId !== 'string') {
@@ -3632,6 +3828,16 @@ function parseDeliveryId(
     return {
       channel: 'return',
       eventId: deliveryId.slice(7),
+    }
+  }
+
+  if (
+    deliveryId.startsWith('discussion:') &&
+    deliveryId.length > 11
+  ) {
+    return {
+      channel: 'discussion',
+      eventId: deliveryId.slice(11),
     }
   }
 
@@ -3977,6 +4183,49 @@ async function rebuildPendingEmail(
     return null
   }
 
+  if (pending.channel === 'discussion') {
+    if (!pending.threadId) {
+      return null
+    }
+
+    const chat = await fetchIssueChat(
+      config,
+      tokens,
+      fetchImpl,
+      pending.threadId,
+    )
+
+    if (!chat.ok) {
+      return null
+    }
+
+    const match = chat.messages.find(
+      (message) =>
+        message.id === pending.messageId,
+    )
+
+    if (!match || !isNotifiableIssueMessage(match)) {
+      return null
+    }
+
+    const built = await buildDiscussionEmailForMessage(
+      config,
+      {
+        id: pending.threadId,
+        kind: null,
+        status: pending.issueStatus ?? null,
+        createdAt: null,
+        orderId: pending.orderId,
+        offerId: pending.offerId,
+        subject: null,
+      },
+      match,
+      false,
+    )
+
+    return 'email' in built ? built : null
+  }
+
   const fetched = await fetchAllThreadMessages(
     config,
     tokens,
@@ -4304,6 +4553,353 @@ async function findNextReturn(
   return { none: true }
 }
 
+/* ============================================================
+ * Post-purchase issues: disputes (DISPUTE) and claims
+ * (CLAIM) via GET /sale/issues + GET
+ * /sale/issues/{issueId}/chat. Parsed strictly by
+ * whitelist; buyer authorship comes ONLY from the
+ * authoritative author.role field, never from message
+ * text. Unknown or misshaped values become null and are
+ * omitted. Only beta.v1 serves these resources; the
+ * BETA_V1_ACCEPT constant stays scoped to returns +
+ * issues and is never broadened to messaging threads.
+ * ============================================================ */
+
+export type NotifyIssue = {
+  id: string
+  kind: string | null
+  status: string | null
+  createdAt: string | null
+  orderId: string | null
+  offerId: string | null
+  subject: string | null
+}
+
+export type NotifyIssueMessage = {
+  id: string
+  issueId: string
+  createdAt: string | null
+  authorRole: string | null
+  authorLogin: string | null
+  text: string | null
+  attachmentNames: string[]
+}
+
+export function parseIssueList(
+  payload: unknown,
+): NotifyIssue[] {
+  const root = recordOf(payload)
+  const rawList = root?.['issues']
+
+  if (!Array.isArray(rawList)) {
+    return []
+  }
+
+  const issues: NotifyIssue[] = []
+
+  for (const raw of rawList) {
+    const item = recordOf(raw)
+
+    if (!item) {
+      continue
+    }
+
+    const id = textOrNull(item['id'])
+
+    if (!id) {
+      continue
+    }
+
+    const order = recordOf(item['order'])
+    const checkoutForm = recordOf(
+      item['checkoutForm'],
+    )
+    const offer = recordOf(item['offer'])
+
+    issues.push({
+      id,
+      kind:
+        textOrNull(item['type']) ??
+        textOrNull(item['kind']),
+      status: textOrNull(item['status']),
+      createdAt:
+        textOrNull(item['createdAt']) ??
+        textOrNull(item['created']) ??
+        textOrNull(item['openedAt']),
+      orderId:
+        textOrNull(order?.['id']) ??
+        textOrNull(checkoutForm?.['id']) ??
+        textOrNull(item['orderId']),
+      offerId:
+        textOrNull(offer?.['id']) ??
+        textOrNull(item['offerId']),
+      subject:
+        textOrNull(item['subject']) ??
+        textOrNull(item['title']) ??
+        textOrNull(item['topic']),
+    })
+  }
+
+  return issues
+}
+
+export function parseIssueChat(
+  issueId: string,
+  payload: unknown,
+): NotifyIssueMessage[] {
+  const root = recordOf(payload)
+  const rawMessages = Array.isArray(root?.['chat'])
+    ? root?.['chat']
+    : Array.isArray(root?.['messages'])
+      ? root?.['messages']
+      : []
+
+  if (!Array.isArray(rawMessages)) {
+    return []
+  }
+
+  const messages: NotifyIssueMessage[] = []
+
+  for (const raw of rawMessages) {
+    const item = recordOf(raw)
+
+    if (!item) {
+      continue
+    }
+
+    const id = textOrNull(item['id'])
+
+    if (!id) {
+      continue
+    }
+
+    const author = recordOf(item['author'])
+    const attachments = Array.isArray(
+      item['attachments'],
+    )
+      ? item['attachments']
+      : []
+    const attachmentNames: string[] = []
+
+    for (const attachment of attachments) {
+      const name = textOrNull(
+        recordOf(attachment)?.['fileName'] ??
+          recordOf(attachment)?.['name'],
+      )
+
+      if (name) {
+        attachmentNames.push(name)
+      }
+    }
+
+    const role = textOrNull(author?.['role'])
+
+    messages.push({
+      id,
+      issueId,
+      createdAt:
+        textOrNull(item['createdAt']) ??
+        textOrNull(item['created']),
+      authorRole: role ? role.toUpperCase() : null,
+      authorLogin:
+        textOrNull(author?.['login']) ??
+        textOrNull(author?.['name']),
+      text: textOrNull(item['text']),
+      attachmentNames,
+    })
+  }
+
+  return messages
+}
+
+/* Only buyer-authored communication notifies. Seller,
+ * admin, and system entries (including status-only
+ * changes, which carry no buyer text) never notify. */
+export function isNotifiableIssueMessage(
+  message: NotifyIssueMessage,
+): boolean {
+  return (
+    message.authorRole === 'BUYER' &&
+    (message.text !== null ||
+      message.attachmentNames.length > 0)
+  )
+}
+
+async function fetchIssuePage(
+  config: NotifyConfig,
+  tokens: NotifyOAuthTokens,
+  fetchImpl: FetchImpl,
+  offset: number,
+): Promise<
+  | { ok: true; issues: NotifyIssue[] }
+  | { ok: false; status: number }
+> {
+  const fetched = await fetchJson(
+    `${config.apiUrl}/sale/issues?limit=${ISSUES_PAGE_LIMIT}&offset=${offset}`,
+    tokens,
+    config,
+    fetchImpl,
+    BETA_V1_ACCEPT,
+  )
+
+  if (!fetched.ok) {
+    return { ok: false, status: fetched.status }
+  }
+
+  return {
+    ok: true,
+    issues: parseIssueList(fetched.data),
+  }
+}
+
+async function fetchIssueChat(
+  config: NotifyConfig,
+  tokens: NotifyOAuthTokens,
+  fetchImpl: FetchImpl,
+  issueId: string,
+): Promise<{
+  ok: boolean
+  status: number
+  messages: NotifyIssueMessage[]
+  truncated: boolean
+}> {
+  const messages: NotifyIssueMessage[] = []
+  let offset = 0
+  let truncated = false
+
+  for (
+    let page = 0;
+    page < ISSUE_CHAT_MAX_PAGES;
+    page += 1
+  ) {
+    const fetched = await fetchJson(
+      `${config.apiUrl}/sale/issues/${encodeURIComponent(issueId)}/chat` +
+        `?limit=${ISSUE_CHAT_PAGE_LIMIT}&offset=${offset}`,
+      tokens,
+      config,
+      fetchImpl,
+      BETA_V1_ACCEPT,
+    )
+
+    if (!fetched.ok) {
+      return {
+        ok: false,
+        status: fetched.status,
+        messages: [],
+        truncated: true,
+      }
+    }
+
+    const pageMessages = parseIssueChat(
+      issueId,
+      fetched.data,
+    )
+    messages.push(...pageMessages)
+
+    if (pageMessages.length < ISSUE_CHAT_PAGE_LIMIT) {
+      return { ok: true, status: fetched.status, messages, truncated }
+    }
+
+    offset += ISSUE_CHAT_PAGE_LIMIT
+    truncated = true
+  }
+
+  return { ok: true, status: 200, messages, truncated }
+}
+
+export type NotifyDiscussionCandidate = {
+  issue: NotifyIssue
+  message: NotifyIssueMessage
+  isFirstMessage: boolean
+}
+
+export function buildDiscussionEmail(
+  to: string,
+  issue: NotifyIssue,
+  message: NotifyIssueMessage,
+  isFirstMessage: boolean,
+): NotifyEmail {
+  const reference = issue.orderId ?? issue.id
+  const title = `[ALLEGRO] VITA – ${reference}`
+  const subLabel = isFirstMessage
+    ? 'Új vita'
+    : 'Új vevői üzenet'
+  const decodedText =
+    decodeNotifyEntitiesOnce(message.text) ?? '–'
+  const context: NotifyEmailSection = {
+    heading: 'VITA ADATAI',
+    rows: [
+      ...rowsIf(
+        'Típus',
+        isFirstMessage
+          ? 'Új vita'
+          : 'Új vevői üzenet',
+      ),
+      ...rowsIf('Vita', issue.id),
+      ...rowsIf('Rendelés', issue.orderId),
+      ...rowsIf('Ajánlat', issue.offerId),
+      ...rowsIf('Státusz', issue.status),
+      ...rowsIf(
+        'Időpont',
+        formatNotifyDateTime(message.createdAt),
+      ),
+    ],
+  }
+  const buyer: NotifyEmailSection = {
+    heading: 'VEVŐ',
+    rows: [...rowsIf('Vevő', message.authorLogin)],
+  }
+  const attachments: NotifyEmailSection = {
+    heading: 'CSATOLMÁNYOK',
+    rows: message.attachmentNames.map(
+      (name, index) =>
+        [`${index + 1}. fájl`, name] as [
+          string,
+          string,
+        ],
+    ),
+  }
+  const { textBody, htmlBody } = emailShell(
+    title,
+    'Vásárlói vita / reklamáció',
+    subLabel,
+    [[buyer, context]],
+    [attachments],
+    [
+      {
+        label: 'ÜZENET TARTALMA',
+        value: decodedText,
+      },
+    ],
+    null,
+  )
+
+  return { to, subject: title, textBody, htmlBody }
+}
+
+async function buildDiscussionEmailForMessage(
+  config: NotifyConfig,
+  issue: NotifyIssue,
+  message: NotifyIssueMessage,
+  isFirstMessage: boolean,
+): Promise<{ email: BridgeEmail } | { held: true }> {
+  const email = buildDiscussionEmail(
+    config.issueEmail,
+    issue,
+    message,
+    isFirstMessage,
+  )
+
+  return {
+    email: {
+      to: email.to,
+      subject: email.subject,
+      textBody: email.textBody,
+      htmlBody: email.htmlBody,
+    },
+  }
+}
+
 export async function handleNotifyPull(
   auth: BridgeRequestAuth,
   deps: BridgeDeps = {},
@@ -4379,10 +4975,25 @@ export async function handleNotifyPull(
 
   // A pending claim wins over everything newer: the
   // failed email is retried before its cursor advances.
+  // The head-of-line hold is observable (channel + claim
+  // age, never PII) so a stuck claim blocking newer
+  // notifications is visible in logs and diagnostics.
   const pending =
     await kv.get<BridgePending>(NOTIFY_KV_KEYS.pending)
 
   if (pending && typeof pending.deliveryId === 'string') {
+    const pendingAgeMs = nowMs - Date.parse(
+      pending.createdAt,
+    )
+    notifyWarn('notify pending claim blocks pull', {
+      channel: pending.channel,
+      ageMs: Number.isNaN(pendingAgeMs)
+        ? null
+        : pendingAgeMs,
+      expired:
+        PENDING_TTL_MS - pendingAgeMs <= 0 &&
+        !Number.isNaN(pendingAgeMs),
+    })
     const rebuilt = await rebuildPendingEmail(
       config,
       tokens,
@@ -4490,6 +5101,7 @@ export async function handleNotifyPull(
           messageId: null,
           cursorBefore: orderCursor.lastId,
           createdAt: new Date(nowMs).toISOString(),
+          positionCreatedAt: null,
         } satisfies BridgePending,
         { ttlMs: PENDING_TTL_MS },
       )
@@ -4549,25 +5161,42 @@ export async function handleNotifyPull(
       if (
         isNotifiableMessage(message) &&
         (!messageCursor ||
-          message.id > messageCursor.lastId)
+          isPositionNewerThanCursor(
+            {
+              createdAt: message.createdAt,
+              id: message.id,
+            },
+            messageCursor,
+          ))
       ) {
         candidates.push(message)
       }
     }
   }
 
+  /* Chronological delivery order (deterministic
+   * same-instant tie-break; never ID-as-time). */
   candidates.sort((left, right) =>
-    left.id < right.id ? -1 : left.id > right.id ? 1 : 0,
+    compareChronoPositions(
+      { createdAt: left.createdAt, id: left.id },
+      { createdAt: right.createdAt, id: right.id },
+    ),
   )
 
   if (!isValidCursor(messageCursor)) {
     if (candidates.length > 0) {
       const newest = candidates[candidates.length - 1]!
 
-      await kv.set(NOTIFY_KV_KEYS.messageCursor, {
-        lastId: newest.id,
-        updatedAt: new Date(nowMs).toISOString(),
-      } satisfies StoredCursor)
+      await kv.set(
+        NOTIFY_KV_KEYS.messageCursor,
+        cursorForPosition(
+          {
+            createdAt: newest.createdAt,
+            id: newest.id,
+          },
+          nowMs,
+        ),
+      )
       notifyLog('notify message cursor seeded', {
         eventId: newest.id,
         eventsSeen: candidates.length,
@@ -4614,6 +5243,7 @@ export async function handleNotifyPull(
         messageId: message.id,
         cursorBefore: messageCursor.lastId,
         createdAt: new Date(nowMs).toISOString(),
+        positionCreatedAt: message.createdAt,
       } satisfies BridgePending,
       { ttlMs: PENDING_TTL_MS },
     )
@@ -4702,6 +5332,7 @@ export async function handleNotifyPull(
           messageId: null,
           cursorBefore: returnCursor.lastId,
           createdAt: new Date(nowMs).toISOString(),
+          positionCreatedAt: null,
         } satisfies BridgePending,
         { ttlMs: PENDING_TTL_MS },
       )
@@ -4715,6 +5346,213 @@ export async function handleNotifyPull(
         },
       }
     }
+  }
+
+  // Customer discussions (checked last; order,
+  // message and return behavior above is untouched).
+  // Any failure of this newer channel — including a
+  // missing issues OAuth scope — only skips the stage.
+  // It can never break the existing channels or crash
+  // the pull (defensive catch included for the same
+  // reason).
+  try {
+    const discussionCursor =
+      await kv.get<StoredCursor>(
+        NOTIFY_KV_KEYS.discussionCursor,
+      )
+    const issues: NotifyIssue[] = []
+    let issuesUnavailable: number | null = null
+
+    for (
+      let page = 0;
+      page < ISSUES_PULL_MAX_PAGES;
+      page += 1
+    ) {
+      const fetched = await fetchIssuePage(
+        config,
+        tokens,
+        fetchImpl,
+        page * ISSUES_PAGE_LIMIT,
+      )
+
+      if (!fetched.ok) {
+        issuesUnavailable = fetched.status
+        break
+      }
+
+      issues.push(...fetched.issues)
+
+      if (
+        fetched.issues.length < ISSUES_PAGE_LIMIT
+      ) {
+        break
+      }
+    }
+
+    if (issuesUnavailable !== null) {
+      if (
+        issuesUnavailable === 401 ||
+        issuesUnavailable === 403
+      ) {
+        notifyWarn('notify issue scope missing', {
+          httpStatus: issuesUnavailable,
+        })
+      } else {
+        notifyWarn('notify issue poll failed', {
+          httpStatus: issuesUnavailable,
+        })
+      }
+    } else {
+      const discussionCandidates: NotifyDiscussionCandidate[] =
+        []
+
+      for (const issue of issues) {
+        const chat = await fetchIssueChat(
+          config,
+          tokens,
+          fetchImpl,
+          issue.id,
+        )
+
+        if (!chat.ok) {
+          notifyWarn('notify issue chat failed', {
+            httpStatus: chat.status,
+          })
+          continue
+        }
+
+        for (const message of chat.messages) {
+          if (
+            isNotifiableIssueMessage(message) &&
+            (!discussionCursor ||
+              isPositionNewerThanCursor(
+                {
+                  createdAt: message.createdAt,
+                  id: message.id,
+                },
+                discussionCursor,
+              ))
+          ) {
+            discussionCandidates.push({
+              issue,
+              message,
+              isFirstMessage:
+                !chat.truncated &&
+                chat.messages.length === 1,
+            })
+          }
+        }
+      }
+
+      discussionCandidates.sort((left, right) =>
+        compareChronoPositions(
+          {
+            createdAt: left.message.createdAt,
+            id: left.message.id,
+          },
+          {
+            createdAt: right.message.createdAt,
+            id: right.message.id,
+          },
+        ),
+      )
+
+      if (!isValidCursor(discussionCursor)) {
+        // First successful access: seed silently at the
+        // newest buyer communication. Historical issues
+        // never email; only newer chat may notify.
+        const newest = newestPosition(
+          discussionCandidates.map((candidate) => ({
+            createdAt:
+              candidate.message.createdAt,
+            id: candidate.message.id,
+          })),
+        )
+
+        if (newest) {
+          await kv.set(
+            NOTIFY_KV_KEYS.discussionCursor,
+            cursorForPosition(newest, nowMs),
+          )
+          notifyLog(
+            'notify discussion cursor seeded',
+            {
+              eventId: newest.id,
+              eventsSeen:
+                discussionCandidates.length,
+            },
+          )
+        }
+
+        return {
+          httpStatus: 200,
+          result: {
+            action: 'SEEDED',
+            channel: 'DISCUSSION',
+          },
+        }
+      }
+
+      for (const candidate of discussionCandidates) {
+        if (
+          (await kv.get(
+            NOTIFY_KV_KEYS.sentDiscussion(
+              candidate.message.id,
+            ),
+          )) !== null
+        ) {
+          continue
+        }
+
+        const built =
+          await buildDiscussionEmailForMessage(
+            config,
+            candidate.issue,
+            candidate.message,
+            candidate.isFirstMessage,
+          )
+
+        if (!('email' in built)) {
+          continue
+        }
+
+        const deliveryId = discussionDeliveryId(
+          candidate.message.id,
+        )
+        await kv.set(
+          NOTIFY_KV_KEYS.pending,
+          {
+            deliveryId,
+            channel: 'discussion',
+            eventId: candidate.message.id,
+            eventType: 'DISCUSSION',
+            orderId: candidate.issue.orderId,
+            threadId: candidate.issue.id,
+            offerId: candidate.issue.offerId,
+            messageId: candidate.message.id,
+            cursorBefore: discussionCursor.lastId,
+            createdAt: new Date(
+              nowMs,
+            ).toISOString(),
+            positionCreatedAt:
+              candidate.message.createdAt,
+            issueStatus: candidate.issue.status,
+          } satisfies BridgePending,
+          { ttlMs: PENDING_TTL_MS },
+        )
+
+        return {
+          httpStatus: 200,
+          result: {
+            action: 'EMAIL',
+            deliveryId,
+            email: built.email,
+          },
+        }
+      }
+    }
+  } catch (error) {
+    notifyWarn('notify discussion stage failed', {})
   }
 
   return {
@@ -4779,7 +5617,9 @@ export async function handleNotifyAck(
       ? orderDeliveryId(parsed.eventId)
       : parsed.channel === 'message'
         ? messageDeliveryId(parsed.eventId)
-        : returnDeliveryId(parsed.eventId)
+        : parsed.channel === 'discussion'
+          ? discussionDeliveryId(parsed.eventId)
+          : returnDeliveryId(parsed.eventId)
   const pending =
     await kv.get<BridgePending>(NOTIFY_KV_KEYS.pending)
 
@@ -4793,7 +5633,11 @@ export async function handleNotifyAck(
         ? NOTIFY_KV_KEYS.sentOrder(pending.eventId)
         : pending.channel === 'message'
           ? NOTIFY_KV_KEYS.sentMessage(pending.eventId)
-          : NOTIFY_KV_KEYS.sentReturn(pending.eventId)
+          : pending.channel === 'discussion'
+            ? NOTIFY_KV_KEYS.sentDiscussion(
+                pending.eventId,
+              )
+            : NOTIFY_KV_KEYS.sentReturn(pending.eventId)
 
     await kv.set(
       markerKey,
@@ -4806,7 +5650,9 @@ export async function handleNotifyAck(
               : 'cancellation'
             : pending.channel === 'message'
               ? 'message'
-              : 'return',
+              : pending.channel === 'discussion'
+                ? 'discussion'
+                : 'return',
       } satisfies StoredDelivery,
       { ttlMs: DEDUPE_TTL_MS },
     )
@@ -4815,12 +5661,17 @@ export async function handleNotifyAck(
     // value observed at pull time. If an operator
     // reseeded forward in between, the cursor stays
     // forward (never moved backward into history).
+    // Message/discussion heads advance chronologically
+    // (v2 position); order/return heads stay id-based
+    // journal continuations.
     const cursorKey =
       pending.channel === 'order'
         ? NOTIFY_KV_KEYS.orderCursor
         : pending.channel === 'message'
           ? NOTIFY_KV_KEYS.messageCursor
-          : NOTIFY_KV_KEYS.returnCursor
+          : pending.channel === 'discussion'
+            ? NOTIFY_KV_KEYS.discussionCursor
+            : NOTIFY_KV_KEYS.returnCursor
     const current =
       await kv.get<StoredCursor>(cursorKey)
 
@@ -4829,10 +5680,26 @@ export async function handleNotifyAck(
       (current !== null &&
         current.lastId === pending.cursorBefore)
     ) {
-      await kv.set(cursorKey, {
-        lastId: pending.eventId,
-        updatedAt: new Date(nowMs).toISOString(),
-      } satisfies StoredCursor)
+      await kv.set(
+        cursorKey,
+        pending.positionCreatedAt !== null &&
+          (pending.channel === 'message' ||
+            pending.channel === 'discussion')
+          ? cursorForPosition(
+              {
+                createdAt:
+                  pending.positionCreatedAt,
+                id: pending.eventId,
+              },
+              nowMs,
+            )
+          : {
+              lastId: pending.eventId,
+              updatedAt: new Date(
+                nowMs,
+              ).toISOString(),
+            } satisfies StoredCursor,
+      )
     }
 
     await kv.delete(NOTIFY_KV_KEYS.pending)
@@ -4851,7 +5718,11 @@ export async function handleNotifyAck(
       ? NOTIFY_KV_KEYS.sentOrder(parsed.eventId)
       : parsed.channel === 'message'
         ? NOTIFY_KV_KEYS.sentMessage(parsed.eventId)
-        : NOTIFY_KV_KEYS.sentReturn(parsed.eventId)
+        : parsed.channel === 'discussion'
+          ? NOTIFY_KV_KEYS.sentDiscussion(
+              parsed.eventId,
+            )
+          : NOTIFY_KV_KEYS.sentReturn(parsed.eventId)
 
   if ((await kv.get(markerKey)) !== null) {
     return {
@@ -5242,6 +6113,7 @@ export async function replayLatestReturn(
       messageId: null,
       cursorBefore: cursor?.lastId ?? null,
       createdAt: new Date(nowMs).toISOString(),
+      positionCreatedAt: null,
     } satisfies BridgePending,
     { ttlMs: PENDING_TTL_MS },
   )
@@ -5279,6 +6151,18 @@ export type NotifyDiagnosticsEvent = {
   occurredAt: string | null
 }
 
+export type NotifyChannelDiagnostics = {
+  enabled: boolean
+  cursorPresent: boolean
+  cursorUpdatedAt: string | null
+  cursorPositionCreatedAt: string | null
+  pending: {
+    ageMs: number | null
+    expiresInMs: number | null
+    expired: boolean
+  } | null
+}
+
 export type NotifyDiagnostics = {
   enabled: boolean
   orderCursor: string | null
@@ -5295,6 +6179,18 @@ export type NotifyDiagnostics = {
   } | null
   eventsAfterCursor: NotifyDiagnosticsEvent[]
   lastProcessedOrderEvents: NotifyDiagnosticsEvent[]
+  /* Per-channel health (additive; legacy fields above are
+   * preserved byte-for-byte). cursorUpdatedAt is the
+   * last successful progression; pending carries only
+   * age/expiry, never PII. issueScopeRequested reports
+   * the static bootstrap scope, not the live grant. */
+  channels: {
+    order: NotifyChannelDiagnostics
+    message: NotifyChannelDiagnostics
+    discussion: NotifyChannelDiagnostics
+    return: NotifyChannelDiagnostics
+  }
+  issueScopeRequested: boolean
 }
 
 /* /order/event-stats shape is parsed defensively: only a
@@ -5383,8 +6279,52 @@ export async function getNotifyDiagnostics(
   const messageCursor = await kv.get<StoredCursor>(
     NOTIFY_KV_KEYS.messageCursor,
   )
+  const returnCursor = await kv.get<StoredCursor>(
+    NOTIFY_KV_KEYS.returnCursor,
+  )
+  const discussionCursor = await kv.get<StoredCursor>(
+    NOTIFY_KV_KEYS.discussionCursor,
+  )
   const pending =
     await kv.get<BridgePending>(NOTIFY_KV_KEYS.pending)
+
+  const channelDiagnostics = (
+    channel: BridgePending['channel'],
+    channelEnabled: boolean,
+    cursor: StoredCursor | null,
+  ): NotifyChannelDiagnostics => {
+    const claim =
+      pending && pending.channel === channel
+        ? pending
+        : null
+    const createdMs = claim
+      ? Date.parse(claim.createdAt)
+      : NaN
+    const ageMs =
+      claim && !Number.isNaN(createdMs)
+        ? nowMs - createdMs
+        : null
+
+    return {
+      enabled: channelEnabled && config.enabled,
+      cursorPresent: isValidCursor(cursor),
+      cursorUpdatedAt: cursor?.updatedAt ?? null,
+      cursorPositionCreatedAt:
+        cursor?.lastCreatedAt ?? null,
+      pending: claim
+        ? {
+            ageMs: ageMs,
+            expiresInMs:
+              ageMs === null
+                ? null
+                : PENDING_TTL_MS - ageMs,
+            expired:
+              ageMs !== null &&
+              PENDING_TTL_MS - ageMs <= 0,
+          }
+        : null,
+    }
+  }
 
   const statsFetched = await fetchJson(
     `${config.apiUrl}/order/event-stats`,
@@ -5530,6 +6470,32 @@ export async function getNotifyDiagnostics(
       ),
       eventsAfterCursor,
       lastProcessedOrderEvents,
+      channels: {
+        order: channelDiagnostics(
+          'order',
+          config.orderEmail !== null,
+          orderCursor,
+        ),
+        message: channelDiagnostics(
+          'message',
+          config.messageEmail !== null,
+          messageCursor,
+        ),
+        discussion: channelDiagnostics(
+          'discussion',
+          true,
+          discussionCursor,
+        ),
+        return: channelDiagnostics(
+          'return',
+          config.returnEmail !== null,
+          returnCursor,
+        ),
+      },
+      issueScopeRequested:
+        ALLEGRO_NOTIFY_SCOPES.includes(
+          'allegro:api:sale:disputes',
+        ),
     },
   }
 }
@@ -6171,7 +7137,14 @@ async function processBuyerMessages(
     for (const message of messagesFetched.messages) {
       if (
         isNotifiableMessage(message) &&
-        (!cursor || message.id > cursor.lastId)
+        (!cursor ||
+          isPositionNewerThanCursor(
+            {
+              createdAt: message.createdAt,
+              id: message.id,
+            },
+            cursor,
+          ))
       ) {
         candidates.push(message)
       }
@@ -6179,7 +7152,10 @@ async function processBuyerMessages(
   }
 
   candidates.sort((left, right) =>
-    left.id < right.id ? -1 : 1,
+    compareChronoPositions(
+      { createdAt: left.createdAt, id: left.id },
+      { createdAt: right.createdAt, id: right.id },
+    ),
   )
   summary.messagesSeen += candidates.length
 
@@ -6188,10 +7164,16 @@ async function processBuyerMessages(
     // the bridge does not resend historic threads.
     const newest = candidates[candidates.length - 1]!
 
-    await kv.set(NOTIFY_KV_KEYS.messageCursor, {
-      lastId: newest.id,
-      updatedAt: new Date(nowMs).toISOString(),
-    } satisfies StoredCursor)
+    await kv.set(
+      NOTIFY_KV_KEYS.messageCursor,
+      cursorForPosition(
+        {
+          createdAt: newest.createdAt,
+          id: newest.id,
+        },
+        nowMs,
+      ),
+    )
     notifyLog('notify message cursor seeded', {
       eventId: newest.id,
       eventsSeen: candidates.length,
@@ -6201,8 +7183,13 @@ async function processBuyerMessages(
   }
 
   let stopped = false
-  let contiguousDeliveredThrough: string | null =
-    cursor?.lastId ?? null
+  let contiguousDeliveredThrough: ChronoPosition | null =
+    cursor
+      ? {
+          createdAt: cursor.lastCreatedAt ?? null,
+          id: cursor.lastId,
+        }
+      : null
 
   for (const message of candidates) {
     if (!config.messageEmail) {
@@ -6260,17 +7247,23 @@ async function processBuyerMessages(
     }
 
     if (!stopped) {
-      contiguousDeliveredThrough = message.id
+      contiguousDeliveredThrough = {
+        createdAt: message.createdAt,
+        id: message.id,
+      }
     }
   }
 
   if (
     contiguousDeliveredThrough !== null &&
-    contiguousDeliveredThrough !== cursor?.lastId
+    contiguousDeliveredThrough.id !== cursor?.lastId
   ) {
-    await kv.set(NOTIFY_KV_KEYS.messageCursor, {
-      lastId: contiguousDeliveredThrough,
-      updatedAt: new Date(nowMs).toISOString(),
-    } satisfies StoredCursor)
+    await kv.set(
+      NOTIFY_KV_KEYS.messageCursor,
+      cursorForPosition(
+        contiguousDeliveredThrough,
+        nowMs,
+      ),
+    )
   }
 }

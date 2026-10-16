@@ -126,9 +126,13 @@ async function seedCursors(kv: NotifyKv) {
     lastId: 'ev-0',
     updatedAt: new Date(NOW_MS).toISOString(),
   })
+  // Chronological (v2) cursor positioned before every
+  // fixture instant so seeded runs observe them.
   await kv.set(NOTIFY_KV_KEYS.messageCursor, {
     lastId: 'm-0',
     updatedAt: new Date(NOW_MS).toISOString(),
+    lastCreatedAt: '2026-09-19T07:00:00.000Z',
+    v: 2,
   })
 }
 
@@ -404,6 +408,7 @@ void describe('email building', () => {
       'allegro:api:orders:read',
       'allegro:api:messaging',
       'allegro:api:profile:read',
+      'allegro:api:sale:disputes',
     ])
   })
 })
@@ -613,7 +618,7 @@ void describe('notification OAuth isolation', () => {
     )
     assert.equal(
       new URL(url).searchParams.get('scope'),
-      'allegro:api:orders:read allegro:api:messaging allegro:api:profile:read',
+      'allegro:api:orders:read allegro:api:messaging allegro:api:profile:read allegro:api:sale:disputes',
     )
   })
 
@@ -1721,8 +1726,9 @@ void describe('notification email enrichment', () => {
 void describe('notification messaging pagination', () => {
   /* public.v1 allows limit 1..20 on both messaging
    * endpoints; larger limits are rejected with 422. IDs
-   * are zero-padded because the cursor comparison is a
-   * plain string comparison. */
+   * are zero-padded for determinism, but chronology
+   * comes from createdAt (see isPositionNewerThanCursor):
+   * lexical ID order never decides newness. */
   type PageMessage = {
     id: string
     orderId?: string
@@ -1764,6 +1770,8 @@ void describe('notification messaging pagination', () => {
       await kv.set(NOTIFY_KV_KEYS.messageCursor, {
         lastId: options.seedMessageCursor,
         updatedAt: new Date(NOW_MS).toISOString(),
+        lastCreatedAt: '2026-09-19T07:00:00.000Z',
+        v: 2,
       })
     }
 
@@ -2004,6 +2012,8 @@ void describe('notification messaging pagination', () => {
       {
         lastId: 'm-02',
         updatedAt: new Date(NOW_MS).toISOString(),
+        lastCreatedAt: '2026-09-19T07:11:00.000Z',
+        v: 2,
       },
     )
     assert.equal(
@@ -2064,6 +2074,8 @@ void describe('notification messaging pagination', () => {
       {
         lastId: 'm-0',
         updatedAt: new Date(NOW_MS).toISOString(),
+        lastCreatedAt: '2026-09-19T07:00:00.000Z',
+        v: 2,
       },
     )
   })
@@ -2087,6 +2099,12 @@ void describe('notification messaging pagination', () => {
     await kv.set(NOTIFY_KV_KEYS.messageCursor, {
       lastId: 'm-02',
       updatedAt: new Date(NOW_MS).toISOString(),
+      lastCreatedAt: '2026-09-19T07:11:00.000Z',
+      v: 2,
+    })
+    await kv.set(NOTIFY_KV_KEYS.sentMessage('m-01'), {
+      deliveredAt: new Date(NOW_MS).toISOString(),
+      channel: 'message',
     })
     const requests: string[] = []
     const second = await runAllegroNotifyTick({
