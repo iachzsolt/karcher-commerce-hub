@@ -1796,6 +1796,31 @@ allegroAuth.get(
     const state = context.req.query('state')
 
     if (!code || !state) {
+      // Allegro redirects with OAuth error parameters
+      // when the user denies consent or authorization
+      // fails. Surface them (bounded, never secrets)
+      // instead of only the generic missing-code message.
+      const allegroError = context
+        .req.query('error')
+        ?.slice(0, 200)
+      const allegroErrorDescription = context
+        .req.query('error_description')
+        ?.slice(0, 500)
+
+      if (allegroError) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              `Allegro authorization failed: ${allegroError}.`,
+            error: allegroError,
+            errorDescription:
+              allegroErrorDescription ?? null,
+          },
+          400,
+        )
+      }
+
       return context.json(
         {
           status: 'error',

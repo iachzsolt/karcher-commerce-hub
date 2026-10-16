@@ -30,12 +30,9 @@ export const ALLEGRO_NOTIFY_SCOPES = [
   'allegro:api:messaging',
   'allegro:api:profile:read',
   // Disputes/issues scope for the DISCUSSION channel
-  // (GET /sale/issues + chat). This is the scope Allegro
-  // documents for the disputes/issues resources; confirm
-  // the exact string on the consent screen during the
-  // one-time re-bootstrap. A missing grant surfaces as
-  // ISSUE_SCOPE_MISSING at runtime, never as a crash.
-  'allegro:api:sale:disputes',
+  // (GET /sale/issues + chat). A missing grant surfaces
+  // as ISSUE_SCOPE_MISSING at runtime, never as a crash.
+  'allegro:api:disputes',
 ] as const
 
 const PUBLIC_V1_ACCEPT =
@@ -6494,7 +6491,7 @@ export async function getNotifyDiagnostics(
       },
       issueScopeRequested:
         ALLEGRO_NOTIFY_SCOPES.includes(
-          'allegro:api:sale:disputes',
+          'allegro:api:disputes',
         ),
     },
   }

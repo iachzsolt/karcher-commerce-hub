@@ -408,7 +408,7 @@ void describe('email building', () => {
       'allegro:api:orders:read',
       'allegro:api:messaging',
       'allegro:api:profile:read',
-      'allegro:api:sale:disputes',
+      'allegro:api:disputes',
     ])
   })
 })
@@ -618,7 +618,7 @@ void describe('notification OAuth isolation', () => {
     )
     assert.equal(
       new URL(url).searchParams.get('scope'),
-      'allegro:api:orders:read allegro:api:messaging allegro:api:profile:read allegro:api:sale:disputes',
+      'allegro:api:orders:read allegro:api:messaging allegro:api:profile:read allegro:api:disputes',
     )
   })
 

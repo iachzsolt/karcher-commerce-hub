@@ -29,7 +29,7 @@ The notification session uses its own OAuth client scope set:
 - `allegro:api:orders:read`
 - `allegro:api:messaging`
 - `allegro:api:profile:read`
-- `allegro:api:sale:disputes` (DISCUSSION channel:
+- `allegro:api:disputes` (DISCUSSION channel:
   disputes/claims via `GET /sale/issues` + chat; confirm
   this exact scope string on the Allegro consent screen
   during bootstrap — a missing grant surfaces at runtime

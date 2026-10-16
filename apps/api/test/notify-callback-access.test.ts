@@ -374,6 +374,48 @@ void describe('notification callback API access', () => {
     })
   })
 
+  void it('surfaces Allegro OAuth error parameters safely', async () => {
+    const realFetch = globalThis.fetch
+    globalThis.fetch = (async () => {
+      throw new Error(
+        'token endpoint must not be called',
+      )
+    }) as typeof fetch
+
+    try {
+      const response = await allegroAuth.request(
+        '/notify-callback?error=access_denied&error_description=The+user+denied+access',
+      )
+
+      assert.equal(response.status, 400)
+      assert.deepEqual(await response.json(), {
+        status: 'error',
+        message:
+          'Allegro authorization failed: access_denied.',
+        error: 'access_denied',
+        errorDescription: 'The user denied access',
+      })
+    } finally {
+      globalThis.fetch = realFetch
+    }
+  })
+
+  void it('bounds reflected OAuth error parameters', async () => {
+    const longError = `e${'x'.repeat(500)}`
+    const response = await allegroAuth.request(
+      `/notify-callback?error=${longError}&error_description=${'y'.repeat(600)}`,
+    )
+
+    assert.equal(response.status, 400)
+    const body = (await response.json()) as {
+      error: string
+      errorDescription: string
+    }
+    assert.equal(body.error.length, 200)
+    assert.equal(body.errorDescription.length, 500)
+    assert.ok(!JSON.stringify(body).includes('secret'))
+  })
+
   void it('fails a callback with unknown state safely without calling Allegro', async () => {
     const snapshot = snapshotEnv(NOTIFY_ENV_KEYS)
     const tokenKey = Buffer.from(
