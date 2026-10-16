@@ -9,6 +9,11 @@ import {
   type ListingStory,
   type StoryEventInput,
 } from '../utils/inventoryRefreshStories'
+import {
+  HISTORY_BACKGROUND_REFRESH_MS,
+  shouldHistoryBackgroundTick,
+  shouldRefreshOnVisible,
+} from '../utils/polling'
 const DAY_MS = 24 * 60 * 60 * 1000
 
 type AllegroHistoryEvent = {
@@ -1611,8 +1616,11 @@ function AllegroHistoryPage() {
   /*
    * Lightweight auto-refresh: while the loaded result
    * still contains a processing/pending row, silently
-   * refetch about every 30 seconds so completions appear
-   * without manual Retry/date switching. Stops by itself
+   * refetch about every 60 seconds so completions appear
+   * without manual Retry/date switching — but only while
+   * the tab is visible. Hidden tabs skip ticks without
+   * enqueueing missed refreshes; becoming visible again
+   * triggers one immediate refresh. Stops by itself
    * once nothing is pending; a focus regain triggers one
    * immediate background refresh under the same condition.
    * The in-flight guard inside loadHistory prevents
@@ -1647,11 +1655,27 @@ function AllegroHistoryPage() {
         return
       }
 
-      void loadHistory({ silent: true })
-      timeoutId = window.setTimeout(tick, 30000)
+      if (
+        shouldHistoryBackgroundTick({
+          hasProcessingRows,
+          disposed,
+          visibilityState:
+            document.visibilityState,
+        })
+      ) {
+        void loadHistory({ silent: true })
+      }
+
+      timeoutId = window.setTimeout(
+        tick,
+        HISTORY_BACKGROUND_REFRESH_MS,
+      )
     }
 
-    timeoutId = window.setTimeout(tick, 30000)
+    timeoutId = window.setTimeout(
+      tick,
+      HISTORY_BACKGROUND_REFRESH_MS,
+    )
 
     const onFocus = () => {
       if (!disposed) {
@@ -1659,7 +1683,23 @@ function AllegroHistoryPage() {
       }
     }
 
+    const onVisible = () => {
+      if (
+        shouldRefreshOnVisible({
+          disposed,
+          visibilityState:
+            document.visibilityState,
+        })
+      ) {
+        void loadHistory({ silent: true })
+      }
+    }
+
     window.addEventListener('focus', onFocus)
+    document.addEventListener(
+      'visibilitychange',
+      onVisible,
+    )
 
     return () => {
       disposed = true
@@ -1671,6 +1711,10 @@ function AllegroHistoryPage() {
       window.removeEventListener(
         'focus',
         onFocus,
+      )
+      document.removeEventListener(
+        'visibilitychange',
+        onVisible,
       )
     }
   }, [hasProcessingRows, loadHistory])

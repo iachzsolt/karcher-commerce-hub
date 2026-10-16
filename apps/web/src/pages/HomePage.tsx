@@ -7,6 +7,7 @@ import {
 import '../CommerceHub.css'
 import { API_BASE_URL } from '../config/api'
 import { needsInactivePublicationVerification } from '../utils/publicationFreshness'
+import { shouldRunHomeBackgroundFreshness } from '../utils/polling'
 import { convergeAllegroListings, effectiveAllegroStock, evaluateAllegroMismatch, type ListingPricePolicy, type ListingStockPolicy } from '../utils/allegroMismatch'
 import { buildBulkFinishMessage, formatBulkProgress, isBackgroundRefreshAllowed, type BulkProgress } from '../utils/bulkSyncOperation'
 
@@ -2818,9 +2819,14 @@ Elmented ezeket a Commerce Hubba?`,
 
   // Foreground-only freshness for existing mismatches: at most five stale
   // offers/minute, each attempted at most once per five minutes. No full scan.
+  // Hidden tabs skip the cycle without deferring runs; visibility restore
+  // resumes the normal cadence on the next tick. Manual actions bypass this.
   useEffect(() => {
     const timer = window.setInterval(() => {
-      if (document.visibilityState !== 'visible' || remoteRefreshInFlight.current) return
+      if (!shouldRunHomeBackgroundFreshness({
+        visibilityState: document.visibilityState,
+        refreshInFlight: remoteRefreshInFlight.current,
+      })) return
       const now = Date.now()
       const ids = allegroListings.filter(listing =>
         (hasListingDifference(listing) || (listing.stockAutoPaused && ['ACTIVE', 'ACTIVATING'].includes(listing.publicationStatus)) || needsInactivePublicationVerification(listing, now)) &&
