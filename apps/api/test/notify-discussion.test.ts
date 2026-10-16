@@ -1588,6 +1588,103 @@ void describe('discussion email template', () => {
     assert.match(email.htmlBody, /Hol a csomagom\?/)
   })
 
+  void it('renders DISPUTE kind as Vita', () => {
+    const email = buildDiscussionEmail(
+      'info.hu@karcher.com',
+      {
+        id: 'issue-k1',
+        kind: 'DISPUTE',
+        status: 'OPEN',
+        createdAt: '2026-09-19T06:00:00.000Z',
+        orderId: 'ord-k1',
+        offerId: null,
+        subject: null,
+      },
+      {
+        id: 'chat-k1',
+        issueId: 'issue-k1',
+        createdAt: '2026-09-19T07:30:00.000Z',
+        authorRole: 'BUYER',
+        authorLogin: 'buyer42',
+        text: 'Szöveg',
+        attachmentNames: [],
+      },
+      true,
+    )
+    assert.match(email.textBody, /Típus: Új vita/)
+    assert.match(email.textBody, /Ügy típusa: Vita/)
+    assert.match(email.htmlBody, /Ügy típusa/)
+    assert.match(email.htmlBody, />Vita</)
+    assert.equal(
+      email.subject,
+      '[ALLEGRO] VITA – ord-k1',
+    )
+  })
+
+  void it('renders CLAIM kind as Reklamáció', () => {
+    const email = buildDiscussionEmail(
+      'info.hu@karcher.com',
+      {
+        id: 'issue-k2',
+        kind: 'CLAIM',
+        status: 'OPEN',
+        createdAt: '2026-09-19T06:00:00.000Z',
+        orderId: null,
+        offerId: null,
+        subject: null,
+      },
+      {
+        id: 'chat-k2',
+        issueId: 'issue-k2',
+        createdAt: '2026-09-19T07:30:00.000Z',
+        authorRole: 'BUYER',
+        authorLogin: 'buyer42',
+        text: 'Szöveg',
+        attachmentNames: [],
+      },
+      false,
+    )
+    assert.match(email.textBody, /Típus: Új vevői üzenet/)
+    assert.match(email.textBody, /Ügy típusa: Reklamáció/)
+    assert.match(email.htmlBody, /Reklamáció/)
+    assert.equal(
+      email.subject,
+      '[ALLEGRO] VITA – issue-k2',
+    )
+  })
+
+  void it('falls back to generic wording for unknown kind', () => {
+    for (const kind of [null, 'WEIRD']) {
+      const email = buildDiscussionEmail(
+        'info.hu@karcher.com',
+        {
+          id: 'issue-k3',
+          kind,
+          status: 'OPEN',
+          createdAt: null,
+          orderId: null,
+          offerId: null,
+          subject: null,
+        },
+        {
+          id: 'chat-k3',
+          issueId: 'issue-k3',
+          createdAt: null,
+          authorRole: 'BUYER',
+          authorLogin: null,
+          text: 'Szöveg',
+          attachmentNames: [],
+        },
+        true,
+      )
+      assert.match(
+        email.textBody,
+        /Ügy típusa: Vita \/ reklamáció/,
+      )
+      assert.match(email.htmlBody, /Vita \/ reklamáció/)
+    }
+  })
+
   void it('falls back to the issue id without an order', () => {
     const email = buildDiscussionEmail(
       'info.hu@karcher.com',

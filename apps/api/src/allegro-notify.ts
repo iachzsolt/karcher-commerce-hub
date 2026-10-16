@@ -4810,6 +4810,30 @@ export type NotifyDiscussionCandidate = {
   isFirstMessage: boolean
 }
 
+/* Rendered issue-kind label for DISCUSSION emails.
+ * DISPUTE -> "Vita", CLAIM -> "Reklamáció", anything
+ * else (missing/unknown) -> the generic wording used
+ * before. Rendering-only: classification, cursor, and
+ * notification-type logic are untouched. */
+function discussionKindLabel(
+  kind: string | null,
+): string {
+  const normalized =
+    typeof kind === 'string'
+      ? kind.toUpperCase()
+      : null
+
+  if (normalized === 'DISPUTE') {
+    return 'Vita'
+  }
+
+  if (normalized === 'CLAIM') {
+    return 'Reklamáció'
+  }
+
+  return 'Vita / reklamáció'
+}
+
 export function buildDiscussionEmail(
   to: string,
   issue: NotifyIssue,
@@ -4831,6 +4855,10 @@ export function buildDiscussionEmail(
         isFirstMessage
           ? 'Új vita'
           : 'Új vevői üzenet',
+      ),
+      ...rowsIf(
+        'Ügy típusa',
+        discussionKindLabel(issue.kind),
       ),
       ...rowsIf('Vita', issue.id),
       ...rowsIf('Rendelés', issue.orderId),
