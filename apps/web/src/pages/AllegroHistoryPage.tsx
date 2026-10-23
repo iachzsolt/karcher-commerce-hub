@@ -9,11 +9,7 @@ import {
   type ListingStory,
   type StoryEventInput,
 } from '../utils/inventoryRefreshStories'
-import {
-  HISTORY_BACKGROUND_REFRESH_MS,
-  shouldHistoryBackgroundTick,
-  shouldRefreshOnVisible,
-} from '../utils/polling'
+import { hasFastPollEligibleHistoryWork, startHistoryPolling } from '../utils/historyPolling'
 import {
   hasActiveHistoryRows,
   mergeHistoryEvents,
@@ -1738,17 +1734,16 @@ function AllegroHistoryPage() {
 
   /*
    * Lightweight auto-refresh: while the loaded result
-   * still contains a processing/pending row, silently
+   * still contains recent unresolved work, silently
    * fetch only active/recently changed rows about every
    * 60 seconds (?since=) and merge them into the loaded
    * state, so completions appear without manual
    * Retry/date switching — but only while the tab is
    * visible. Hidden tabs skip ticks without enqueueing
    * missed refreshes; becoming visible again triggers
-   * one immediate small refresh. Stops by itself once
-   * nothing is pending; a focus regain triggers one
-   * immediate background refresh under the same
-   * condition. Unreconciliable answers fall back to one
+   * one immediate small refresh even for stale unresolved work.
+   * Stale records remain displayed but no longer maintain a timer.
+   * Unreconciliable answers fall back to one
    * silent full reload. The in-flight guard prevents
    * overlapping requests; timers/listeners are cleared
    * on unmount and the date range is never touched.
@@ -1764,77 +1759,20 @@ function AllegroHistoryPage() {
       return
     }
 
-    let disposed = false
-    let timeoutId: number | null = null
-
-    const tick = () => {
-      if (disposed) {
-        return
-      }
-
-      if (
-        shouldHistoryBackgroundTick({
-          hasProcessingRows,
-          disposed,
-          visibilityState:
-            document.visibilityState,
-        })
-      ) {
-        void loadActiveUpdates()
-      }
-
-      timeoutId = window.setTimeout(
-        tick,
-        HISTORY_BACKGROUND_REFRESH_MS,
-      )
-    }
-
-    timeoutId = window.setTimeout(
-      tick,
-      HISTORY_BACKGROUND_REFRESH_MS,
-    )
-
-    const onFocus = () => {
-      if (shouldRefreshOnVisible({ disposed, visibilityState: document.visibilityState })) {
-        void loadActiveUpdates()
-      }
-    }
-
-    const onVisible = () => {
-      if (
-        shouldRefreshOnVisible({
-          disposed,
-          visibilityState:
-            document.visibilityState,
-        })
-      ) {
-        void loadActiveUpdates()
-      }
-    }
-
-    window.addEventListener('focus', onFocus)
-    document.addEventListener(
-      'visibilitychange',
-      onVisible,
-    )
-
-    return () => {
-      disposed = true
-
-      if (timeoutId !== null) {
-        window.clearTimeout(timeoutId)
-      }
-
-      window.removeEventListener(
-        'focus',
-        onFocus,
-      )
-      document.removeEventListener(
-        'visibilitychange',
-        onVisible,
-      )
-    }
-  }, [hasProcessingRows, loadActiveUpdates])
+    return startHistoryPolling({
+      eligible: () => hasFastPollEligibleHistoryWork({
+        events, catalogRuns: catalogSyncRuns, inventoryRuns: inventoryRefreshRuns,
+      }),
+      refresh: loadActiveUpdates,
+      visibility: () => document.visibilityState,
+      subscribe: listener => {
+        document.addEventListener('visibilitychange', listener)
+        return () => document.removeEventListener('visibilitychange', listener)
+      },
+      schedule: (callback, delay) => window.setTimeout(callback, delay),
+      cancel: timer => window.clearTimeout(timer),
+    })
+  }, [hasProcessingRows, loadActiveUpdates, events, catalogSyncRuns, inventoryRefreshRuns])
 
   const dayGroups = useMemo(() => {
     const groups = new Map<
@@ -1960,6 +1898,10 @@ function AllegroHistoryPage() {
         <div className="allegro-history-summary">
           <strong>{loading ? 'Betöltés…' : `${historyEntryCount} bejegyzés`}</strong>
           <span>{from} – {to}</span>
+          <button type="button" className="secondary-button" disabled={loading || Boolean(validationError)}
+            onClick={() => void loadHistory()}>
+            Frissítés
+          </button>
         </div>
 
         {!loading && !error && dayGroups.length === 0 && (
