@@ -1795,7 +1795,7 @@ function AllegroHistoryPage() {
     )
 
     const onFocus = () => {
-      if (!disposed) {
+      if (shouldRefreshOnVisible({ disposed, visibilityState: document.visibilityState })) {
         void loadActiveUpdates()
       }
     }

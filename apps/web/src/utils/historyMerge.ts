@@ -51,31 +51,79 @@ export function mergeRowsByIdDesc<
 }
 
 /* Polling liveness: background ticks continue only
- * while one of these holds. Completed rows never match,
- * so a fully merged terminal state stops the loop by
- * itself. */
+ * while one of these holds. A historical SYNC event with
+ * newValue PENDING/REACTIVATION_IN_PROGRESS does NOT keep
+ * polling alive on its own: completion is stored as a
+ * separate (later) event, so only the latest state in the
+ * same listing/operation scope matters. Completed rows never match, so a
+ * fully merged terminal state stops the loop by itself. */
 export function hasActiveHistoryRows(input: {
   events: Array<{
+    id: string
+    listingId: string
     eventType: string
     newValue: string | null
+    occurredAt: string
+    source?: string
+    metadataJson?: string | null
   }>
   catalogRuns: Array<{ status: string }>
   inventoryRuns: Array<{ status: string }>
 }): boolean {
-  return (
-    input.events.some(
-      (event) =>
-        event.eventType === 'SYNC' &&
-        (event.newValue === 'PENDING' ||
-          event.newValue ===
-            'REACTIVATION_IN_PROGRESS'),
-    ) ||
-    input.catalogRuns.some(
-      (run) => run.status === 'RUNNING',
-    ) ||
-    input.inventoryRuns.some(
-      (run) => run.status === 'RUNNING',
-    )
+  // Inventory/catalog wrapper runs still running → active work
+  if (
+    input.catalogRuns.some((run) => run.status === 'RUNNING') ||
+    input.inventoryRuns.some((run) => run.status === 'RUNNING')
+  ) {
+    return true
+  }
+
+  // Match the existing newest-listing-state rule for inventory SYNC history.
+  // historyGroupId is a display batch, not a durable command identity:
+  // reconciliation confirmations deliberately omit it. Explicit commands,
+  // when present, remain isolated from unrelated commands.
+  const latestByListing = new Map<
+    string,
+    { pending: boolean; at: number }
+  >()
+
+  const confirmedPositions = new Set<string>()
+  for (const event of input.events) {
+    if (event.eventType !== 'SYNC' || event.newValue !== 'SUCCESS') continue
+    try {
+      const meta = JSON.parse(event.metadataJson ?? '{}')
+      if (meta?.reconciled === true && typeof meta.supersedesOccurredAt === 'string') {
+        const predecessorAt = Date.parse(meta.supersedesOccurredAt)
+        if (Date.parse(event.occurredAt) > predecessorAt) {
+          confirmedPositions.add(JSON.stringify([event.listingId, event.source ?? '', predecessorAt]))
+        }
+      }
+    } catch { /* No authoritative supersession evidence. */ }
+  }
+
+  for (const event of input.events) {
+    if (event.eventType !== 'SYNC') continue
+    let metadata: { commandId?: unknown } = {}
+    try { metadata = JSON.parse(event.metadataJson ?? '{}') ?? {} } catch { /* Legacy event. */ }
+    const operation = typeof metadata.commandId === 'string' && metadata.commandId
+      ? `command:${metadata.commandId}`
+      : 'listing'
+    const key = JSON.stringify([event.listingId, event.source ?? '', operation])
+    const pending = event.newValue === 'PENDING' || event.newValue === 'REACTIVATION_IN_PROGRESS'
+    const at = Date.parse(event.occurredAt)
+    if (pending && confirmedPositions.has(JSON.stringify([event.listingId, event.source ?? '', at]))) continue
+    // Ambiguous chronology must not silently stop a real operation's polling.
+    if (!Number.isFinite(at)) { if (pending) return true; continue }
+    const existing = latestByListing.get(key)
+    if (!existing || at > existing.at) {
+      latestByListing.set(key, { pending, at })
+    } else if (at === existing.at && pending) {
+      existing.pending = true
+    }
+  }
+
+  return [...latestByListing.values()].some(
+    (entry) => entry.pending,
   )
 }
 

@@ -1,5 +1,6 @@
 import 'dotenv/config'
 import { randomUUID } from 'node:crypto'
+import { createRuntimeInitializer, needsPrimaryAllegroSession } from './runtime-initialization.js'
 import {
   createDatabase,
   allegroChangeEvents,
@@ -122,6 +123,12 @@ app.use(
 )
 
 app.use('*', accessAuthMiddleware)
+app.use('*', async (context, next) => {
+  if (context.req.method !== 'OPTIONS' && needsPrimaryAllegroSession(context.req.path)) {
+    await initializeCommerceHubRuntime()
+  }
+  await next()
+})
 
 app.get('/auth/session', (context) => {
   const user = getCommerceHubUser(context)
@@ -9345,10 +9352,6 @@ async function runAutomaticAllegroCatalogSync(
       false
   }
 }
-let runtimeInitialization:
-  | Promise<void>
-  | null = null
-
 function isAllegroSessionRestoreEnabled() {
   return (
     process.env
@@ -9358,23 +9361,15 @@ function isAllegroSessionRestoreEnabled() {
   )
 }
 
-export function initializeCommerceHubRuntime() {
-  runtimeInitialization ??= (async () => {
-    assertAccessConfiguration()
-    assertArukeresoConfiguration()
-
-    if (!isAllegroSessionRestoreEnabled()) {
-      console.log(
-        'Skipping Allegro session restore: disabled by configuration',
-      )
-      return
-    }
-
-    await restoreAllegroSession()
-  })()
-
-  return runtimeInitialization
+export function validateCommerceHubRuntimeConfiguration() {
+  assertAccessConfiguration()
+  assertArukeresoConfiguration()
 }
+
+export const initializeCommerceHubRuntime = createRuntimeInitializer(
+  validateCommerceHubRuntimeConfiguration,
+  async () => !isAllegroSessionRestoreEnabled() || await restoreAllegroSession(),
+)
 
 export async function runMinuteScheduler() {
   await runWithSchedulerLease(

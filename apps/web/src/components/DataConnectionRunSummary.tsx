@@ -3,6 +3,7 @@ import {
   useState,
 } from 'react'
 import { API_BASE_URL } from '../config/api'
+import { isActiveRun, startActiveRunPolling } from '../utils/activeRunPolling'
 
 type DataConnectionRun = {
   id: string
@@ -132,51 +133,24 @@ function DataConnectionRunSummary({
     useState<DataConnectionRun | null>(
       null,
     )
-
   useEffect(() => {
-    let active = true
-
-    const loadLatestRun =
-      async () => {
-        try {
-          const response = await fetch(
-            `${API_BASE_URL}/data-connections/${connectionId}/runs/latest`,
-          )
-
-          if (!response.ok) {
-            return
-          }
-
-          const result =
-            (await response.json()) as
-              LatestRunResponse
-
-          if (active) {
-            setRun(
-              result.run ?? null,
-            )
-          }
-        } catch {
-          // A futásnapló másodlagos UI-adat.
-          // Hálózati hiba esetén nem törjük el
-          // az időzítés kezelőfelületét.
-        }
-      }
-
-    void loadLatestRun()
-
-    const timer =
-      window.setInterval(
-        () => {
-          void loadLatestRun()
-        },
-        60_000,
-      )
-
-    return () => {
-      active = false
-      window.clearInterval(timer)
-    }
+    return startActiveRunPolling<DataConnectionRun | null>({
+      read: async () => {
+        const response = await fetch(`${API_BASE_URL}/data-connections/${connectionId}/runs/latest`)
+        if (!response.ok) throw new Error('Run summary unavailable')
+        const result = await response.json() as LatestRunResponse
+        return result.run ?? null
+      },
+      publish: setRun,
+      isActive: value => isActiveRun(value?.status),
+      visibility: () => document.visibilityState,
+      subscribe: listener => {
+        document.addEventListener('visibilitychange', listener)
+        return () => document.removeEventListener('visibilitychange', listener)
+      },
+      schedule: (callback, delay) => window.setTimeout(callback, delay),
+      cancel: timer => window.clearTimeout(timer),
+    })
   }, [connectionId])
 
   if (!run) {

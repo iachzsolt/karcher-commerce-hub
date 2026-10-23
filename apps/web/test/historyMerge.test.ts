@@ -16,6 +16,7 @@ import {
 
 type TestEvent = {
   id: string
+  listingId: string
   occurredAt: string
   eventType: string
   newValue: string | null
@@ -29,6 +30,7 @@ type TestRun = {
 
 const OLD_COMPLETED: TestEvent = {
   id: 'ev-old',
+  listingId: 'listing-1',
   occurredAt: '2026-10-01T10:00:00.000Z',
   eventType: 'SYNC',
   newValue: 'SUCCESS',
@@ -198,6 +200,9 @@ void describe('history active-row merge', () => {
       hasActiveHistoryRows({
         events: [
           {
+            id: 'pending',
+            listingId: 'listing-1',
+            occurredAt: '2026-10-16T10:00:00Z',
             eventType: 'SYNC',
             newValue: 'PENDING',
           },

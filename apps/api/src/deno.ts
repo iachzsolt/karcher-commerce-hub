@@ -10,6 +10,7 @@ import {
 import {
   app,
   initializeCommerceHubRuntime,
+  validateCommerceHubRuntimeConfiguration,
   runDailyMaintenance,
   runMinuteScheduler,
   runScheduledArukeresoSourceFeedRefresh,
@@ -204,6 +205,9 @@ async function registerDataConnectionSchedulerCrons() {
   }
 }
 
+// Keep top-level registration awaited: schedules remain database-authoritative.
+// This SELECT still wakes Neon on a cold start; static scheduling requires an
+// explicit, deployment-managed schedule source before it can safely replace it.
 await registerDataConnectionSchedulerCrons()
 
 // Deno Deploy discovers Deno.cron jobs only when they are
@@ -244,6 +248,8 @@ Deno.cron(
 // scheduler + 3 Arukereso source + 1 maintenance).
 setNotifyKvStore(await openDenoNotifyKv())
 
-await initializeCommerceHubRuntime()
+// Fail closed on invalid production configuration without primary-session I/O.
+// Authenticated primary Allegro routes and cron jobs await session initialization.
+validateCommerceHubRuntimeConfiguration()
 
 Deno.serve(app.fetch)
