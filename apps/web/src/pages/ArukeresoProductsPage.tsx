@@ -1,9 +1,11 @@
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
 } from 'react'
 import { API_BASE_URL } from '../config/api'
+import { createOverrideEditCoordinator, type OverrideEdit } from '../utils/overrideEditCoordinator'
 
 type InclusionMode =
   | 'INHERIT'
@@ -182,8 +184,11 @@ function ArukeresoProductsPage() {
   const [message, setMessage] = useState<
     string | null
   >(null)
-  const [savingProductId, setSavingProductId] =
-    useState<string | null>(null)
+  const [overrideEdits, setOverrideEdits] = useState<Record<string, OverrideEdit<InclusionMode>>>({})
+  const editCoordinator = useRef<ReturnType<typeof createOverrideEditCoordinator<InclusionMode>> | null>(null)
+  const loadProductsRef = useRef<() => Promise<boolean>>(async () => false)
+  const latestRead = useRef(0)
+  const invalidatePreviewReads = useCallback(() => { latestRead.current++ }, [])
 
   function updateFilter<K extends keyof ProductFilters>(
     key: K,
@@ -196,6 +201,12 @@ function ArukeresoProductsPage() {
   }
 
   const loadProducts = useCallback(async () => {
+    // The coordinator refreshes the latest page/filter after all writes settle.
+    if (editCoordinator.current?.pending) return false
+    const requestId = ++latestRead.current
+    const readRevision = editCoordinator.current?.revision ?? 0
+    const isCurrent = () => requestId === latestRead.current &&
+      readRevision === (editCoordinator.current?.revision ?? 0) && !editCoordinator.current?.pending
     setLoading(true)
     setError(null)
 
@@ -243,6 +254,8 @@ function ArukeresoProductsPage() {
       const result =
         (await response.json()) as FeedProductsResponse
 
+      if (!isCurrent()) return false
+
       if (!response.ok) {
         throw new Error(
           result.message ??
@@ -253,7 +266,11 @@ function ArukeresoProductsPage() {
       setItems(result.items ?? [])
       setSummary(result.summary ?? {})
       setTotal(result.pagination?.total ?? 0)
+      editCoordinator.current?.acceptPreview(readRevision)
+      setMessage(null)
+      return true
     } catch (loadError) {
+      if (!isCurrent()) return false
       setError(
         loadError instanceof Error
           ? loadError.message
@@ -261,18 +278,46 @@ function ArukeresoProductsPage() {
       )
       setItems([])
       setTotal(0)
+      return false
     } finally {
-      setLoading(false)
+      if (requestId === latestRead.current) setLoading(false)
     }
   }, [appliedFilters, page])
+
+  useEffect(() => { loadProductsRef.current = loadProducts }, [loadProducts])
+
+  useEffect(() => {
+    const coordinator = createOverrideEditCoordinator<InclusionMode>({
+      write: async (productId, inclusionMode) => {
+        const response = await fetch(`${API_BASE_URL}/arukereso/feed/products/${productId}/override`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ inclusionMode }),
+        })
+        const result = await response.json() as { message?: string }
+        if (!response.ok) throw new Error(result.message ?? 'A felülírás mentése sikertelen.')
+      },
+      refresh: () => loadProductsRef.current(),
+      changed: setOverrideEdits,
+      refreshFailed: () => setMessage('A lista frissítése nem sikerült. A mentések állapota lent látható; frissítsd újra a listát.'),
+      schedule: (callback, delay) => window.setTimeout(callback, delay),
+      cancel: timer => window.clearTimeout(timer),
+      now: Date.now,
+    })
+    editCoordinator.current = coordinator
+    return () => {
+      coordinator.dispose()
+      editCoordinator.current = null
+      invalidatePreviewReads()
+    }
+  }, [invalidatePreviewReads])
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
       void loadProducts()
     }, 0)
 
-    return () => window.clearTimeout(timeoutId)
-  }, [loadProducts])
+    return () => { window.clearTimeout(timeoutId); invalidatePreviewReads() }
+  }, [loadProducts, invalidatePreviewReads])
 
   function applyFilters() {
     setAppliedFilters({
@@ -288,50 +333,12 @@ function ArukeresoProductsPage() {
     setPage(0)
   }
 
-  async function changeOverride(
+  function changeOverride(
     productId: string,
     inclusionMode: InclusionMode,
   ) {
-    setSavingProductId(productId)
     setMessage(null)
-
-    try {
-      const response = await fetch(
-        `${API_BASE_URL}/arukereso/feed/products/${productId}/override`,
-        {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ inclusionMode }),
-        },
-      )
-      const result = (await response.json()) as {
-        message?: string
-      }
-
-      if (!response.ok) {
-        throw new Error(
-          result.message ??
-            'A felülírás mentése sikertelen.',
-        )
-      }
-
-      setMessage(
-        inclusionMode === 'INHERIT'
-          ? 'A globális feed-szabály ismét érvényes.'
-          : 'A manuális felülírás mentése sikerült.',
-      )
-      await loadProducts()
-    } catch (saveError) {
-      setMessage(
-        saveError instanceof Error
-          ? saveError.message
-          : 'A felülírás mentése sikertelen.',
-      )
-    } finally {
-      setSavingProductId(null)
-    }
+    void editCoordinator.current?.save(productId, inclusionMode)
   }
 
   const pageCount = Math.max(
@@ -522,6 +529,24 @@ function ArukeresoProductsPage() {
         </div>
       )}
 
+      {Object.keys(overrideEdits).length > 0 && (
+        <div className="campaign-preparation-message" role="status">
+          {Object.values(overrideEdits).some(edit => edit.status === 'saving')
+            ? 'Felülírások mentése folyamatban…'
+            : Object.values(overrideEdits).some(edit => edit.status === 'saved')
+              ? 'A felülírások mentve. A feed-döntések és számlálók a lista frissítéséig az előző lekérdezést mutatják.'
+              : 'Egyes mentések nem lettek megerősítve. A választások megmaradtak az újrapróbáláshoz.'}
+          {Object.entries(overrideEdits).filter(([,edit]) => edit.status === 'failed').map(([id,edit]) => (
+            <div key={id}>
+              {items.find(row => row.productId === id)?.sku ?? id}: {edit.error} (Nincs megerősítve a mentés.){' '}
+              <button type="button" onClick={() => changeOverride(id, edit.value)}>Mentés újra</button>
+            </div>
+          ))}
+          <button type="button" disabled={loading || Object.values(overrideEdits).some(edit => edit.status === 'saving')}
+            onClick={() => void loadProducts()}>Lista frissítése</button>
+        </div>
+      )}
+
       {error ? (
         <div className="campaign-message campaign-message-error">
           {error}
@@ -634,9 +659,9 @@ function ArukeresoProductsPage() {
                     </td>
                     <td className="arukereso-override-cell">
                       <select
-                        value={row.inclusionMode}
+                        value={overrideEdits[row.productId]?.value ?? row.inclusionMode}
                         disabled={
-                          savingProductId === row.productId
+                          overrideEdits[row.productId]?.status === 'saving'
                         }
                         onChange={(event) =>
                           void changeOverride(
@@ -655,6 +680,11 @@ function ArukeresoProductsPage() {
                           Manuálisan letiltva
                         </option>
                       </select>
+                      {overrideEdits[row.productId] && (
+                        <small>{overrideEdits[row.productId].status === 'saving' ? 'Mentés…'
+                          : overrideEdits[row.productId].status === 'failed' ? 'Mentés sikertelen – a választás megmaradt.'
+                            : 'Mentve – lista frissítése következik.'}</small>
+                      )}
                       {row.inclusionMode === 'FORCE_INCLUDE' && (
                         <small>
                           Globális szabályok figyelmen kívül
