@@ -1075,10 +1075,25 @@ export async function syncAllegroInventoryRows(
    * remote state already satisfies. Read-only compare
    * plus terminal event inserts — never resends writes.
    */
-  await reconcileOpenPendingSyncEvents(
-    database,
-    rows,
-  )
+  console.info('Allegro inventory batch reconciliation starting', {
+    batchIndex: options?.batchIndex,
+    rowCount: rows.length,
+  })
+
+  const reconciliationStartedAt = Date.now()
+
+  const reconciliation =
+    await reconcileOpenPendingSyncEvents(
+      database,
+      rows,
+    )
+
+  console.info('Allegro inventory batch reconciliation completed', {
+    batchIndex: options?.batchIndex,
+    rowCount: rows.length,
+    reconciled: reconciliation.reconciled,
+    durationMs: Date.now() - reconciliationStartedAt,
+  })
 
   for (const row of rows) {
     if (row.autoStockSync === false) {
