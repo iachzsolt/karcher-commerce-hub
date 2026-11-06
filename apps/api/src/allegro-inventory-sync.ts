@@ -1254,10 +1254,26 @@ export async function syncAllegroInventoryRows(
 
       writtenListingIds.add(row.listingId)
 
+      console.info('Allegro inventory row action starting', {
+        batchIndex: options?.batchIndex,
+        listingId: row.listingId,
+        sku: row.sku,
+        action: 'pushStatus',
+      })
+      const pushStatusStartedAt = Date.now()
+
       const push =
         await adapter.pushStatus(
           row.listingId,
         )
+
+      console.info('Allegro inventory row action completed', {
+        batchIndex: options?.batchIndex,
+        listingId: row.listingId,
+        sku: row.sku,
+        action: 'pushStatus',
+        durationMs: Date.now() - pushStatusStartedAt,
+      })
 
       if (push.status === 202) {
         /*
@@ -1416,10 +1432,26 @@ export async function syncAllegroInventoryRows(
 
       writtenListingIds.add(row.listingId)
 
+      console.info('Allegro inventory row action starting', {
+        batchIndex: options?.batchIndex,
+        listingId: row.listingId,
+        sku: row.sku,
+        action: 'pushStock',
+      })
+      const pushStockStartedAt = Date.now()
+
       const push =
         await adapter.pushStock(
           row.listingId,
         )
+
+      console.info('Allegro inventory row action completed', {
+        batchIndex: options?.batchIndex,
+        listingId: row.listingId,
+        sku: row.sku,
+        action: 'pushStock',
+        durationMs: Date.now() - pushStockStartedAt,
+      })
 
       if (push.status === 202) {
         pending += 1
@@ -1491,7 +1523,23 @@ export async function syncAllegroInventoryRows(
       row.stockAutoPaused &&
       row.publicationStatus === 'ACTIVE'
     ) {
+      console.info('Allegro inventory row action starting', {
+        batchIndex: options?.batchIndex,
+        listingId: row.listingId,
+        sku: row.sku,
+        action: 'reconcileOwnership',
+      })
+      const reconcileOwnershipStartedAt = Date.now()
+
       const ownership = await adapter.reconcileOwnership?.(row.listingId)
+
+      console.info('Allegro inventory row action completed', {
+        batchIndex: options?.batchIndex,
+        listingId: row.listingId,
+        sku: row.sku,
+        action: 'reconcileOwnership',
+        durationMs: Date.now() - reconcileOwnershipStartedAt,
+      })
       if (ownership?.cleared) reactivated += 1
       else skipped += 1
 
@@ -1565,10 +1613,26 @@ export async function syncAllegroInventoryRows(
 
       writtenListingIds.add(row.listingId)
 
+      console.info('Allegro inventory row action starting', {
+        batchIndex: options?.batchIndex,
+        listingId: row.listingId,
+        sku: row.sku,
+        action: 'pushStatus',
+      })
+      const pushStatusStartedAt = Date.now()
+
       const push =
         await adapter.pushStatus(
           row.listingId,
         )
+
+      console.info('Allegro inventory row action completed', {
+        batchIndex: options?.batchIndex,
+        listingId: row.listingId,
+        sku: row.sku,
+        action: 'pushStatus',
+        durationMs: Date.now() - pushStatusStartedAt,
+      })
 
       if (push.status === 202) {
         pending += 1
