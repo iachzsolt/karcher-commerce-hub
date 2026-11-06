@@ -2,9 +2,11 @@ import DataConnectionSchedulePanel from './DataConnectionSchedulePanel'
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
 } from 'react'
 import { API_BASE_URL } from '../config/api'
+import { createManualInventoryRefreshAction, type ManualInventoryRun } from '../utils/manualInventoryRefresh'
 
 type DataConnection = {
   id: string
@@ -313,6 +315,51 @@ type PricingStatusResponse = {
 }
 
 function DataConnectionsSettings() {
+  const fullRefresh = useRef(createManualInventoryRefreshAction(API_BASE_URL))
+  const [fullRefreshRun, setFullRefreshRun] = useState<ManualInventoryRun | null>(null)
+  const [fullRefreshBusy, setFullRefreshBusy] = useState(false)
+  const [fullRefreshActive, setFullRefreshActive] = useState(false)
+  const fullRefreshLocked = fullRefreshBusy || fullRefreshActive
+
+  async function handleFullRefresh(connectionId: string) {
+    if (fullRefresh.current.active || fullRefreshBusy) return
+    setFullRefreshBusy(true)
+    setFullRefreshActive(true)
+    setError(null)
+    try {
+      const run = await fullRefresh.current.start(connectionId, runId => setFullRefreshRun({ runId, status: 'RUNNING' }))
+      if (run) {
+        setFullRefreshRun(run)
+        if (run.finishedAt && run.status !== 'RUNNING') {
+          setFullRefreshActive(false)
+        }
+      }
+    } catch (error) {
+      if (fullRefresh.current.active === null) {
+        setFullRefreshActive(false)
+      }
+      setError(`${error instanceof Error ? error.message : 'A teljes készletfrissítés eredménye nem ismert.'} Ellenőrizd a futásazonosítót; ne küldd újra automatikusan.`)
+    } finally {
+      setFullRefreshBusy(false)
+    }
+  }
+
+  async function observeFullRefresh() {
+    setFullRefreshBusy(true)
+    try {
+      const run = await fullRefresh.current.observe()
+      if (run) {
+        setFullRefreshRun(run)
+        if (run.finishedAt && run.status !== 'RUNNING') {
+          setFullRefreshActive(false)
+        }
+      }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Az állapot nem ellenőrizhető.')
+    } finally {
+      setFullRefreshBusy(false)
+    }
+  }
   const [
     connections,
     setConnections,
@@ -2291,6 +2338,13 @@ function DataConnectionsSettings() {
                             />
 
                             <div className="connection-card-actions">
+                              {connection.isActive && connection.purpose === 'INVENTORY' && (
+                                <button className="hub-primary-button" type="button"
+                                  disabled={busy !== null || fullRefreshLocked}
+                                  onClick={() => void handleFullRefresh(connection.id)}>
+                                  {fullRefreshBusy ? 'Teljes készletfrissítés…' : 'Teljes készletfrissítés – Allegro készlet frissítésével'}
+                                </button>
+                              )}
                               {!connection.isActive && (
                                 <button
                                   className="hub-secondary-button"
@@ -2338,7 +2392,7 @@ function DataConnectionsSettings() {
                                 className="hub-primary-button"
                                 type="button"
                                 disabled={
-                                  busy !== null
+                                  busy !== null || fullRefreshLocked
                                 }
                                 onClick={() =>
                                   void handleImport(
@@ -2348,9 +2402,17 @@ function DataConnectionsSettings() {
                               >
                                 {importing
                                   ? 'Beolvasás…'
-                                  : 'Adatok beolvasása most'}
+                                  : 'Forrás frissítése (csak beolvasás)'}
                               </button>
                             </div>
+                            {fullRefreshRun && (
+                              <div role="status">
+                                Teljes készletfrissítés: {fullRefreshRun.runId} — {fullRefreshRun.status}
+                                {fullRefreshRun.finishedAt && <span> · Befejezve: {fullRefreshRun.finishedAt} · Forrásváltozás: {fullRefreshRun.changedItemCount ?? 0}. Az Allegro eredménye és a függő műveletek az Előzményekben láthatók.</span>}
+                                {fullRefreshRun.error && <p>{fullRefreshRun.error}</p>}
+                                {fullRefreshActive && <button type="button" disabled={fullRefreshBusy} onClick={() => void observeFullRefresh()}>Futás állapotának ellenőrzése (csak olvasás)</button>}
+                              </div>
+                            )}
                           </article>
                         )
                       },

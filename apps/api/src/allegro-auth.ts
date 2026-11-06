@@ -11,6 +11,7 @@ import { createPublicationLeaseStore, readPublicationSnapshot, recordPublication
 import { getCommerceHubUser } from './access-auth.js'
 import { decryptSecret, encryptSecret } from './token-crypto.js'
 import { applyAllegroDesiredStock, resolveAllegroInventoryRows, syncAllegroInventoryRows } from './allegro-inventory-sync.js'
+import { assertInventoryExecutionLease, type InventoryExecutionLease } from './inventory-execution-lease.js'
 import {
   ALLEGRO_NOTIFY_SCOPES,
   buildNotifyAuthorizeUrl,
@@ -1010,6 +1011,7 @@ allegroAuth.post('/inventory-sync', async (context) => {
           listingIds?: string[]
           historyGroupId?: string
           batchIndex?: number
+          executionLease?: InventoryExecutionLease
         }
       | null
 
@@ -1117,6 +1119,10 @@ allegroAuth.post('/inventory-sync', async (context) => {
     )
   }
 
+  const assertExecutionOwned = async () => {
+    if (body.executionLease) await assertInventoryExecutionLease(db, body.connectionId!, body.executionLease)
+  }
+  await assertExecutionOwned()
   const applied =
     await applyAllegroDesiredStock(
       db,
@@ -1192,6 +1198,7 @@ allegroAuth.post('/inventory-sync', async (context) => {
       rows,
       {
         reconcileOwnership: async listingId => {
+          await assertExecutionOwned()
           const response = await allegroAuth.request('/reconcile-listings', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ listingIds: [listingId] }),
@@ -1201,18 +1208,22 @@ allegroAuth.post('/inventory-sync', async (context) => {
           return { cleared: result.results?.find(item => item.listingId === listingId)?.ownership?.cleared === true }
         },
         pushStock:
-          (listingId) =>
-            postAllegro(
+          async (listingId) => {
+            await assertExecutionOwned()
+            return postAllegro(
               '/push-stock/' +
                 encodeURIComponent(listingId),
-            ),
+            )
+          },
 
         pushStatus:
-          (listingId) =>
-            postAllegro(
+          async (listingId) => {
+            await assertExecutionOwned()
+            return postAllegro(
               '/push-status/' +
                 encodeURIComponent(listingId),
-            ),
+            )
+          },
 
         refresh:
           async (listingIds?: string[]) => {

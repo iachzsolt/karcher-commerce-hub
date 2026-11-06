@@ -16,5 +16,6 @@ export function createRuntimeInitializer(validate: () => void, restore: () => Pr
 
 export function needsPrimaryAllegroSession(path: string): boolean {
   if (path.startsWith('/auth/allegro/notify-')) return false
+  if (/^\/data-connections\/[^/]+\/full-inventory-refresh$/.test(path)) return true
   return path === '/auth/allegro' || path.startsWith('/auth/allegro/') || path.startsWith('/allegro/')
 }

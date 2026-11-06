@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 import {
   createDatabase,
@@ -22,6 +22,7 @@ import {
   eq,
   lt,
   lte,
+  gte,
   isNull,
   ne,
   or,
@@ -31,11 +32,13 @@ import { JWT } from 'google-auth-library'
 import { Hono } from 'hono'
 import { runInventoryRefreshAutomations } from './platform-automation.js'
 import {
-  buildInventoryAutomationDiagnostics,
-  formatInventoryAutomationFailure,
   parseInventoryAutomationDiagnostics,
 } from './inventory-automation-diagnostics.js'
-import { requestArukeresoFeedGeneration } from './arukereso.js'
+import { requestArukeresoFeedGeneration, withRenewingSchedulerLease } from './arukereso.js'
+import { executeInventoryRefresh, type InventoryRefreshTrigger } from './inventory-refresh-workflow.js'
+import { inventoryExecutionLeaseName } from './inventory-execution-lease.js'
+import { createInventoryRefreshApi, InventoryRefreshError } from './inventory-refresh-api.js'
+import { coordinateInventoryRefresh } from './inventory-refresh-coordinator.js'
 
 export type RelatedImportChild<TStartedAt = Date> = {
   connectionId: string
@@ -1389,6 +1392,89 @@ dataConnectionsApi.put(
 let refreshScheduleProcessorRunning =
   false
 
+let manualInventoryCatalogStep: (() => Promise<void>) | null = null
+export function configureManualInventoryCatalogStep(step: () => Promise<void>) {
+  manualInventoryCatalogStep = step
+}
+
+async function getInventoryRefreshRun(connectionId: string, runId: string) {
+  const [run] = await requireDatabase().select().from(dataConnectionRuns)
+    .where(and(eq(dataConnectionRuns.id, runId), eq(dataConnectionRuns.connectionId, connectionId))).limit(1)
+  return run ? { ...run, runId: run.id } : null
+}
+
+export async function runFullInventoryRefresh(input: {
+  connectionId: string
+  trigger: InventoryRefreshTrigger
+  runId?: string
+  catalog?: () => Promise<void> | void
+}) {
+  const database = requireDatabase()
+  const [connection] = await database.select().from(dataConnections).where(eq(dataConnections.id, input.connectionId)).limit(1)
+  if (!connection) throw new InventoryRefreshError('Inventory connection not found', 404)
+  if (connection.purpose !== 'INVENTORY' || !connection.isActive) throw new InventoryRefreshError('An active INVENTORY connection is required', 409)
+  const runId = input.runId ?? randomUUID()
+  try {
+    return await coordinateInventoryRefresh({
+      trigger: input.trigger,
+      existing: () => getInventoryRefreshRun(input.connectionId, runId),
+      withLease: action => withRenewingSchedulerLease({
+      database, name: inventoryExecutionLeaseName(input.connectionId), waitMs: 0,
+      logLabel: 'Inventory refresh',
+      busyError: () => new InventoryRefreshError('Inventory refresh is already executing for this connection', 409),
+      lostError: () => new InventoryRefreshError('Inventory refresh execution lease lost', 409),
+      action,
+      }),
+      recentRun: async () => {
+        // Compatibility with an execution started by the pre-lease deployment.
+        // Old RUNNING history alone is deliberately not an indefinite lock.
+        const [recent] = await database.select({ id: dataConnectionRuns.id }).from(dataConnectionRuns)
+          .where(and(eq(dataConnectionRuns.connectionId, input.connectionId), eq(dataConnectionRuns.status, 'RUNNING'),
+            gte(dataConnectionRuns.startedAt, new Date(Date.now() - 60 * 60 * 1000)))).limit(1)
+        return recent
+      },
+      execute: async (lease: { name: string; ownerId: string; assertOwned: () => Promise<void> }) => {
+        const startedAt = new Date()
+        const assertOwned = async () => {
+await lease.assertOwned()
+        }
+        const result = await executeInventoryRefresh({
+          trigger: input.trigger, runId, assertOwned,
+          create: async state => {
+            await database.insert(dataConnectionRuns).values({ id: runId, connectionId: input.connectionId,
+              triggerType: input.trigger, startedAt, ...state })
+          },
+          persist: async state => {
+            await database.update(dataConnectionRuns).set(state).where(eq(dataConnectionRuns.id, runId))
+          },
+          importSource: async () => {
+            const response = await dataConnectionsApi.request(`/${input.connectionId}/import`, { method: 'POST' })
+            const body = await response.json() as { status?: string; rowsImported?: number; changedItemCount?: number; error?: string }
+            return { ...body, ok: response.ok }
+          },
+          catalog: input.catalog,
+          automate: progress => runInventoryRefreshAutomations(database, input.connectionId, {
+            executionLease: { name: lease.name, ownerId: lease.ownerId }, assertOwned, onProgress: progress,
+          }),
+        })
+        return { ...result, startedAt }
+      },
+    })
+  } catch (error) {
+    // A busy scheduled candidate must not advance timestamps or reap wrappers.
+    if (input.trigger === 'SCHEDULED' && error instanceof InventoryRefreshError && error.status === 409) return null
+    throw error
+  }
+}
+
+dataConnectionsApi.route('/', createInventoryRefreshApi({
+  run: async (connectionId, runId) => {
+    if (!manualInventoryCatalogStep) throw new InventoryRefreshError('Inventory catalog integration is not initialized', 503)
+    return runFullInventoryRefresh({ connectionId, runId, trigger: 'MANUAL', catalog: manualInventoryCatalogStep })
+  },
+  getRun: getInventoryRefreshRun,
+}))
+
 export interface DataConnectionScheduleProcessorOptions {
   beforeAutomation?: () => Promise<void> | void
 }
@@ -1459,36 +1545,6 @@ export async function processDueDataConnectionSchedules(
     for (
       const item of dueSchedules
     ) {
-      const startedAt =
-        new Date()
-
-      const [connectionRun] =
-        await db
-          .insert(dataConnectionRuns)
-          .values({
-            connectionId:
-              item.connection.id,
-            triggerType: 'SCHEDULED',
-            status: 'RUNNING',
-            startedAt,
-          })
-          .returning({
-            id: dataConnectionRuns.id,
-          })
-
-      if (!connectionRun) {
-        throw new Error(
-          'Data connection run could not be created.',
-        )
-      }
-
-      let runStatus = 'COMPLETED'
-      let runImportStatus: string | null = null
-      let runRowsImported = 0
-      let runChangedItemCount = 0
-      let runError: string | null = null
-      let runAutomationDetailsJson: string | null = null
-
       const settings:
         RefreshScheduleSettings = {
         mode:
@@ -1516,222 +1572,17 @@ export async function processDueDataConnectionSchedules(
             .weekdaysOnly,
       }
 
-      try {
-        const response =
-          await dataConnectionsApi
-            .request(
-              `/${item.connection.id}/import`,
-              {
-                method: 'POST',
-              },
-            )
-
-        const result =
-          (await response
-            .json()
-            .catch(() => null)) as
-            | {
-                status?: string
-                rowsImported?: number
-                changedItemCount?: number
-                error?: string
-              }
-            | null
-
-        runImportStatus =
-          result?.status ?? null
-
-        runRowsImported =
-          result?.rowsImported ?? 0
-
-        runChangedItemCount =
-          result?.changedItemCount ?? 0
-
-        if (!response.ok) {
-          runStatus = 'FAILED'
-          runError =
-            result?.error ??
-            'Automatic inventory import failed.'
-
-          console.warn(
-            'Automatic inventory refresh failed:',
-            {
-              connectionId:
-                item.connection.id,
-              connectionName:
-                item.connection.name,
-              status:
-                response.status,
-              result,
-            },
-          )
-        } else {
-          console.log(
-            'Automatic inventory refresh completed:',
-            {
-              connectionId:
-                item.connection.id,
-              connectionName:
-                item.connection.name,
-              status:
-                result?.status,
-              rowsImported:
-                result?.rowsImported ??
-                0,
-              changedItemCount:
-                result
-                  ?.changedItemCount ??
-                0,
-            },
-          )
-
-          try {
-            if (options?.beforeAutomation) {
-              await options.beforeAutomation()
-            }
-          } catch (beforeAutomationError) {
-            runStatus = 'FAILED'
-            runError =
-              beforeAutomationError instanceof Error
-                ? beforeAutomationError.message
-                : 'Inventory pre-automation hook failed.'
-
-            console.error(
-              'Inventory refresh pre-automation hook error:',
-              {
-                connectionId:
-                  item.connection.id,
-                error:
-                  beforeAutomationError instanceof Error
-                    ? beforeAutomationError.message
-                    : String(beforeAutomationError),
-              },
-            )
-          }
-
-          try {
-            const automationResult =
-              await runInventoryRefreshAutomations(
-                requireDatabase(),
-                item.connection.id,
-              )
-            const automationDiagnostics =
-              buildInventoryAutomationDiagnostics(
-                automationResult,
-              )
-
-            runAutomationDetailsJson = JSON.stringify(
-              automationDiagnostics,
-            )
-
-            const failedAutomation =
-              automationResult.results.find(
-                (result) => !result.ok,
-              )
-
-            if (failedAutomation) {
-              runStatus = 'FAILED'
-              runError =
-                formatInventoryAutomationFailure(
-                  automationDiagnostics,
-                )
-            } else if (
-              automationResult.status === 'SKIPPED' ||
-              automationResult.results.length === 0 ||
-              automationResult.results.every(
-                (result) => result.outcome === 'SKIPPED',
-              )
-            ) {
-              if (runStatus !== 'FAILED') {
-                runStatus = 'IMPORT_ONLY'
-              }
-            } else if (runStatus !== 'FAILED') {
-              runStatus = 'COMPLETED'
-            }
-
-            console.log(
-              'Inventory refresh platform automations:',
-              JSON.stringify(
-                automationResult,
-                null,
-                2,
-              ),
-            )
-          } catch (automationError) {
-            runStatus = 'FAILED'
-            runError =
-              automationError instanceof Error
-                ? automationError.message
-                : 'Inventory platform automation failed.'
-
-            console.error(
-              'Inventory refresh platform automation error:',
-              {
-                connectionId:
-                  item.connection.id,
-                error:
-                  automationError instanceof Error
-                    ? automationError.message
-                    : String(automationError),
-              },
-            )
-          }
-        }
-      } catch (error) {
-        runStatus = 'FAILED'
-        runError =
-          error instanceof Error
-            ? error.message
-            : 'Automatic inventory refresh error.'
-
-        console.error(
-          'Automatic inventory refresh error:',
-          {
-            connectionId:
-              item.connection.id,
-            error,
-          },
-        )
-      } finally {
-        const finishedAt = new Date()
-
-        await db
-          .update(dataConnectionRuns)
-          .set({
-            status: runStatus,
-            importStatus:
-              runImportStatus,
-            rowsImported:
-              runRowsImported,
-            changedItemCount:
-              runChangedItemCount,
-            error: runError,
-            automationDetailsJson:
-              runAutomationDetailsJson,
-            finishedAt,
-          })
-          .where(
-            eq(
-              dataConnectionRuns.id,
-              connectionRun.id,
-            ),
-          )
-
-        /*
-         * Reap orphaned scheduler wrapper rows: an older
-         * run that is still RUNNING when a newer run for
-         * the same connection finalizes can never finish
-         * itself (its runtime is gone). Mark it
-         * INTERRUPTED so History distinguishes it from
-         * the authoritative completed child import.
-         * Self-healing: if the older runtime is somehow
-         * still alive, its own finalize overwrites this.
-         */
+      const result = await runFullInventoryRefresh({
+        connectionId: item.connection.id,
+        trigger: 'SCHEDULED',
+        catalog: options?.beforeAutomation,
+      })
+      if (result) {
         await reapStaleDataConnectionRuns(
           db,
           item.connection.id,
-          connectionRun.id,
-          startedAt,
+          result.runId,
+          result.startedAt,
         )
 
         const nextRunAt =
@@ -1746,7 +1597,7 @@ export async function processDueDataConnectionSchedules(
           )
           .set({
             lastRunAt:
-              startedAt,
+              result.startedAt,
             nextRunAt,
             updatedAt:
               new Date(),

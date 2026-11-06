@@ -10121,6 +10121,7 @@ async function withRenewingSchedulerLease<T>(input: {
   busyError: () => Error
   lostError: () => Error
   logLabel: string
+  waitMs?: number
   action: (
     lease: {
       name: string
@@ -10131,7 +10132,7 @@ async function withRenewingSchedulerLease<T>(input: {
 }): Promise<T> {
   const name = input.name
   const ownerId = randomUUID()
-  const deadline = Date.now() + FEED_GENERATION_WAIT_MS
+  const deadline = Date.now() + (input.waitMs ?? FEED_GENERATION_WAIT_MS)
 
   while (true) {
     const now = new Date()

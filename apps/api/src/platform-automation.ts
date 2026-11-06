@@ -3,6 +3,7 @@ import {
   eq,
 } from 'drizzle-orm'
 import { randomUUID } from 'node:crypto'
+import type { InventoryExecutionLease } from './inventory-execution-lease.js'
 
 import {
   createDatabase,
@@ -50,6 +51,11 @@ export function hasInventorySyncFailure(details: unknown) {
 export async function runInventoryRefreshAutomations(
   database: Database,
   connectionId: string,
+  options?: {
+    executionLease: InventoryExecutionLease
+    assertOwned: () => Promise<void>
+    onProgress: (result: { status: 'COMPLETED'; connectionId: string; enabledAutomationCount: number; results: InventoryRefreshAutomationResult[] }) => Promise<void>
+  },
 ) {
   /*
    * Platform automatizáció kizárólag az aktív,
@@ -241,6 +247,17 @@ export async function runInventoryRefreshAutomations(
         details: unknown
       }> = []
       const historyGroupId = randomUUID()
+      const accountResult = (): InventoryRefreshAutomationResult => {
+        const failedBatches = batchResults.filter(batch => !batch.ok)
+        return {
+          platform: 'ALLEGRO', accountId: setting.accountId,
+          outcome: failedBatches.length ? 'FAILED' : 'SUCCESS', ok: failedBatches.length === 0,
+          status: failedBatches[0]?.status ?? 200,
+          details: { status: failedBatches.length ? 'PARTIAL_FAILURE' : 'SUCCESS', totalListings: listingIds.length,
+            batchCount: batches.length, successfulBatches: batchResults.length - failedBatches.length,
+            failedBatches: failedBatches.length, historyGroupId, batches: [...batchResults] },
+        }
+      }
 
       for (
         let batchIndex = 0;
@@ -249,6 +266,8 @@ export async function runInventoryRefreshAutomations(
       ) {
         const batch =
           batches[batchIndex]
+
+        await options?.assertOwned()
 
         const response =
           await allegroAuth.request(
@@ -267,6 +286,7 @@ export async function runInventoryRefreshAutomations(
                   historyGroupId,
                   batchIndex:
                     batchIndex + 1,
+                  executionLease: options?.executionLease,
                 }),
             },
           )
@@ -288,6 +308,8 @@ export async function runInventoryRefreshAutomations(
             response.status,
           details,
         })
+        await options?.onProgress({ status: 'COMPLETED', connectionId,
+          enabledAutomationCount: enabledSettings.length, results: [...results, accountResult()] })
       }
 
       const failedBatches =

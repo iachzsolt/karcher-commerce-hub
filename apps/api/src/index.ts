@@ -53,6 +53,7 @@ import { cors } from 'hono/cors'
 import {
   dataConnectionsApi,
   processDueDataConnectionSchedules,
+  configureManualInventoryCatalogStep,
   reapStaleCatalogSyncRuns,
   selectRelatedImportForWrapper,
 } from './data-connections.js'
@@ -8896,6 +8897,7 @@ export type AllegroCatalogSyncResult =
 
 async function runAutomaticAllegroCatalogSync(
   trigger: AllegroCatalogSyncTrigger = 'AUTOMATIC',
+  options: { reapStaleRuns?: boolean } = {},
 ): Promise<AllegroCatalogSyncResult> {
   const startedAt = new Date()
 
@@ -9282,7 +9284,7 @@ async function runAutomaticAllegroCatalogSync(
           )
         })
 
-      await reapStaleCatalogSyncRuns(
+      if (options.reapStaleRuns !== false) await reapStaleCatalogSyncRuns(
         db,
         runId,
         startedAt,
@@ -9327,7 +9329,7 @@ async function runAutomaticAllegroCatalogSync(
           )
         })
 
-      await reapStaleCatalogSyncRuns(
+      if (options.reapStaleRuns !== false) await reapStaleCatalogSyncRuns(
         db,
         runId,
         startedAt,
@@ -9510,6 +9512,13 @@ export async function runScheduledArukeresoSourceFeedRefresh(
     })
   }
 }
+
+configureManualInventoryCatalogStep(async () => {
+  if (process.env.COMMERCE_HUB_CATALOG_SYNC_ENABLED?.trim().toLowerCase() !== 'true') return
+  const result = await runAutomaticAllegroCatalogSync('MANUAL', { reapStaleRuns: false })
+  if (result.status === 'FAILED') throw new Error(`Catalog sync before inventory automation failed: ${result.error}`)
+  if (result.status === 'SKIPPED') throw new Error(`Catalog sync before inventory automation was skipped: ${result.reason}`)
+})
 
 async function runMinuteSchedulerJobs() {
   const isEnabled = (name: string) =>
