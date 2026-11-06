@@ -7110,10 +7110,14 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
 
   const commandId = randomUUID()
 
-  const commandResponse = await allegroFetch(
+  let commandResponse: Response | null = null
+
+  try {
+    commandResponse = await allegroFetch(
     `${apiUrl}/sale/offer-quantity-change-commands/${commandId}`,
     {
       method: 'PUT',
+      signal: AbortSignal.timeout(10000),
 
       headers: {
         Authorization:
@@ -7145,9 +7149,16 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
         ],
       }),
     },
-  )
+    )
+  } catch (error) {
+    console.warn(
+      'Allegro stock command result unknown; checking existing command without retry:',
+      commandId,
+      error,
+    )
+  }
 
-  if (!commandResponse.ok) {
+  if (commandResponse && !commandResponse.ok) {
     const errorBody =
       await commandResponse.text()
 
@@ -7180,11 +7191,13 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
 
   const refreshOfferFromAllegro =
     async () => {
-      const response =
-        await allegroAuth.request(
-          '/sync',
-          {
-            method: 'POST',
+      try {
+        const response =
+          await allegroAuth.request(
+            '/sync',
+            {
+              method: 'POST',
+              signal: AbortSignal.timeout(10000),
             headers: {
               'Content-Type':
                 'application/json',
@@ -7192,18 +7205,31 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
             body: JSON.stringify({
               offerIds: [row.offerId],
             }),
-          },
+            },
+          )
+
+        return response.ok
+      } catch (error) {
+        console.warn(
+          'Allegro stock refresh timed out or failed:',
+          row.offerId,
+          error,
         )
 
-      return response.ok
+        return false
+      }
     }
 
   for (let attempt = 0; attempt < 10; attempt++) {
     await sleep(500)
 
-    const taskResponse = await allegroFetch(
+    let taskResponse: Response
+
+    try {
+      taskResponse = await allegroFetch(
       `${apiUrl}/sale/offer-quantity-change-commands/${commandId}/tasks`,
       {
+        signal: AbortSignal.timeout(10000),
         headers: {
           Authorization:
             `Bearer ${currentSession.accessToken}`,
@@ -7212,7 +7238,15 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
             'application/vnd.allegro.public.v1+json',
         },
       },
-    )
+      )
+    } catch (error) {
+      console.warn(
+        'Allegro stock task check failed; continuing polling:',
+        commandId,
+        error,
+      )
+      continue
+    }
 
     if (!taskResponse.ok) {
       continue

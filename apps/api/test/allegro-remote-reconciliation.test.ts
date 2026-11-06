@@ -95,7 +95,9 @@ test('unavailable authoritative read cannot be mistaken for convergence', async 
 })
 test('route and manual control boundaries prohibit Allegro writes and desired updates', () => {
   const source = readFileSync(new URL('../src/allegro-auth.ts', import.meta.url), 'utf8')
-  const route = source.slice(source.indexOf("allegroAuth.post('/reconcile-listings'"), source.indexOf("allegroAuth.get(\n  '/offer-debug"))
+  const routeStart = source.indexOf("allegroAuth.post('/reconcile-listings'")
+  const routeEnd = source.indexOf("allegroAuth.get(", routeStart)
+  const route = source.slice(routeStart, routeEnd)
   assert.match(route, /method: 'GET'/)
   assert.match(route, /body.listingIds.length > 10/)
   assert.match(route, /targets.length !== ids.length/)
