@@ -1430,7 +1430,7 @@ export async function runFullInventoryRefresh(input: {
         // Old RUNNING history alone is deliberately not an indefinite lock.
         const [recent] = await database.select({ id: dataConnectionRuns.id }).from(dataConnectionRuns)
           .where(and(eq(dataConnectionRuns.connectionId, input.connectionId), eq(dataConnectionRuns.status, 'RUNNING'),
-            gte(dataConnectionRuns.startedAt, new Date(Date.now() - 60 * 60 * 1000)))).limit(1)
+            gte(dataConnectionRuns.startedAt, staleReapCutoff(new Date(), DATA_CONNECTION_RUN_STALE_THRESHOLD_MS)))).limit(1)
         return recent
       },
       execute: async (lease: { name: string; ownerId: string; assertOwned: () => Promise<void> }) => {
