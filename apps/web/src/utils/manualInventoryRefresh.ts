@@ -55,12 +55,15 @@ export const DEFINITIVE_START_REJECTION_STATUSES = [
 ] as const
 
 export class ManualInventoryRefreshError extends Error {
+  readonly status: number | null
+
   constructor(
     message: string,
-    readonly status: number | null = null,
+    status: number | null = null,
   ) {
     super(message)
     this.name = 'ManualInventoryRefreshError'
+    this.status = status
   }
 }
 
