@@ -11,7 +11,19 @@ import { createPublicationLeaseStore, readPublicationSnapshot, recordPublication
 import { getCommerceHubUser } from './access-auth.js'
 import { decryptSecret, encryptSecret } from './token-crypto.js'
 import { applyAllegroDesiredStock, resolveAllegroInventoryRows, syncAllegroInventoryRows } from './allegro-inventory-sync.js'
-import { assertInventoryExecutionLease, type InventoryExecutionLease } from './inventory-execution-lease.js'
+import { assertInventoryExecutionLease, assertInventoryExecutionLeaseOwned, type InventoryExecutionLease } from './inventory-execution-lease.js'
+import {
+  createSliceBudget,
+  resolveInventoryRefreshSliceConfig,
+} from './inventory-refresh-slice.js'
+import {
+  executeStockMutation,
+  latestStockCommand,
+  parseRetryAfterMs,
+  recordStockAudit,
+  resolveStockExecutionMode,
+  type StockMutationOutcome,
+} from './inventory-mutation-journal.js'
 import {
   ALLEGRO_NOTIFY_SCOPES,
   buildNotifyAuthorizeUrl,
@@ -1012,8 +1024,23 @@ allegroAuth.post('/inventory-sync', async (context) => {
           historyGroupId?: string
           batchIndex?: number
           executionLease?: InventoryExecutionLease
+          executionMode?: 'LEGACY' | 'SLICED'
         }
       | null
+
+  if (
+    body?.executionMode !== undefined &&
+    body.executionMode !== 'LEGACY' &&
+    body.executionMode !== 'SLICED'
+  ) {
+    return context.json(
+      {
+        status: 'error',
+        message: "executionMode must be 'LEGACY' or 'SLICED'",
+      },
+      400,
+    )
+  }
 
   if (body?.confirm !== true) {
     return context.json(
@@ -1129,6 +1156,33 @@ allegroAuth.post('/inventory-sync', async (context) => {
       rowsToApply,
     )
 
+  /*
+   * Sliced execution refreshes remote state unconditionally before
+   * any mutation decision is taken for this batch. Nothing is
+   * inferred from the cursor: the decision input is always a fresh
+   * Allegro observation.
+   */
+  if (body.executionMode === 'SLICED') {
+    const offerIds = rowsToApply
+      .map((row) => row.offerId)
+      .filter(
+        (offerId): offerId is string =>
+          typeof offerId === 'string' && offerId.trim().length > 0,
+      )
+
+    for (let index = 0; index < offerIds.length; index += 10) {
+      await allegroAuth.request('/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          offerIds: offerIds.slice(index, index + 10),
+        }),
+      })
+    }
+
+    await assertExecutionOwned()
+  }
+
   const refreshed =
     await resolveAllegroInventoryRows(
       db,
@@ -1168,11 +1222,25 @@ allegroAuth.post('/inventory-sync', async (context) => {
   }
 
   const postAllegro =
-    async (path: string) => {
+    async (
+      path: string,
+      payload?: unknown,
+    ) => {
       const response =
         await allegroAuth.request(
           path,
-          { method: 'POST' },
+          payload === undefined
+            ? { method: 'POST' }
+            : {
+                method: 'POST',
+                headers: {
+                  'Content-Type':
+                    'application/json',
+                },
+                body: JSON.stringify(
+                  payload,
+                ),
+              },
         )
 
       const details =
@@ -1182,6 +1250,10 @@ allegroAuth.post('/inventory-sync', async (context) => {
           | {
               status?: string
               message?: string
+              retryAfterMs?: number
+              commandId?: string
+              /* Slice budget proof: false means no remote PUT was sent. */
+              mutationDispatched?: boolean
             }
           | null
 
@@ -1191,6 +1263,13 @@ allegroAuth.post('/inventory-sync', async (context) => {
         details,
       }
     }
+
+  const sliceBudget =
+    body.executionMode === 'SLICED'
+      ? createSliceBudget(
+          resolveInventoryRefreshSliceConfig(),
+        )
+      : undefined
 
   const syncResult =
     await syncAllegroInventoryRows(
@@ -1213,6 +1292,20 @@ allegroAuth.post('/inventory-sync', async (context) => {
             return postAllegro(
               '/push-stock/' +
                 encodeURIComponent(listingId),
+              {
+                executionLease:
+                  body.executionLease ??
+                  null,
+                connectionId:
+                  body.connectionId ??
+                  null,
+                ...(body.executionMode
+                  ? {
+                      executionMode:
+                        body.executionMode,
+                    }
+                  : {}),
+              },
             )
           },
 
@@ -1327,15 +1420,24 @@ allegroAuth.post('/inventory-sync', async (context) => {
           typeof body.batchIndex === 'number'
             ? body.batchIndex
             : undefined,
+        ...(sliceBudget
+          ? { slice: sliceBudget }
+          : {}),
       },
     )
+
+  const { slice: sliceReport, ...syncPayload } =
+    syncResult
 
   return context.json({
     status: 'ok',
     mode:
       'MANUAL_CONFIRMED_STOCK_SYNC_SERVICE',
     apply: applied.summary,
-    ...syncResult,
+    ...syncPayload,
+    ...(sliceReport
+      ? { slice: sliceReport }
+      : {}),
   })
 })
 
@@ -7028,6 +7130,7 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
     )
   }
 
+  const accessToken = currentSession.accessToken
 
   assertAllegroWriteSafety()
 
@@ -7108,233 +7211,331 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
     return context.json({ status: 'ok', skipped: true, message: 'Observed stock already matches desired stock' })
   }
 
-  const commandId = randomUUID()
+  const body =
+    (await context.req.json().catch(() => null)) as
+      | {
+          connectionId?: string
+          executionLease?: InventoryExecutionLease
+          runId?: string
+          batchIndex?: number
+          executionMode?: string
+        }
+      | null
 
-  let commandResponse: Response | null = null
-
-  try {
-    commandResponse = await allegroFetch(
-    `${apiUrl}/sale/offer-quantity-change-commands/${commandId}`,
-    {
-      method: 'PUT',
-      signal: AbortSignal.timeout(10000),
-
-      headers: {
-        Authorization:
-          `Bearer ${currentSession.accessToken}`,
-
-        Accept:
-          'application/vnd.allegro.public.v1+json',
-
-        'Content-Type':
-          'application/vnd.allegro.public.v1+json',
-      },
-
-      body: JSON.stringify({
-        modification: {
-          changeType: 'FIXED',
-          value: row.desiredStock,
-        },
-
-        offerCriteria: [
-          {
-            type: 'CONTAINS_OFFERS',
-
-            offers: [
-              {
-                id: row.offerId,
-              },
-            ],
-          },
-        ],
-      }),
-    },
-    )
-  } catch (error) {
-    console.warn(
-      'Allegro stock command result unknown; checking existing command without retry:',
-      commandId,
-      error,
-    )
-  }
-
-  if (commandResponse && !commandResponse.ok) {
-    const errorBody =
-      await commandResponse.text()
-
-    console.error(
-      'Allegro stock command failed:',
-      commandResponse.status,
-      errorBody,
-    )
-
+  /*
+   * Execution mode is explicit. It is never inferred from timing,
+   * request shape, or the presence of a lease. Anything other than
+   * the two known values is a caller bug, not a default.
+   */
+  if (
+    body?.executionMode !== undefined &&
+    body.executionMode !== 'LEGACY' &&
+    body.executionMode !== 'SLICED'
+  ) {
     return context.json(
       {
         status: 'error',
-        message:
-          'Allegro rejected the stock change command',
-
-        httpStatus:
-          commandResponse.status,
-
-        allegroResponse:
-          errorBody,
+        message: "executionMode must be 'LEGACY' or 'SLICED'",
       },
-      502,
+      400,
     )
   }
 
-  const sleep = (ms: number) =>
-    new Promise((resolve) =>
-      setTimeout(resolve, ms),
-    )
+  const executionMode = resolveStockExecutionMode(body?.executionMode)
 
-  const refreshOfferFromAllegro =
-    async () => {
-      try {
-        const response =
-          await allegroAuth.request(
-            '/sync',
-            {
-              method: 'POST',
-              signal: AbortSignal.timeout(10000),
-            headers: {
-              'Content-Type':
-                'application/json',
-            },
-            body: JSON.stringify({
-              offerIds: [row.offerId],
-            }),
-            },
-          )
-
-        return response.ok
-      } catch (error) {
-        console.warn(
-          'Allegro stock refresh timed out or failed:',
-          row.offerId,
-          error,
-        )
-
-        return false
-      }
+  /*
+   * The execution lease is re-asserted inside this handler:
+   * once after the durable ATTEMPTED intent and once
+   * immediately before the PUT. A lease lost between journal
+   * persistence and dispatch therefore prevents the write and
+   * leaves the stored command available for reconciliation.
+   */
+  const assertExecutionOwned = async () => {
+    if (body?.executionLease) {
+      await assertInventoryExecutionLeaseOwned(db, body.executionLease)
     }
+  }
 
-  for (let attempt = 0; attempt < 10; attempt++) {
-    await sleep(500)
+  const readObservedStock = async () => {
+    const [observed] = await db
+      .select({ stockAvailable: listingRemoteStates.stockAvailable })
+      .from(listingRemoteStates)
+      .where(eq(listingRemoteStates.listingId, listingId))
+      .limit(1)
 
+    return observed?.stockAvailable ?? null
+  }
+
+  const refreshOfferFromAllegro = async () => {
+    try {
+      const response = await allegroAuth.request('/sync', {
+        method: 'POST',
+        signal: AbortSignal.timeout(10000),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ offerIds: [row.offerId] }),
+      })
+
+      return response.ok
+    } catch (error) {
+      console.warn(
+        'Allegro stock refresh timed out or failed:',
+        row.offerId,
+        error,
+      )
+
+      return false
+    }
+  }
+
+  const readCommandTask = async (commandId: string) => {
     let taskResponse: Response
 
     try {
       taskResponse = await allegroFetch(
-      `${apiUrl}/sale/offer-quantity-change-commands/${commandId}/tasks`,
-      {
-        signal: AbortSignal.timeout(10000),
-        headers: {
-          Authorization:
-            `Bearer ${currentSession.accessToken}`,
-
-          Accept:
-            'application/vnd.allegro.public.v1+json',
+        `${apiUrl}/sale/offer-quantity-change-commands/${commandId}/tasks`,
+        {
+          signal: AbortSignal.timeout(10000),
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            Accept: 'application/vnd.allegro.public.v1+json',
+          },
         },
-      },
       )
     } catch (error) {
       console.warn(
-        'Allegro stock task check failed; continuing polling:',
+        'Allegro stock task check failed; command stays unresolved:',
         commandId,
         error,
       )
-      continue
+
+      return 'PENDING' as const
     }
 
-    if (!taskResponse.ok) {
-      continue
-    }
+    if (taskResponse.status === 404) return 'ABSENT' as const
+    if (!taskResponse.ok) return 'PENDING' as const
 
     const taskData = (await taskResponse.json()) as {
       tasks?: Array<{
-        offer?: {
-          id?: string
-        }
-
+        offer?: { id?: string }
         status?: string
-        message?: string
-        field?: string
       }>
     }
 
     const task = taskData.tasks?.find(
-      (item) =>
-        item.offer?.id === row.offerId,
+      (item) => item.offer?.id === row.offerId,
     )
 
-    if (!task) {
-      continue
-    }
+    if (!task) return 'PENDING' as const
+    if (task.status === 'SUCCESS') return 'SUCCESS' as const
+    if (task.status === 'FAIL' || task.status === 'FAILED') return 'FAILED' as const
 
-    if (task.status === 'FAIL' || task.status === 'FAILED') {
-      return context.json(
-        {
-          status: 'error',
-          message:
-            'Allegro stock update failed',
-
-          commandId,
-          task,
-        },
-        502,
-      )
-    }
-
-    if (task.status === 'SUCCESS') {
-      await refreshOfferFromAllegro()
-      return context.json({
-        status: 'ok',
-
-        message:
-          'Allegro stock updated successfully',
-
-        commandId,
-
-        listingId:
-          row.listingId,
-
-        offerId:
-          row.offerId,
-
-        desiredStock:
-          row.desiredStock,
-
-        allegroTaskStatus:
-          task.status,
-      })
-    }
+    return 'PENDING' as const
   }
 
-  await refreshOfferFromAllegro()
-  await sleep(4000)
-  await refreshOfferFromAllegro()
+  let mutationDispatched = false
+  let outcome: StockMutationOutcome
+
+  try {
+    outcome = await executeStockMutation(
+      {
+        listingId,
+        offerId: row.offerId,
+        desiredStock: row.desiredStock,
+        observedStock: row.observedStock,
+        runId: body?.runId ?? null,
+        batchIndex: body?.batchIndex ?? null,
+        executionMode,
+      },
+      {
+        latestCommand: () => latestStockCommand(db, listingId),
+        record: (event) => recordStockAudit(db, listingId, event),
+        readCommandTask,
+        readObservedStock,
+        refreshObservation: async () => {
+          await refreshOfferFromAllegro()
+        },
+        dispatch: async (commandId) => {
+          let commandResponse: Response
+
+          try {
+            commandResponse = await allegroFetch(
+              `${apiUrl}/sale/offer-quantity-change-commands/${commandId}`,
+              {
+                method: 'PUT',
+                signal: AbortSignal.timeout(10000),
+                headers: {
+                  Authorization: `Bearer ${accessToken}`,
+                  Accept: 'application/vnd.allegro.public.v1+json',
+                  'Content-Type': 'application/vnd.allegro.public.v1+json',
+                },
+                body: JSON.stringify({
+                  modification: {
+                    changeType: 'FIXED',
+                    value: row.desiredStock,
+                  },
+                  offerCriteria: [
+                    {
+                      type: 'CONTAINS_OFFERS',
+                      offers: [{ id: row.offerId }],
+                    },
+                  ],
+                }),
+              },
+            )
+          } catch (error) {
+            console.warn(
+              'Allegro stock command result unknown; the durable journal keeps the command for reconciliation:',
+              commandId,
+              error,
+            )
+
+            return { kind: 'UNKNOWN' as const, reason: 'DISPATCH_RESULT_UNKNOWN' }
+          }
+
+          if (commandResponse.status === 429) {
+            return {
+              kind: 'RATE_LIMITED' as const,
+              httpStatus: 429,
+              retryAfterMs: parseRetryAfterMs(
+                commandResponse.headers.get('retry-after'),
+              ),
+            }
+          }
+
+          if (!commandResponse.ok) {
+            const errorBody = await commandResponse.text()
+
+            console.error(
+              'Allegro stock command failed:',
+              commandResponse.status,
+              errorBody,
+            )
+
+            return {
+              kind: 'REJECTED' as const,
+              httpStatus: commandResponse.status,
+              reason: 'Allegro rejected the stock change command',
+            }
+          }
+
+          return { kind: 'ACCEPTED' as const, httpStatus: commandResponse.status }
+        },
+        assertOwned: assertExecutionOwned,
+        newCommandId: randomUUID,
+        onDispatch: () => {
+          mutationDispatched = true
+        },
+      },
+    )
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Allegro stock change aborted'
+    const leaseLost = /lease/i.test(message)
+
+    /*
+     * Lease loss after the ATTEMPTED intent: nothing was
+     * dispatched, and the stored command stays recoverable.
+     */
+    return context.json(
+      {
+        status: 'error',
+        message,
+        mutationDispatched,
+        httpStatus: leaseLost ? 409 : 503,
+        listingId: row.listingId,
+        offerId: row.offerId,
+        desiredStock: row.desiredStock,
+      },
+      leaseLost ? 409 : 503,
+    )
+  }
+
+  const responseBody = (extra: Record<string, unknown>) => ({
+    ...extra,
+    mutationDispatched,
+    listingId: row.listingId,
+    offerId: row.offerId,
+    desiredStock: row.desiredStock,
+  })
+
+  if (outcome.status === 'UPDATED') {
+    return context.json(
+      responseBody({
+        status: 'ok',
+        message: 'Allegro stock updated successfully',
+        commandId: outcome.commandId,
+        observedStock: outcome.observedStock,
+      }),
+    )
+  }
+
+  if (outcome.status === 'SKIPPED') {
+    return context.json(
+      responseBody({
+        status: 'ok',
+        skipped: true,
+        message: 'Observed stock already matches desired stock',
+        commandId: outcome.commandId ?? null,
+      }),
+    )
+  }
+
+  if (outcome.status === 'PENDING') {
+    return context.json(
+      responseBody({
+        status: 'pending',
+        message: 'Allegro accepted the command, but it is still processing',
+        commandId: outcome.commandId,
+      }),
+      202,
+    )
+  }
+
+  if (outcome.status === 'UNKNOWN') {
+    return context.json(
+      responseBody({
+        status: 'pending',
+        message:
+          'Allegro stock command result is unknown; the stored command will be reconciled without resubmission',
+        commandId: outcome.commandId,
+      }),
+      202,
+    )
+  }
+
+  if (outcome.status === 'RATE_LIMITED') {
+    return context.json(
+      responseBody({
+        status: 'rate-limited',
+        message: 'Allegro rate limit reached; no further writes in this run',
+        commandId: outcome.commandId,
+        retryAfterMs: outcome.retryAfterMs,
+        httpStatus: 429,
+      }),
+      429,
+    )
+  }
+
+  if (outcome.status === 'JOURNAL_UNAVAILABLE') {
+    return context.json(
+      responseBody({
+        status: 'error',
+        message: 'Stock command journal is unavailable; no remote write was sent',
+        commandId: outcome.commandId,
+        httpStatus: 503,
+      }),
+      503,
+    )
+  }
 
   return context.json(
-    {
-      status: 'pending',
-
-      message:
-        'Allegro accepted the command, but it is still processing',
-
-      commandId,
-
-      listingId:
-        row.listingId,
-
-      offerId:
-        row.offerId,
-
-      desiredStock:
-        row.desiredStock,
-    },
-    202,
+    responseBody({
+      status: 'error',
+      message: outcome.message,
+      commandId: outcome.commandId,
+      httpStatus: outcome.httpStatus,
+      taskStatus: outcome.taskStatus ?? null,
+    }),
+    502,
   )
 })
 async function readAllegroPublication(offerId: string, accessToken: string) {

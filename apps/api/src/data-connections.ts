@@ -30,15 +30,16 @@ import {
 } from 'drizzle-orm'
 import { JWT } from 'google-auth-library'
 import { Hono } from 'hono'
-import { runInventoryRefreshAutomations } from './platform-automation.js'
+import { runInventoryRefreshAutomations, buildInventoryRefreshCursor, runInventoryRefreshSlice } from './platform-automation.js'
 import {
   parseInventoryAutomationDiagnostics,
 } from './inventory-automation-diagnostics.js'
 import { requestArukeresoFeedGeneration, withRenewingSchedulerLease } from './arukereso.js'
-import { executeInventoryRefresh, type InventoryRefreshTrigger } from './inventory-refresh-workflow.js'
+import { executeInventoryRefresh, executeInventoryRefreshSlice, type InventoryRefreshState, type InventoryRefreshTrigger } from './inventory-refresh-workflow.js'
 import { inventoryExecutionLeaseName } from './inventory-execution-lease.js'
 import { createInventoryRefreshApi, InventoryRefreshError } from './inventory-refresh-api.js'
 import { coordinateInventoryRefresh } from './inventory-refresh-coordinator.js'
+import { readInventoryRefreshCursor, serializeAutomationDetailsWithCursor } from './inventory-refresh-slice.js'
 
 export type RelatedImportChild<TStartedAt = Date> = {
   connectionId: string
@@ -1467,11 +1468,202 @@ await lease.assertOwned()
   }
 }
 
+function inventoryRefreshLeaseOptions(
+  database: ReturnType<typeof requireDatabase>,
+  connectionId: string,
+) {
+  return {
+    database,
+    name: inventoryExecutionLeaseName(connectionId),
+    waitMs: 0,
+    logLabel: 'Inventory refresh',
+    busyError: () => new InventoryRefreshError('Inventory refresh is already executing for this connection', 409),
+    lostError: () => new InventoryRefreshError('Inventory refresh execution lease lost', 409),
+  }
+}
+
+async function recentRunningInventoryRun(
+  database: ReturnType<typeof requireDatabase>,
+  connectionId: string,
+) {
+  // Compatibility with an execution started by the pre-lease deployment.
+  // Old RUNNING history alone is deliberately not an indefinite lock.
+  const [recent] = await database.select({ id: dataConnectionRuns.id }).from(dataConnectionRuns)
+    .where(and(eq(dataConnectionRuns.connectionId, connectionId), eq(dataConnectionRuns.status, 'RUNNING'),
+      gte(dataConnectionRuns.startedAt, new Date(Date.now() - 5 * 60 * 1000)))).limit(1)
+  return recent
+}
+
+function runStateFromRow(row: {
+  importStatus: string | null
+  rowsImported: number
+  changedItemCount: number
+  automationDetailsJson: string | null
+  error: string | null
+}): InventoryRefreshState {
+  return {
+    status: 'RUNNING',
+    importStatus: row.importStatus,
+    rowsImported: row.rowsImported,
+    changedItemCount: row.changedItemCount,
+    automationDetailsJson: row.automationDetailsJson,
+    error: row.error,
+    finishedAt: null,
+  }
+}
+
+/**
+ * Begin a manual full inventory refresh.
+ *
+ * Imports the source and freezes the batch plan once, then runs the
+ * first bounded slice. Every later slice is driven by
+ * `advanceManualFullInventoryRefresh`.
+ */
+export async function beginManualFullInventoryRefresh(input: {
+  connectionId: string
+  runId?: string
+  catalog?: () => Promise<void> | void
+}) {
+  const database = requireDatabase()
+  const [connection] = await database.select().from(dataConnections).where(eq(dataConnections.id, input.connectionId)).limit(1)
+  if (!connection) throw new InventoryRefreshError('Inventory connection not found', 404)
+  if (connection.purpose !== 'INVENTORY' || !connection.isActive) throw new InventoryRefreshError('An active INVENTORY connection is required', 409)
+  const runId = input.runId ?? randomUUID()
+
+  return coordinateInventoryRefresh({
+    trigger: 'MANUAL',
+    existing: () => getInventoryRefreshRun(input.connectionId, runId),
+    withLease: action => withRenewingSchedulerLease({
+      ...inventoryRefreshLeaseOptions(database, input.connectionId),
+      action,
+    }),
+    recentRun: () => recentRunningInventoryRun(database, input.connectionId),
+    execute: async (lease: { name: string; ownerId: string; assertOwned: () => Promise<void> }) => {
+      const startedAt = new Date()
+      const assertOwned = async () => {
+        await lease.assertOwned()
+      }
+      const persist = async (state: InventoryRefreshState) => {
+        await database.update(dataConnectionRuns).set(state).where(eq(dataConnectionRuns.id, runId))
+      }
+
+      const state: InventoryRefreshState = {
+        status: 'RUNNING', importStatus: null, rowsImported: 0, changedItemCount: 0,
+        automationDetailsJson: null, error: null, finishedAt: null,
+      }
+
+      await database.insert(dataConnectionRuns).values({
+        id: runId, connectionId: input.connectionId, triggerType: 'MANUAL', startedAt, ...state,
+      })
+
+      const importedResponse = await dataConnectionsApi.request(`/${input.connectionId}/import`, { method: 'POST' })
+      const imported = await importedResponse.json() as {
+        status?: string; rowsImported?: number; changedItemCount?: number; error?: string
+      }
+
+      state.importStatus = imported.status ?? null
+      state.rowsImported = imported.rowsImported ?? 0
+      state.changedItemCount = imported.changedItemCount ?? 0
+      await persist({ ...state })
+
+      if (!importedResponse.ok || imported.status === 'FAILED') {
+        state.status = 'FAILED'
+        state.error = imported.error ?? 'Automatic inventory import failed.'
+        state.finishedAt = new Date()
+        await persist({ ...state })
+
+        return {
+          runId, triggerType: 'MANUAL' as const, ...state,
+          advance: { done: true, nextAdvanceAt: null, stopReason: null, mutationAttempts: 0, rateLimited: false },
+        }
+      }
+
+      await assertOwned()
+
+      // Preserve scheduled behavior: a catalog failure is recorded, but the
+      // guarded inventory automation still evaluates known listings.
+      try {
+        await (input.catalog ?? manualInventoryCatalogStep)?.()
+      } catch (error) {
+        state.error = error instanceof Error ? error.message : 'Inventory pre-automation hook failed.'
+      }
+
+      await assertOwned()
+
+      const cursor = await buildInventoryRefreshCursor(database, input.connectionId, runId)
+
+      /*
+       * Persist the frozen plan before the first slice so a crash
+       * during slice one still leaves a resumable run.
+       */
+      state.automationDetailsJson = serializeAutomationDetailsWithCursor({ version: 1, platforms: [] }, cursor)
+      await persist({ ...state })
+
+      return executeInventoryRefreshSlice({
+        trigger: 'MANUAL', runId, cursor, state, assertOwned, persist,
+        advance: next => runInventoryRefreshSlice(input.connectionId, next, {
+          executionLease: { name: lease.name, ownerId: lease.ownerId }, assertOwned,
+        }),
+      })
+    },
+  })
+}
+
+/**
+ * Run the next bounded slice of an in-flight manual refresh.
+ *
+ * Read-only preconditions (run state, cursor, cooldown) are checked
+ * before any remote call, so a mis-sequenced client cannot burn a
+ * write budget or defeat the 429 cooldown.
+ */
+export async function advanceManualFullInventoryRefresh(input: {
+  connectionId: string
+  runId: string
+}) {
+  const database = requireDatabase()
+
+  return withRenewingSchedulerLease({
+    ...inventoryRefreshLeaseOptions(database, input.connectionId),
+    action: async (lease: { name: string; ownerId: string; assertOwned: () => Promise<void> }) => {
+      const run = await getInventoryRefreshRun(input.connectionId, input.runId)
+      if (!run) throw new InventoryRefreshError('Inventory refresh run not found', 404)
+      if (run.triggerType !== 'MANUAL') throw new InventoryRefreshError('Only manual runs can be advanced', 409)
+      if (run.status !== 'RUNNING') throw new InventoryRefreshError('Inventory refresh run is already finished', 409)
+
+      const cursor = readInventoryRefreshCursor(run.automationDetailsJson)
+      if (!cursor) throw new InventoryRefreshError('Inventory refresh run has no resumable cursor', 409)
+
+      if (cursor.nextAdvanceAt !== null && Date.now() < cursor.nextAdvanceAt) {
+        throw new InventoryRefreshError(
+          `Inventory refresh is cooling down until ${new Date(cursor.nextAdvanceAt).toISOString()}`,
+          409,
+        )
+      }
+
+      const assertOwned = async () => {
+        await lease.assertOwned()
+      }
+      const persist = async (state: InventoryRefreshState) => {
+        await database.update(dataConnectionRuns).set(state).where(eq(dataConnectionRuns.id, input.runId))
+      }
+
+      return executeInventoryRefreshSlice({
+        trigger: 'MANUAL', runId: input.runId, cursor, state: runStateFromRow(run),
+        assertOwned, persist,
+        advance: next => runInventoryRefreshSlice(input.connectionId, next, {
+          executionLease: { name: lease.name, ownerId: lease.ownerId }, assertOwned,
+        }),
+      })
+    },
+  })
+}
+
 dataConnectionsApi.route('/', createInventoryRefreshApi({
   run: async (connectionId, runId) => {
     if (!manualInventoryCatalogStep) throw new InventoryRefreshError('Inventory catalog integration is not initialized', 503)
-    return runFullInventoryRefresh({ connectionId, runId, trigger: 'MANUAL', catalog: manualInventoryCatalogStep })
+    return beginManualFullInventoryRefresh({ connectionId, runId, catalog: manualInventoryCatalogStep })
   },
+  advance: async (connectionId, runId) => advanceManualFullInventoryRefresh({ connectionId, runId }),
   getRun: getInventoryRefreshRun,
 }))
 

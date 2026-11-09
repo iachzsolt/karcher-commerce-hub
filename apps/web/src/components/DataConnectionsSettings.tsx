@@ -6,7 +6,8 @@ import {
   useState,
 } from 'react'
 import { API_BASE_URL } from '../config/api'
-import { createManualInventoryRefreshAction, type ManualInventoryRun } from '../utils/manualInventoryRefresh'
+import { createManualInventoryRefreshAction, isTerminalInventoryRun, type ManualInventoryRun } from '../utils/manualInventoryRefresh'
+import { createInventoryRefreshLoop } from '../utils/manualInventoryRefreshLoop'
 
 type DataConnection = {
   id: string
@@ -316,10 +317,47 @@ type PricingStatusResponse = {
 
 function DataConnectionsSettings() {
   const fullRefresh = useRef(createManualInventoryRefreshAction(API_BASE_URL))
+  const fullRefreshLoop = useRef<ReturnType<typeof createInventoryRefreshLoop> | null>(null)
   const [fullRefreshRun, setFullRefreshRun] = useState<ManualInventoryRun | null>(null)
   const [fullRefreshBusy, setFullRefreshBusy] = useState(false)
   const [fullRefreshActive, setFullRefreshActive] = useState(false)
   const fullRefreshLocked = fullRefreshBusy || fullRefreshActive
+
+  /*
+   * Stop driving slices when the page unmounts. The run itself is
+   * untouched: its cursor is durable on the server, so reopening the
+   * settings page and observing the run is always safe.
+   */
+  useEffect(() => () => {
+    fullRefreshLoop.current?.stop()
+    fullRefreshLoop.current = null
+  }, [])
+
+  function stopFullRefreshLoop() {
+    fullRefreshLoop.current?.stop()
+    fullRefreshLoop.current = null
+  }
+
+  function beginFullRefreshLoop() {
+    stopFullRefreshLoop()
+    fullRefreshLoop.current = createInventoryRefreshLoop({
+      client: {
+        get active() {
+          return fullRefresh.current.active
+        },
+        observe: () => fullRefresh.current.observe(),
+        advance: () => fullRefresh.current.advance(),
+      },
+      onRun: run => {
+        setFullRefreshRun(run)
+        // A confirmed observation clears any stale uncertainty banner.
+        setError(null)
+        if (isTerminalInventoryRun(run)) setFullRefreshActive(false)
+      },
+      onError: message => setError(message),
+    })
+    fullRefreshLoop.current.start()
+  }
 
   async function handleFullRefresh(connectionId: string) {
     if (fullRefresh.current.active || fullRefreshBusy) return
@@ -328,17 +366,33 @@ function DataConnectionsSettings() {
     setError(null)
     try {
       const run = await fullRefresh.current.start(connectionId, runId => setFullRefreshRun({ runId, status: 'RUNNING' }))
-      if (run) {
-        setFullRefreshRun(run)
-        if (run.finishedAt && run.status !== 'RUNNING') {
-          setFullRefreshActive(false)
-        }
-      }
-    } catch (error) {
-      if (fullRefresh.current.active === null) {
+      if (!run) return
+      setFullRefreshRun(run)
+      if (isTerminalInventoryRun(run)) {
         setFullRefreshActive(false)
+        return
       }
-      setError(`${error instanceof Error ? error.message : 'A teljes készletfrissítés eredménye nem ismert.'} Ellenőrizd a futásazonosítót; ne küldd újra automatikusan.`)
+      // The run is RUNNING: drive it with bounded advance slices.
+      beginFullRefreshLoop()
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'A teljes készletfrissítés eredménye nem ismert.'
+
+      if (fullRefresh.current.active === null) {
+        // Definitive rejection: no run was created, so a new start is safe.
+        setFullRefreshActive(false)
+        setError(message)
+      } else {
+        /*
+         * Uncertain start (5xx, gateway timeout, transport failure). The run
+         * id is kept and the targeted GET decides whether the run exists; the
+         * start POST is never resent.
+         */
+        beginFullRefreshLoop()
+        setError(`${message} A futás állapotát ellenőrizzük; ne indíts új futást.`)
+      }
     } finally {
       setFullRefreshBusy(false)
     }
@@ -348,14 +402,23 @@ function DataConnectionsSettings() {
     setFullRefreshBusy(true)
     try {
       const run = await fullRefresh.current.observe()
-      if (run) {
-        setFullRefreshRun(run)
-        if (run.finishedAt && run.status !== 'RUNNING') {
-          setFullRefreshActive(false)
-        }
+      if (!run) {
+        setFullRefreshActive(false)
+        return
       }
+      setFullRefreshRun(run)
+      if (isTerminalInventoryRun(run)) {
+        setFullRefreshActive(false)
+        stopFullRefreshLoop()
+        return
+      }
+      // Still RUNNING: resume driving if the loop had stopped earlier.
+      beginFullRefreshLoop()
     } catch (error) {
       setError(error instanceof Error ? error.message : 'Az állapot nem ellenőrizhető.')
+      if (fullRefresh.current.active === null) {
+        setFullRefreshActive(false)
+      }
     } finally {
       setFullRefreshBusy(false)
     }
@@ -2408,6 +2471,7 @@ function DataConnectionsSettings() {
                             {fullRefreshRun && (
                               <div role="status">
                                 Teljes készletfrissítés: {fullRefreshRun.runId} — {fullRefreshRun.status}
+                                {fullRefreshActive && <span> · A frissítés automatikusan folytatódik.</span>}
                                 {fullRefreshRun.finishedAt && <span> · Befejezve: {fullRefreshRun.finishedAt} · Forrásváltozás: {fullRefreshRun.changedItemCount ?? 0}. Az Allegro eredménye és a függő műveletek az Előzményekben láthatók.</span>}
                                 {fullRefreshRun.error && <p>{fullRefreshRun.error}</p>}
                                 {fullRefreshActive && <button type="button" disabled={fullRefreshBusy} onClick={() => void observeFullRefresh()}>Futás állapotának ellenőrzése (csak olvasás)</button>}

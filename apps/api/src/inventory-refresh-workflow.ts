@@ -3,6 +3,12 @@
   formatInventoryAutomationFailure,
 } from './inventory-automation-diagnostics.js'
 import type { runInventoryRefreshAutomations } from './platform-automation.js'
+import {
+  serializeAutomationDetailsWithCursor,
+  type InventoryRefreshCursor,
+  type InventorySliceStopReason,
+} from './inventory-refresh-slice.js'
+import type { InventoryRefreshSliceRunResult } from './platform-automation.js'
 
 export type InventoryRefreshTrigger = 'MANUAL' | 'SCHEDULED'
 export type InventoryRefreshState = {
@@ -77,4 +83,100 @@ await input.assertOwned()
     await input.persist({ ...state })
   }
   return { runId: input.runId, triggerType: input.trigger, ...state }
+}
+
+export type InventoryRefreshAdvance = {
+  done: boolean
+  nextAdvanceAt: number | null
+  stopReason: InventorySliceStopReason | null
+  mutationAttempts: number
+  rateLimited: boolean
+}
+
+/**
+ * Run exactly one bounded slice of a manual refresh and persist the
+ * result.
+ *
+ * A slice-level transport failure is deliberately NOT terminal: the
+ * cursor is durable, so the run stays RUNNING and the next
+ * `/advance` resumes. Only a completed run is finalized, and only
+ * an unexpected exception outside the slice itself marks FAILED.
+ */
+export async function executeInventoryRefreshSlice(input: {
+  trigger: InventoryRefreshTrigger
+  runId: string
+  cursor: InventoryRefreshCursor
+  state: InventoryRefreshState
+  assertOwned: () => Promise<void>
+  persist: (state: InventoryRefreshState) => Promise<void>
+  advance: (cursor: InventoryRefreshCursor) => Promise<InventoryRefreshSliceRunResult>
+  now?: () => Date
+}) {
+  const clock = input.now ?? (() => new Date())
+  const state: InventoryRefreshState = { ...input.state }
+  let advance: InventoryRefreshAdvance = {
+    done: false,
+    nextAdvanceAt: null,
+    stopReason: null,
+    mutationAttempts: 0,
+    rateLimited: false,
+  }
+
+  try {
+    await input.assertOwned()
+
+    const run = await input.advance(input.cursor)
+    const diagnostics = buildInventoryAutomationDiagnostics({ results: run.results })
+
+    state.automationDetailsJson = serializeAutomationDetailsWithCursor(
+      diagnostics,
+      run.done ? null : run.cursor,
+    )
+
+    advance = {
+      done: run.done,
+      nextAdvanceAt: run.done ? null : run.nextAdvanceAt,
+      stopReason: run.stopReason,
+      mutationAttempts: run.mutationAttempts,
+      rateLimited: run.stopReason === 'RATE_LIMIT',
+    }
+
+    if (run.done) {
+      if (run.results.some(platform => !platform.ok)) {
+        state.error = formatInventoryAutomationFailure(diagnostics)
+      } else {
+        state.error = null
+      }
+
+      state.status = state.error
+        ? 'FAILED'
+        : run.results.length === 0 ||
+            run.results.every(platform => platform.outcome === 'SKIPPED')
+          ? 'IMPORT_ONLY'
+          : 'COMPLETED'
+    } else {
+      state.status = 'RUNNING'
+    }
+  } catch (error) {
+    /*
+     * Keep RUNNING: nothing here proves the remote state is wrong,
+     * and the durable cursor lets the next call resume safely. The
+     * message travels in the HTTP error, not in the run row, so a
+     * pre-existing (catalog) error is not masked.
+     */
+    state.status = 'RUNNING'
+    state.finishedAt = null
+    await input.persist({ ...state })
+    throw error
+  }
+
+  state.finishedAt = state.status === 'RUNNING' ? null : clock()
+  await input.persist({ ...state })
+
+  return {
+    runId: input.runId,
+    triggerType: input.trigger,
+    ...state,
+    advance,
+  }
 }

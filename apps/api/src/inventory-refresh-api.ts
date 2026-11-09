@@ -8,6 +8,7 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 
 export function createInventoryRefreshApi(deps: {
   run: (connectionId: string, runId: string) => Promise<unknown>
+  advance: (connectionId: string, runId: string) => Promise<unknown>
   getRun: (connectionId: string, runId: string) => Promise<unknown | null>
 }) {
   const api = new Hono()
@@ -24,6 +25,26 @@ export function createInventoryRefreshApi(deps: {
     } catch (error) {
       return context.json({ status: 'error', runId: body.runId,
         message: error instanceof Error ? error.message : 'Inventory refresh failed; check this run before any retry.' },
+      error instanceof InventoryRefreshError ? error.status : 500)
+    }
+  })
+  /*
+   * Advance one bounded slice. Deliberately a POST: it performs
+   * production writes and must never be triggered by a link
+   * prefetch or a crawler.
+   */
+  api.post('/:connectionId/full-inventory-refresh/:runId/advance', async context => {
+    if (getCommerceHubUser(context)?.role !== 'ADMIN') return context.json({ message: 'Administrator access required' }, 403)
+    const { connectionId, runId } = context.req.param()
+    if (!uuid.test(connectionId) || !uuid.test(runId)) {
+      return context.json({ message: 'Invalid identifier' }, 400)
+    }
+    try {
+      const run = await deps.advance(connectionId, runId)
+      return context.json({ status: 'ok', run })
+    } catch (error) {
+      return context.json({ status: 'error', runId,
+        message: error instanceof Error ? error.message : 'Inventory refresh slice failed; the run can be resumed.' },
       error instanceof InventoryRefreshError ? error.status : 500)
     }
   })

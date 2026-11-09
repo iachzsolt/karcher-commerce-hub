@@ -21,6 +21,17 @@ import {
   extractFailedInventoryListingDiagnostic,
 } from './inventory-automation-diagnostics.js'
 import { observedStockMatches } from './allegro-stock-policy.js'
+import {
+  compactBatchResults,
+  sliceMutationGate,
+  sliceNextAdvanceAt,
+  sliceNoteRateLimit,
+  sliceRefundMutationAttempt,
+  sliceReserveMutationAttempt,
+  type InventorySliceBudget,
+  type InventorySliceReport,
+} from './inventory-refresh-slice.js'
+import { STOCK_RATE_LIMIT_FALLBACK_MS } from './inventory-mutation-journal.js'
 
 type Database =
   ReturnType<typeof createDatabase>
@@ -623,6 +634,10 @@ export type AllegroInventoryActionResult = {
   details: {
     status?: string
     message?: string
+    retryAfterMs?: number
+    commandId?: string
+    /** Present on `/push-stock`: false means no remote PUT left the process. */
+    mutationDispatched?: boolean
   } | null
 }
 
@@ -1050,10 +1065,67 @@ export async function syncAllegroInventoryRows(
   options?: {
     historyGroupId?: string
     batchIndex?: number
+    /*
+     * Present only for the sliced manual flow. When set, every
+     * remote mutation must pass the budget gate first, each attempt
+     * is paced, and a 429 stops the whole slice.
+     */
+    slice?: InventorySliceBudget
+    sliceWait?: (ms: number) => Promise<void>
+    now?: () => number
   },
 ) {
   const results:
     Array<Record<string, unknown>> = []
+
+  const slice = options?.slice ?? null
+  const now = options?.now ?? Date.now
+  const sliceWait =
+    options?.sliceWait ??
+    ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)))
+
+  /*
+   * Reserve a mutation slot immediately before the write is
+   * dispatched. Returns false when the slice must stop.
+   *
+   * Pacing happens here, before the attempt, which is equivalent to
+   * waiting after the previous one but keeps the throttle in a
+   * single place.
+   */
+  const reserveMutation = async () => {
+    if (!slice) return true
+
+    const gate = sliceMutationGate(slice, now())
+    if (!gate.allowed) return false
+
+    if (gate.waitMs > 0) await sliceWait(gate.waitMs)
+
+    sliceReserveMutationAttempt(slice, now())
+
+    return true
+  }
+
+  /*
+   * Refund only on positive proof that nothing was dispatched.
+   * A timeout or an unknown response keeps the slot consumed.
+   */
+  const settleMutation = (response: AllegroInventoryActionResult) => {
+    if (!slice) return
+
+    if (response.details?.mutationDispatched === false) {
+      sliceRefundMutationAttempt(slice)
+    }
+
+    if (response.status === 429) {
+      sliceNoteRateLimit(
+        slice,
+        typeof response.details?.retryAfterMs === 'number'
+          ? response.details.retryAfterMs
+          : STOCK_RATE_LIMIT_FALLBACK_MS,
+        now(),
+      )
+    }
+  }
 
   let attempted = 0
   let stockUpdated = 0
@@ -1095,7 +1167,7 @@ export async function syncAllegroInventoryRows(
     durationMs: Date.now() - reconciliationStartedAt,
   })
 
-  for (const row of rows) {
+  rowLoop: for (const row of rows) {
     if (row.autoStockSync === false) {
       skipped += 1
       results.push({ sku: row.sku, listingId: row.listingId, action: 'SKIP', status: 'AUTO_STOCK_SYNC_DISABLED' })
@@ -1229,6 +1301,8 @@ export async function syncAllegroInventoryRows(
         continue
       }
 
+      if (!(await reserveMutation())) break rowLoop
+
       await database
         .update(
           listingDesiredStates,
@@ -1274,6 +1348,19 @@ export async function syncAllegroInventoryRows(
         action: 'pushStatus',
         durationMs: Date.now() - pushStatusStartedAt,
       })
+
+      settleMutation(push)
+
+      /*
+       * A 429 is a slice stop, not a listing failure: the attempt
+       * consumed a write slot, the row stays unprocessed, and the
+       * next slice retries it after the cooldown.
+       */
+      if (push.status === 429) {
+        attempted -= 1
+        writtenListingIds.delete(row.listingId)
+        break rowLoop
+      }
 
       if (push.status === 202) {
         /*
@@ -1428,6 +1515,8 @@ export async function syncAllegroInventoryRows(
     let stockChanged = false
 
     if (!observedStockMatches(row.targetStock, row.remoteStock)) {
+      if (!(await reserveMutation())) break rowLoop
+
       attempted += 1
 
       writtenListingIds.add(row.listingId)
@@ -1452,6 +1541,14 @@ export async function syncAllegroInventoryRows(
         action: 'pushStock',
         durationMs: Date.now() - pushStockStartedAt,
       })
+
+      settleMutation(push)
+
+      if (push.status === 429) {
+        attempted -= 1
+        writtenListingIds.delete(row.listingId)
+        break rowLoop
+      }
 
       if (push.status === 202) {
         pending += 1
@@ -1588,6 +1685,8 @@ export async function syncAllegroInventoryRows(
     }
 
     if (row.stockAutoPaused) {
+      if (!(await reserveMutation())) break rowLoop
+
       await database
         .update(
           listingDesiredStates,
@@ -1633,6 +1732,14 @@ export async function syncAllegroInventoryRows(
         action: 'pushStatus',
         durationMs: Date.now() - pushStatusStartedAt,
       })
+
+      settleMutation(push)
+
+      if (push.status === 429) {
+        attempted -= 1
+        writtenListingIds.delete(row.listingId)
+        break rowLoop
+      }
 
       if (push.status === 202) {
         pending += 1
@@ -1933,7 +2040,7 @@ export async function syncAllegroInventoryRows(
   let refreshDetails:
     unknown = null
 
-  if (attempted > 0) {
+  if (attempted > 0 && slice?.stopReason !== 'RATE_LIMIT') {
     const initialRefresh =
       await adapter.refresh(
         [...writtenListingIds],
@@ -1953,7 +2060,13 @@ export async function syncAllegroInventoryRows(
         ...writtenListingIds,
       ])
 
+    /*
+     * Sliced runs skip the blocking 4 s delayed refresh: the next
+     * `/advance` refreshes this batch unconditionally before any
+     * mutation decision, so waiting here would only burn budget.
+     */
     if (
+      slice === null &&
       initialRefresh.ok &&
       delayedRefreshListingIds.size > 0
     ) {
@@ -1992,19 +2105,23 @@ export async function syncAllegroInventoryRows(
     }
   }
 
+  const summary = {
+    attempted,
+    stockUpdated,
+    autoPaused,
+    reactivated,
+    unchanged,
+    skipped,
+    pending,
+    failed,
+  }
+
   return {
     summary: {
       selected:
         rows.length,
 
-      attempted,
-      stockUpdated,
-      autoPaused,
-      reactivated,
-      unchanged,
-      skipped,
-      pending,
-      failed,
+      ...summary,
     },
 
     refresh: {
@@ -2016,5 +2133,29 @@ export async function syncAllegroInventoryRows(
     },
 
     results,
+
+    /*
+     * Present only for sliced runs. The driver persists this so the
+     * next `/advance` resumes at exactly the right listing.
+     */
+    slice: slice
+      ? ({
+          mutationAttempts: slice.mutationAttempts,
+          stopReason: slice.stopReason,
+          rateLimitedUntil: slice.rateLimitedUntil,
+          nextAdvanceAt: sliceNextAdvanceAt(slice, now()),
+          processedListingIds: results
+            .map((result) => result.listingId)
+            .filter((listingId): listingId is string => typeof listingId === 'string'),
+          summary,
+          refresh: {
+            status: refreshStatus,
+            details: refreshDetails,
+          },
+          results: compactBatchResults(results),
+          ok: true,
+          status: 200,
+        } satisfies InventorySliceReport)
+      : null,
   }
 }
