@@ -10,6 +10,10 @@ export function createInventoryRefreshApi(deps: {
   run: (connectionId: string, runId: string) => Promise<unknown>
   advance: (connectionId: string, runId: string) => Promise<unknown>
   getRun: (connectionId: string, runId: string) => Promise<unknown | null>
+  /** Newest resumable RUNNING sliced manual run, for reload adoption. */
+  getResumableRun?: (
+    connectionId: string,
+  ) => Promise<{ connectionId: string; runId: string; nextAdvanceAt: number | null } | null>
 }) {
   const api = new Hono()
   api.post('/:connectionId/full-inventory-refresh', async context => {
@@ -47,6 +51,13 @@ export function createInventoryRefreshApi(deps: {
         message: error instanceof Error ? error.message : 'Inventory refresh slice failed; the run can be resumed.' },
       error instanceof InventoryRefreshError ? error.status : 500)
     }
+  })
+  api.get('/:connectionId/full-inventory-refresh/resumable', async context => {
+    if (!getCommerceHubUser(context)) return context.json({ message: 'Authentication required' }, 401)
+    const connectionId = context.req.param('connectionId')
+    if (!uuid.test(connectionId)) return context.json({ message: 'Invalid identifier' }, 400)
+    const run = (await deps.getResumableRun?.(connectionId)) ?? null
+    return context.json({ status: 'ok', run })
   })
   api.get('/:connectionId/full-inventory-refresh/:runId', async context => {
     if (!getCommerceHubUser(context)) return context.json({ message: 'Authentication required' }, 401)

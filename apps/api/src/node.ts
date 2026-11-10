@@ -4,6 +4,7 @@ import {
   initializeCommerceHubRuntime,
   runDailyMaintenance,
   runHourlyScheduler,
+  runInventoryRefreshResumeScheduler,
   runMinuteScheduler,
   runSixHourlyScheduler,
   schedulerIntervals,
@@ -64,11 +65,16 @@ async function startServer() {
       schedulerIntervals.daily,
       runDailyMaintenance,
     )
+    startScheduler(
+      schedulerIntervals.inventoryResume,
+      runInventoryRefreshResumeScheduler,
+    )
 
     void runMinuteScheduler()
     void runHourlyScheduler()
     void runSixHourlyScheduler()
     void runDailyMaintenance()
+    void runInventoryRefreshResumeScheduler()
   } else {
     console.log('Commerce Hub schedulers are disabled')
   }

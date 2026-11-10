@@ -6,7 +6,7 @@ import {
   useState,
 } from 'react'
 import { API_BASE_URL } from '../config/api'
-import { createManualInventoryRefreshAction, isTerminalInventoryRun, type ManualInventoryRun } from '../utils/manualInventoryRefresh'
+import { createManualInventoryRefreshAction, fetchResumableInventoryRun, isTerminalInventoryRun, type ManualInventoryRun } from '../utils/manualInventoryRefresh'
 import { createInventoryRefreshLoop } from '../utils/manualInventoryRefreshLoop'
 
 type DataConnection = {
@@ -322,6 +322,11 @@ function DataConnectionsSettings() {
   const [fullRefreshBusy, setFullRefreshBusy] = useState(false)
   const [fullRefreshActive, setFullRefreshActive] = useState(false)
   const fullRefreshLocked = fullRefreshBusy || fullRefreshActive
+  /*
+   * Reload recovery is attempted once per mount. It must never fight a
+   * run the user started in this tab, so a single attempt is enough.
+   */
+  const fullRefreshAdoptAttempted = useRef(false)
 
   /*
    * Stop driving slices when the page unmounts. The run itself is
@@ -464,6 +469,50 @@ function DataConnectionsSettings() {
     null,
   )
 
+  /*
+   * Reload recovery. When the page opens with no locally tracked run,
+   * adopt the newest backend-proven resumable sliced run so progress is
+   * visible and (if the tab stays open) driven faster.
+   *
+   * Observation only: this path never POSTs a start. The backend
+   * scheduler keeps the run moving even when this page is gone, so a
+   * failed lookup simply means "nothing to adopt".
+   */
+  async function adoptFullRefresh(rows: ConnectionRow[]) {
+    if (fullRefreshAdoptAttempted.current) return
+    fullRefreshAdoptAttempted.current = true
+
+    if (fullRefresh.current.active || fullRefreshBusy) return
+
+    for (const { connection } of rows) {
+      const resumable = await fetchResumableInventoryRun(API_BASE_URL, connection.id)
+      if (!resumable) continue
+      if (fullRefresh.current.active) return
+
+      setFullRefreshBusy(true)
+      setError(null)
+
+      try {
+        const run = await fullRefresh.current.adopt(resumable.connectionId, resumable.runId)
+        if (!run) return
+        setFullRefreshRun(run)
+        if (isTerminalInventoryRun(run)) {
+          setFullRefreshActive(false)
+          return
+        }
+        setFullRefreshActive(true)
+        beginFullRefreshLoop()
+      } catch (adoptError) {
+        setError(adoptError instanceof Error ? adoptError.message : 'A futás állapota nem ellenőrizhető.')
+        if (fullRefresh.current.active === null) setFullRefreshActive(false)
+      } finally {
+        setFullRefreshBusy(false)
+      }
+
+      return
+    }
+  }
+
   const [
     showCreate,
     setShowCreate,
@@ -542,6 +591,12 @@ function DataConnectionsSettings() {
         setConnections(
           result.data,
         )
+
+        /*
+         * Adoption runs after the connection list is known. It observes an
+         * existing resumable run and never starts one.
+         */
+        void adoptFullRefresh(result.data)
 
         const metricEntries =
           await Promise.all(

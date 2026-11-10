@@ -22,6 +22,7 @@ import {
 } from './inventory-automation-diagnostics.js'
 import { observedStockMatches } from './allegro-stock-policy.js'
 import {
+  PENDING_RECONCILIATION_COOLDOWN_MS,
   compactBatchResults,
   sliceMutationGate,
   sliceNextAdvanceAt,
@@ -31,7 +32,7 @@ import {
   type InventorySliceBudget,
   type InventorySliceReport,
 } from './inventory-refresh-slice.js'
-import { STOCK_RATE_LIMIT_FALLBACK_MS } from './inventory-mutation-journal.js'
+import { STOCK_RATE_LIMIT_FALLBACK_MS, reconcileUnresolvedStockCommands } from './inventory-mutation-journal.js'
 
 type Database =
   ReturnType<typeof createDatabase>
@@ -1167,6 +1168,26 @@ export async function syncAllegroInventoryRows(
     durationMs: Date.now() - reconciliationStartedAt,
   })
 
+  /*
+   * Close stock commands whose intent the fresh observation already
+   * satisfies. This is the STOCK_OPERATION twin of the SYNC
+   * reconciliation above: same command id, terminal insert only.
+   */
+  const stockReconciliation = await reconcileUnresolvedStockCommands(
+    database,
+    rows.map((row) => ({
+      listingId: row.listingId,
+      remoteStock: row.remoteStock,
+    })),
+  )
+
+  console.info('Allegro stock command reconciliation completed', {
+    batchIndex: options?.batchIndex,
+    rowCount: rows.length,
+    reconciled: stockReconciliation.reconciled,
+    unresolved: stockReconciliation.unresolved,
+  })
+
   rowLoop: for (const row of rows) {
     if (row.autoStockSync === false) {
       skipped += 1
@@ -2139,23 +2160,47 @@ export async function syncAllegroInventoryRows(
      * next `/advance` resumes at exactly the right listing.
      */
     slice: slice
-      ? ({
-          mutationAttempts: slice.mutationAttempts,
-          stopReason: slice.stopReason,
-          rateLimitedUntil: slice.rateLimitedUntil,
-          nextAdvanceAt: sliceNextAdvanceAt(slice, now()),
-          processedListingIds: results
-            .map((result) => result.listingId)
-            .filter((listingId): listingId is string => typeof listingId === 'string'),
-          summary,
-          refresh: {
-            status: refreshStatus,
-            details: refreshDetails,
-          },
-          results: compactBatchResults(results),
-          ok: true,
-          status: 200,
-        } satisfies InventorySliceReport)
+      ? (() => {
+          const stopReason =
+            slice.stopReason ??
+            (pendingListingIds.size > 0 ? 'PENDING_RECONCILIATION' : null)
+
+          return {
+            mutationAttempts: slice.mutationAttempts,
+            /*
+             * A listing whose command is still unresolved is NOT done:
+             * it stays in the batch's remaining set so the next slice
+             * re-inspects the same command id instead of forgetting it.
+             */
+            stopReason,
+            rateLimitedUntil: slice.rateLimitedUntil,
+            /*
+             * Allegro async tasks need time. Without this the pending-only
+             * slice would report `nextAdvanceAt = now()` and the browser
+             * loop would immediately re-read the same unresolved commands.
+             */
+            nextAdvanceAt:
+              stopReason === 'PENDING_RECONCILIATION'
+                ? now() + PENDING_RECONCILIATION_COOLDOWN_MS
+                : sliceNextAdvanceAt(slice, now()),
+            processedListingIds: results
+              .map((result) => result.listingId)
+              .filter(
+                (listingId): listingId is string =>
+                  typeof listingId === 'string' &&
+                  !pendingListingIds.has(listingId),
+              ),
+            pendingListingIds: [...pendingListingIds],
+            summary,
+            refresh: {
+              status: refreshStatus,
+              details: refreshDetails,
+            },
+            results: compactBatchResults(results),
+            ok: true,
+            status: 200,
+          } satisfies InventorySliceReport
+        })()
       : null,
   }
 }

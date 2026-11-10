@@ -128,6 +128,11 @@ export async function executeInventoryRefreshSlice(input: {
     const run = await input.advance(input.cursor)
     const diagnostics = buildInventoryAutomationDiagnostics({ results: run.results })
 
+    if (!run.done) {
+      // Diagnostic only: never read back for correctness decisions.
+      run.cursor.lastStopReason = run.stopReason
+    }
+
     state.automationDetailsJson = serializeAutomationDetailsWithCursor(
       diagnostics,
       run.done ? null : run.cursor,

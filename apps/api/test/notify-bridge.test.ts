@@ -3219,9 +3219,11 @@ void describe('bridge architecture guards', () => {
 
     // Static call sites: 1 Arukereso-source loop + 1 daily
     // maintenance + 1 daily-scheduler helper (invoked per
-    // pattern at startup). Runtime total is 6 (2 daily
-    // scheduler + 3 Arukereso source + 1 maintenance).
-    assert.equal(crons.length, 3)
+    // pattern at startup) + 1 sliced inventory refresh
+    // self-resume. Runtime total is 7 (2 daily scheduler +
+    // 3 Arukereso source + 1 maintenance + 1 inventory
+    // resume).
+    assert.equal(crons.length, 4)
     assert.ok(
       !source.includes('commerce-hub-allegro-notify'),
     )

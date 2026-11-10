@@ -12,6 +12,7 @@ import {
   initializeCommerceHubRuntime,
   validateCommerceHubRuntimeConfiguration,
   runDailyMaintenance,
+  runInventoryRefreshResumeScheduler,
   runMinuteScheduler,
   runScheduledArukeresoSourceFeedRefresh,
 } from './index.js'
@@ -238,14 +239,41 @@ Deno.cron(
   ),
 )
 
+/*
+ * Self-resume for the sliced manual inventory refresh.
+ *
+ * Deliberately coarse. The repo removed the former per-minute cron
+ * because it kept Neon compute awake 24/7; a 15-minute wake-up is enough
+ * to continue an orphaned run and still lets the database suspend
+ * between ticks. Override with COMMERCE_HUB_INVENTORY_RESUME_CRON, or
+ * set it to "off" to disable this cron (the Node timer is unaffected).
+ */
+const inventoryResumeCron =
+  (process.env.COMMERCE_HUB_INVENTORY_RESUME_CRON ?? '*/15 * * * *').trim()
+
+if (
+  inventoryResumeCron.length > 0 &&
+  !['off', 'false', 'disabled'].includes(inventoryResumeCron.toLowerCase())
+) {
+  Deno.cron(
+    'commerce-hub-inventory-resume',
+    inventoryResumeCron,
+    () => runCronJob(
+      'inventory refresh resume',
+      runInventoryRefreshResumeScheduler,
+    ),
+  )
+}
+
 // Allegro -> email notification bridge (pull/ack): NO
 // Deno cron. A scheduled Apps Script client PULLs at most
 // one pending email per request and ACKs after Gmail send,
 // so Deno never pushes outward (the old Deno -> Web App
 // relay got HTTP 401 from Workspace domain policy).
 // ALLEGRO_NOTIFY_ENABLED remains the feature flag for the
-// pull/ack endpoints. Expected cron total: 6 (2 daily
-// scheduler + 3 Arukereso source + 1 maintenance).
+// pull/ack endpoints. Expected cron total: 7 (2 daily
+// scheduler + 3 Arukereso source + 1 maintenance + 1 inventory
+// resume).
 setNotifyKvStore(await openDenoNotifyKv())
 
 // Fail closed on invalid production configuration without primary-session I/O.

@@ -1025,8 +1025,23 @@ allegroAuth.post('/inventory-sync', async (context) => {
           batchIndex?: number
           executionLease?: InventoryExecutionLease
           executionMode?: 'LEGACY' | 'SLICED'
+          /** Optional execution identity for the durable stock journal. */
+          runId?: string
         }
       | null
+
+  if (
+    body?.runId !== undefined &&
+    (typeof body.runId !== 'string' || body.runId.length > 64)
+  ) {
+    return context.json(
+      {
+        status: 'error',
+        message: 'runId must be a short string when provided',
+      },
+      400,
+    )
+  }
 
   if (
     body?.executionMode !== undefined &&
@@ -1303,6 +1318,21 @@ allegroAuth.post('/inventory-sync', async (context) => {
                   ? {
                       executionMode:
                         body.executionMode,
+                    }
+                  : {}),
+                /*
+                 * Optional journal identity. Omitted for
+                 * legacy/scheduled callers, which keeps their
+                 * journal metadata unchanged (null).
+                 */
+                ...(body.runId
+                  ? { runId: body.runId }
+                  : {}),
+                ...(typeof body.batchIndex ===
+                'number'
+                  ? {
+                      batchIndex:
+                        body.batchIndex,
                     }
                   : {}),
               },

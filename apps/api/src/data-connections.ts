@@ -40,6 +40,12 @@ import { inventoryExecutionLeaseName } from './inventory-execution-lease.js'
 import { createInventoryRefreshApi, InventoryRefreshError } from './inventory-refresh-api.js'
 import { coordinateInventoryRefresh } from './inventory-refresh-coordinator.js'
 import { readInventoryRefreshCursor, serializeAutomationDetailsWithCursor } from './inventory-refresh-slice.js'
+import {
+  classifyInventoryRefreshRun,
+  resumeEligibleInventoryRefreshes,
+  type InventoryRefreshRunRow,
+  type ResumableInventoryRefresh,
+} from './inventory-refresh-resume.js'
 
 export type RelatedImportChild<TStartedAt = Date> = {
   connectionId: string
@@ -1658,6 +1664,101 @@ export async function advanceManualFullInventoryRefresh(input: {
   })
 }
 
+/**
+ * Every MANUAL RUNNING row, unfiltered.
+ *
+ * The eligibility decision lives in the pure resume module so the same
+ * rule set is used by the scheduler and by the UI adoption endpoint.
+ */
+async function loadRunningManualInventoryRunRows(): Promise<InventoryRefreshRunRow[]> {
+  return requireDatabase()
+    .select({
+      id: dataConnectionRuns.id,
+      connectionId: dataConnectionRuns.connectionId,
+      triggerType: dataConnectionRuns.triggerType,
+      status: dataConnectionRuns.status,
+      automationDetailsJson: dataConnectionRuns.automationDetailsJson,
+      startedAt: dataConnectionRuns.startedAt,
+    })
+    .from(dataConnectionRuns)
+    .where(
+      and(
+        eq(dataConnectionRuns.triggerType, 'MANUAL'),
+        eq(dataConnectionRuns.status, 'RUNNING'),
+      ),
+    )
+    .orderBy(desc(dataConnectionRuns.startedAt))
+}
+
+export async function scanResumableInventoryRefreshRuns(
+  _now = Date.now(),
+): Promise<InventoryRefreshRunRow[]> {
+  return loadRunningManualInventoryRunRows()
+}
+
+/**
+ * The newest MANUAL RUNNING run that may actually be resumed.
+ *
+ * Legacy RUNNING orphans (no cursor) and corrupt cursors are excluded
+ * by the same classifier the scheduler uses.
+ */
+export async function findResumableInventoryRefresh(
+  connectionId: string,
+  now = Date.now(),
+): Promise<ResumableInventoryRefresh | null> {
+  const rows = (await loadRunningManualInventoryRunRows()).filter(
+    row => row.connectionId === connectionId,
+  )
+
+  for (const row of rows) {
+    const eligibility = classifyInventoryRefreshRun(row, now, {
+      requireDue: false,
+    })
+    if (eligibility.resumable) return eligibility.target
+  }
+
+  return null
+}
+
+/**
+ * One scheduler tick: advance each eligible run by at most one slice.
+ *
+ * This calls `advanceManualFullInventoryRefresh`, the exact function the
+ * HTTP `/advance` route calls, so the per-connection execution lease
+ * decides which executor runs. A frontend advance that wins the race
+ * makes this call fail with 409 and nothing is mutated twice.
+ */
+export async function resumeInventoryRefreshSchedulerTick(options?: {
+  now?: () => number
+  limit?: number
+}) {
+  const result = await resumeEligibleInventoryRefreshes({
+    scan: scanResumableInventoryRefreshRuns,
+    advance: target => advanceManualFullInventoryRefresh(target),
+    now: options?.now,
+    limit: options?.limit,
+    onSkip: entry => {
+      if (entry.reason === 'CORRUPT_CURSOR' || entry.reason === 'RUN_MISMATCH') {
+        console.warn('Inventory refresh self-resume skipped a run:', entry)
+      }
+    },
+    onError: entry => {
+      console.error('Inventory refresh self-resume failed:', entry)
+    },
+  })
+
+  if (result.advanced.length > 0 || result.failed.length > 0) {
+    console.info('Inventory refresh self-resume tick', {
+      considered: result.considered,
+      eligible: result.eligible,
+      advanced: result.advanced,
+      failed: result.failed,
+    })
+  }
+
+  return result
+}
+
 dataConnectionsApi.route('/', createInventoryRefreshApi({
   run: async (connectionId, runId) => {
     if (!manualInventoryCatalogStep) throw new InventoryRefreshError('Inventory catalog integration is not initialized', 503)
@@ -1665,6 +1766,7 @@ dataConnectionsApi.route('/', createInventoryRefreshApi({
   },
   advance: async (connectionId, runId) => advanceManualFullInventoryRefresh({ connectionId, runId }),
   getRun: getInventoryRefreshRun,
+  getResumableRun: connectionId => findResumableInventoryRefresh(connectionId),
 }))
 
 export interface DataConnectionScheduleProcessorOptions {

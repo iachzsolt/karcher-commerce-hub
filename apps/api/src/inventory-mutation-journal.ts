@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from 'drizzle-orm'
+import { and, desc, eq, inArray, sql } from 'drizzle-orm'
 import {
   allegroChangeEvents,
   createDatabase,
@@ -174,6 +174,138 @@ export async function recordStockAudit(
       }),
       occurredAt: sql`now()`,
     })
+}
+
+export type StockCommandReconciliationRow = {
+  listingId: string
+  /** Freshly observed remote stock for this listing (null = unknown). */
+  remoteStock: number | null
+}
+
+export type StockCommandReconciliationResult = {
+  reconciled: number
+  unresolved: number
+}
+
+/**
+ * Close unresolved stock commands whose intent the current remote
+ * observation already satisfies.
+ *
+ * Read-only compare plus a terminal insert: no remote write, no new
+ * commandId, and the stored command id is preserved so a later
+ * reconciliation still finds the same command. A command whose target is
+ * not observed yet stays unresolved and is left to the normal mutation
+ * path, which polls that exact command before deciding anything.
+ */
+export async function reconcileUnresolvedStockCommands(
+  database: Database,
+  rows: StockCommandReconciliationRow[],
+): Promise<StockCommandReconciliationResult> {
+  const listingIds = [...new Set(rows.map((row) => row.listingId))]
+
+  if (listingIds.length === 0) return { reconciled: 0, unresolved: 0 }
+
+  const rowByListingId = new Map(
+    rows.map((row) => [row.listingId, row]),
+  )
+
+  let storedEvents: Array<{
+    listingId: string
+    newValue: string | null
+    metadataJson: string | null
+  }>
+
+  try {
+    storedEvents = await database
+      .select({
+        listingId: allegroChangeEvents.listingId,
+        newValue: allegroChangeEvents.newValue,
+        metadataJson: allegroChangeEvents.metadataJson,
+      })
+      .from(allegroChangeEvents)
+      .where(
+        and(
+          eq(allegroChangeEvents.eventType, STOCK_OPERATION_EVENT),
+          eq(allegroChangeEvents.source, STOCK_JOURNAL_SOURCE),
+          inArray(allegroChangeEvents.listingId, listingIds),
+        ),
+      )
+      .orderBy(
+        desc(allegroChangeEvents.occurredAt),
+        desc(allegroChangeEvents.id),
+      )
+  } catch (error) {
+    console.error('Stock command reconciliation lookup failed:', error)
+    return { reconciled: 0, unresolved: 0 }
+  }
+
+  const seenListingIds = new Set<string>()
+  const confirmations: Array<{ listingId: string; event: StockAuditEvent }> = []
+  let unresolvedCount = 0
+
+  for (const stored of storedEvents) {
+    if (seenListingIds.has(stored.listingId)) continue
+
+    seenListingIds.add(stored.listingId)
+
+    if (!isUnresolvedStockCommand(stored.newValue ?? '')) continue
+
+    unresolvedCount += 1
+
+    const row = rowByListingId.get(stored.listingId)
+
+    if (!row) continue
+
+    let metadata: Record<string, unknown> | null = null
+
+    try {
+      metadata = stored.metadataJson
+        ? (JSON.parse(stored.metadataJson) as Record<string, unknown>)
+        : null
+    } catch {
+      metadata = null
+    }
+
+    const commandId =
+      typeof metadata?.commandId === 'string' ? metadata.commandId : null
+    const toStock = asFiniteNumber(metadata?.toStock)
+
+    if (!commandId || toStock === null) continue
+    if (!observedStockMatches(toStock, row.remoteStock)) continue
+
+    confirmations.push({
+      listingId: stored.listingId,
+      event: {
+        status: 'SUCCESS',
+        commandId,
+        offerId:
+          typeof metadata?.offerId === 'string' ? metadata.offerId : undefined,
+        fromStock: asFiniteNumber(metadata?.fromStock),
+        toStock,
+        runId: typeof metadata?.runId === 'string' ? metadata.runId : null,
+        batchIndex: asFiniteNumber(metadata?.batchIndex),
+        reason: 'RECONCILED_OBSERVED_STOCK',
+        observedStock: row.remoteStock,
+      },
+    })
+  }
+
+  for (const confirmation of confirmations) {
+    try {
+      await recordStockAudit(
+        database,
+        confirmation.listingId,
+        confirmation.event,
+      )
+    } catch (error) {
+      console.error('Stock command reconciliation write failed:', error)
+    }
+  }
+
+  return {
+    reconciled: confirmations.length,
+    unresolved: unresolvedCount - confirmations.length,
+  }
 }
 
 export type StockCommandTaskState =

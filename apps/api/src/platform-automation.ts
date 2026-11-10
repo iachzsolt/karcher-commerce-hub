@@ -22,6 +22,7 @@ import {
   MAX_LISTINGS_PER_BATCH,
   completeCurrentBatch,
   createEmptyBatchState,
+  expireUnresolvedPendingListings,
   isCurrentBatchComplete,
   mergeSliceIntoBatchState,
   remainingBatchListingIds,
@@ -55,6 +56,11 @@ export type InventorySyncRequestInput = {
    * request shape so `/inventory-sync` defaults to LEGACY.
    */
   executionMode?: 'LEGACY' | 'SLICED'
+  /*
+   * Optional execution identity for the durable stock journal.
+   * Legacy/scheduled callers simply omit it.
+   */
+  runId?: string
 }
 
 export function buildInventorySyncRequest(
@@ -70,6 +76,7 @@ export function buildInventorySyncRequest(
     ...(input.executionMode
       ? { executionMode: input.executionMode }
       : {}),
+    ...(input.runId ? { runId: input.runId } : {}),
   }
 }
 
@@ -591,6 +598,7 @@ export async function buildInventoryRefreshCursor(
     planIndex: 0,
     plans,
     nextAdvanceAt: null,
+    lastStopReason: null,
   }
 }
 
@@ -654,6 +662,7 @@ export async function runInventoryRefreshSlice(
           batchIndex: plan.batchIndex + 1,
           executionLease: options.executionLease,
           executionMode: 'SLICED',
+          runId: cursor.runId,
         }),
       ),
     })
@@ -675,18 +684,25 @@ export async function runInventoryRefreshSlice(
 
     const report = details.slice
 
-    plan.partial = mergeSliceIntoBatchState(plan.partial, report)
+    plan.partial = mergeSliceIntoBatchState(plan.partial, report, now())
     plan.completedListingIds = [
       ...new Set([...plan.completedListingIds, ...report.processedListingIds]),
     ]
     mutationAttempts += report.mutationAttempts
 
-    if (report.stopReason) {
-      stopReason = report.stopReason
-      nextAdvanceAt = report.nextAdvanceAt
-      break
-    }
+    /*
+     * A command Allegro never resolved must not wedge the batch forever.
+     * After the bounded wait the listing is reported as failed for this
+     * run; its journal command id stays unresolved, so a later run
+     * reconciles that same command instead of dispatching a new one.
+     */
+    expireUnresolvedPendingListings(plan, now())
 
+    /*
+     * Expiry can be the last thing a batch was waiting for. Close it now
+     * instead of honouring the stale PENDING stop reason for another
+     * cooldown window.
+     */
     if (isCurrentBatchComplete(plan)) {
       plan.completedBatches.push(
         completeCurrentBatch(plan, { ok: true, status: 200 }),
@@ -695,6 +711,12 @@ export async function runInventoryRefreshSlice(
       plan.completedListingIds = []
       plan.partial = createEmptyBatchState()
       continue
+    }
+
+    if (report.stopReason) {
+      stopReason = report.stopReason
+      nextAdvanceAt = report.nextAdvanceAt
+      break
     }
 
     if (report.processedListingIds.length === 0) {

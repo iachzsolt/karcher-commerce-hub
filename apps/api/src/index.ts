@@ -55,6 +55,7 @@ import {
   processDueDataConnectionSchedules,
   configureManualInventoryCatalogStep,
   reapStaleCatalogSyncRuns,
+  resumeInventoryRefreshSchedulerTick,
   selectRelatedImportForWrapper,
 } from './data-connections.js'
 import {
@@ -9381,6 +9382,24 @@ export async function runMinuteScheduler() {
   )
 }
 
+/**
+ * Backend self-resume for the sliced manual inventory refresh.
+ *
+ * A separate scheduler lease keeps a slow slice out of the minute
+ * scheduler's critical path. The per-connection inventory execution
+ * lease still decides which executor is allowed to mutate, so a
+ * frontend `/advance` and this tick can never both run.
+ */
+export async function runInventoryRefreshResumeScheduler() {
+  await runWithSchedulerLease(
+    'inventory-refresh-resume',
+    5 * 60 * 1000,
+    async () => {
+      await resumeInventoryRefreshSchedulerTick()
+    },
+  )
+}
+
 export async function runScheduledArukeresoSourceFeedRefresh(
   now = new Date(),
 ) {
@@ -9695,5 +9714,10 @@ export const schedulerIntervals = {
   hourly: ALLEGRO_CATALOG_SYNC_INTERVAL_MS,
   sixHourly: 6 * 60 * 60 * 1000,
   daily: ALLEGRO_HISTORY_CLEANUP_INTERVAL_MS,
+  /**
+   * Self-resume cadence for the sliced manual inventory refresh. One
+   * tick advances each eligible run by at most one slice.
+   */
+  inventoryResume: 60 * 1000,
 } as const
 

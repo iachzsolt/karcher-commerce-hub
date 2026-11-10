@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import {
   createManualInventoryRefreshAction,
+  fetchResumableInventoryRun,
   isTerminalInventoryRun,
   readInventoryRunNextAdvanceAt,
   type ManualInventoryRequest,
@@ -627,6 +628,118 @@ void describe('run cooldown', () => {
       readInventoryRunNextAdvanceAt(
         inventoryRun({ automationDetailsJson: JSON.stringify({ cursor: { nextAdvanceAt: 'soon' } }) }),
       ),
+      null,
+    )
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * Reload adoption (backend self-resume is the real fix)
+ * ------------------------------------------------------------------ */
+
+const RESUMABLE_URL = `${COLLECTION_URL}/resumable`
+
+void describe('reload adoption', () => {
+  /* 18. reload with a valid existing RUNNING sliced run -> adopt/observe */
+  void it('adopts an existing RUNNING sliced run by observing it', async () => {
+    const resumable = { connectionId: CONNECTION, runId: RUN_ID, nextAdvanceAt: 42 }
+
+    const { calls, request } = scriptedFetch(call => {
+      if (call.url === RESUMABLE_URL) return json({ status: 'ok', run: resumable })
+      if (call.url === ADVANCE_URL) {
+        return json({ status: 'ok', run: inventoryRun() })
+      }
+      return json({ status: 'ok', run: inventoryRun() })
+    })
+
+    const found = await fetchResumableInventoryRun(BASE, CONNECTION, request)
+    assert.deepEqual(found, resumable)
+
+    const action = actionWith(request)
+    const adopted = await action.adopt(found!.connectionId, found!.runId)
+
+    assert.equal(adopted?.status, 'RUNNING')
+    assert.deepEqual(action.active, { connectionId: CONNECTION, runId: RUN_ID })
+    assert.equal(calls[0].url, RESUMABLE_URL)
+    assert.equal(calls[1].url, RUN_URL, 'adoption observes the existing run')
+
+    // The adopted run can still be driven by this tab.
+    const outcome = await action.advance()
+    assert.equal(outcome.kind, 'ADVANCED')
+    assert.equal(calls.at(-1)?.url, ADVANCE_URL)
+  })
+
+  /* 19. reload never sends another start POST */
+  void it('never POSTs a start during reload recovery', async () => {
+    const { calls, request } = scriptedFetch(call => {
+      if (call.url === RESUMABLE_URL) {
+        return json({
+          status: 'ok',
+          run: { connectionId: CONNECTION, runId: RUN_ID, nextAdvanceAt: null },
+        })
+      }
+      return json({ status: 'ok', run: inventoryRun() })
+    })
+
+    const action = actionWith(request)
+    const found = await fetchResumableInventoryRun(BASE, CONNECTION, request)
+
+    await action.adopt(found!.connectionId, found!.runId)
+
+    const startPosts = calls.filter(
+      call => call.method === 'POST' && call.url === COLLECTION_URL,
+    )
+    assert.deepEqual(startPosts, [], 'recovery must never create a second run')
+  })
+
+  void it('never replaces a run this tab is already tracking', async () => {
+    const { calls, request } = scriptedFetch(() => json({ status: 'ok', run: inventoryRun() }))
+    const action = actionWith(request)
+
+    await action.start(CONNECTION, () => undefined)
+    calls.length = 0
+
+    const adopted = await action.adopt('connection-2', 'run-2')
+
+    assert.equal(adopted, null)
+    assert.deepEqual(action.active, { connectionId: CONNECTION, runId: RUN_ID })
+    assert.deepEqual(calls, [], 'no observation of an unrelated run')
+  })
+
+  /* 20. no existing run -> normal idle state */
+  void it('stays idle when the backend reports no resumable run', async () => {
+    const { calls, request } = scriptedFetch(() => json({ status: 'ok', run: null }))
+
+    const found = await fetchResumableInventoryRun(BASE, CONNECTION, request)
+    assert.equal(found, null)
+
+    const action = actionWith(request)
+    const outcome = await action.advance()
+
+    assert.deepEqual(outcome, { kind: 'NO_ACTIVE_RUN' })
+    assert.equal(action.active, null)
+    assert.equal(calls.length, 1, 'only the read-only lookup was sent')
+    assert.equal(calls[0].method, 'GET')
+  })
+
+  void it('treats an unreachable or malformed lookup as no candidate', async () => {
+    const failing = scriptedFetch(() => {
+      throw new Error('network down')
+    })
+    assert.equal(
+      await fetchResumableInventoryRun(BASE, CONNECTION, failing.request),
+      null,
+    )
+
+    const unavailable = scriptedFetch(() => json({ message: 'nope' }, 503))
+    assert.equal(
+      await fetchResumableInventoryRun(BASE, CONNECTION, unavailable.request),
+      null,
+    )
+
+    const malformed = scriptedFetch(() => json({ status: 'ok', run: { runId: 42 } }))
+    assert.equal(
+      await fetchResumableInventoryRun(BASE, CONNECTION, malformed.request),
       null,
     )
   })

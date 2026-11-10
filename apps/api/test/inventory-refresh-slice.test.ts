@@ -192,6 +192,7 @@ function cursor(plan: InventoryCursorAllegroPlan = allegroPlan()): InventoryRefr
     planIndex: 0,
     plans: [plan],
     nextAdvanceAt: null,
+    lastStopReason: null,
   }
 }
 
@@ -202,6 +203,7 @@ function report(overrides: Partial<InventorySliceReport> = {}): InventorySliceRe
     rateLimitedUntil: null,
     nextAdvanceAt: 0,
     processedListingIds: [],
+    pendingListingIds: [],
     summary: {
       attempted: 0, stockUpdated: 0, autoPaused: 0, reactivated: 0,
       unchanged: 0, skipped: 0, pending: 0, failed: 0,

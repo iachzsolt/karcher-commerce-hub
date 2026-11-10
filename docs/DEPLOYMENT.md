@@ -171,6 +171,19 @@ intended local times hold regardless of timezone support:
   changed snapshot triggers the existing coordinated Árukereső feed
   generation; an unchanged snapshot does not.
 - `0 2 * * *` — daily maintenance (Allegro history cleanup), 02:00 UTC.
+- `*/15 * * * *` — sliced manual inventory refresh self-resume. One firing
+  advances every eligible run (RUNNING, MANUAL, readable sliced cursor,
+  `nextAdvanceAt` reached, no active lease) by at most one slice through the
+  same internal function as `POST …/full-inventory-refresh/:runId/advance`.
+  The per-connection execution lease remains the only concurrency authority,
+  so a browser `/advance` racing the scheduler results in one executor and a
+  409 for the other. Override the schedule with
+  `COMMERCE_HUB_INVENTORY_RESUME_CRON`, or set it to `off` to disable this
+  cron (the Node timer below is unaffected). Kept at 15 minutes on purpose:
+  it is the coarsest cadence that still finishes an orphaned manual run in a
+  reasonable time without keeping Neon compute awake around the clock. Local
+  Node runs use `schedulerIntervals.inventoryResume` (60 s) instead, gated by
+  `COMMERCE_HUB_SCHEDULERS_ENABLED`.
 
 The former minute poll, six-hour cron, and standalone catalog-sync cron were
 removed. The minute poll kept the Neon database compute active 24/7 (free-tier

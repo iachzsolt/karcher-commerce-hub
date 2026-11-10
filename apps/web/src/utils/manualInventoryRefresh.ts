@@ -43,6 +43,65 @@ export type ManualInventoryRequest = (
 ) => Promise<Response>
 
 /**
+ * A RUNNING sliced manual run the backend proved resumable.
+ *
+ * Only used to re-attach the UI after a reload. The backend scheduler is
+ * the actual correctness mechanism; this is display/polling recovery.
+ */
+export type ManualInventoryResumableRun = {
+  connectionId: string
+  runId: string
+  nextAdvanceAt: number | null
+}
+
+/**
+ * Ask the backend for the newest resumable sliced manual run.
+ *
+ * Read-only and failure-tolerant: an unreachable API simply means "no
+ * recovery candidate", never an error banner or a new start POST.
+ */
+export async function fetchResumableInventoryRun(
+  baseUrl: string,
+  connectionId: string,
+  request: ManualInventoryRequest = fetch,
+): Promise<ManualInventoryResumableRun | null> {
+  let response: Response
+
+  try {
+    response = await request(
+      `${baseUrl}/data-connections/${connectionId}/full-inventory-refresh/resumable`,
+    )
+  } catch {
+    return null
+  }
+
+  if (!response.ok) return null
+
+  const body = (await response.json().catch(() => null)) as {
+    run?: Partial<ManualInventoryResumableRun> | null
+  } | null
+
+  const run = body?.run
+
+  if (
+    !run ||
+    typeof run.connectionId !== 'string' ||
+    typeof run.runId !== 'string'
+  ) {
+    return null
+  }
+
+  return {
+    connectionId: run.connectionId,
+    runId: run.runId,
+    nextAdvanceAt:
+      typeof run.nextAdvanceAt === 'number' && Number.isFinite(run.nextAdvanceAt)
+        ? run.nextAdvanceAt
+        : null,
+  }
+}
+
+/**
  * Statuses that prove the backend rejected the start request before a run was
  * created, so releasing the client run id cannot hide an in-flight execution.
  *
@@ -186,9 +245,69 @@ export function createManualInventoryRefreshAction(
     }
   }
 
+  const observeActive = async (): Promise<ManualInventoryRun | null> => {
+    const target = active
+    if (!target) return null
+
+    let response: Response
+
+    try {
+      response = await request(
+        `${baseUrl}/data-connections/${target.connectionId}/full-inventory-refresh/${target.runId}`,
+      )
+    } catch (error) {
+      throw new ManualInventoryRefreshError(
+        `${error instanceof Error ? error.message : 'A futás állapota nem ellenőrizhető.'} Ne indíts új futást; előbb ellenőrizd az előzményeket.`,
+        null,
+      )
+    }
+
+    if (response.status === 404) {
+      /*
+       * The run row genuinely does not exist. Holding the id would lock
+       * the UI forever, and no remote work can still be attributed to it.
+       */
+      active = null
+      throw new ManualInventoryRefreshError(
+        'A futás nem található. Indíthatsz új futást.',
+        404,
+      )
+    }
+
+    if (!response.ok) {
+      /*
+       * Transient (503, 500, ...): keep the run id. The persisted run is
+       * the source of truth and must be observed again later.
+       */
+      throw new ManualInventoryRefreshError(
+        'A futás állapota nem ellenőrizhető. Ne indíts új futást; ellenőrizd az előzményeket.',
+        response.status,
+      )
+    }
+
+    const body = (await response.json()) as { run: ManualInventoryRun }
+    return accept(body.run)
+  }
+
   return {
     get active() {
       return active
+    },
+
+    /**
+     * Re-attach to a run that already exists on the server.
+     *
+     * Never sends a start POST: the backend self-resume is what keeps the
+     * run moving, so adoption is purely so the page can display and (if
+     * the user stays) keep driving it faster. A run that is already
+     * tracked locally is never replaced.
+     */
+    async adopt(connectionId: string, runId: string) {
+      if (active) return null
+
+      active = { connectionId, runId }
+
+      return observeActive()
     },
 
     async start(connectionId: string, started: (runId: string) => void) {
@@ -264,47 +383,7 @@ export function createManualInventoryRefreshAction(
     },
 
     async observe() {
-      const target = active
-      if (!target) return null
-
-      let response: Response
-
-      try {
-        response = await request(
-          `${baseUrl}/data-connections/${target.connectionId}/full-inventory-refresh/${target.runId}`,
-        )
-      } catch (error) {
-        throw new ManualInventoryRefreshError(
-          `${error instanceof Error ? error.message : 'A futás állapota nem ellenőrizhető.'} Ne indíts új futást; előbb ellenőrizd az előzményeket.`,
-          null,
-        )
-      }
-
-      if (response.status === 404) {
-        /*
-         * The run row genuinely does not exist. Holding the id would lock
-         * the UI forever, and no remote work can still be attributed to it.
-         */
-        active = null
-        throw new ManualInventoryRefreshError(
-          'A futás nem található. Indíthatsz új futást.',
-          404,
-        )
-      }
-
-      if (!response.ok) {
-        /*
-         * Transient (503, 500, ...): keep the run id. The persisted run is
-         * the source of truth and must be observed again later.
-         */
-        throw new ManualInventoryRefreshError(
-          'A futás állapota nem ellenőrizhető. Ne indíts új futást; ellenőrizd az előzményeket.',
-          response.status,
-        )
-      }
-
-      const body = (await response.json()) as { run: ManualInventoryRun }
-      return accept(body.run)
+      return observeActive()
     },
 
     /**

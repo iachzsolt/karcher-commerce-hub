@@ -75,6 +75,26 @@ export type InventorySliceStopReason =
   | 'WRITE_BUDGET'
   | 'SLICE_BUDGET'
   | 'RATE_LIMIT'
+  /*
+   * The batch still has listings whose remote command is unresolved.
+   * Nothing new was dispatched, so the slice stops and the next one
+   * reconciles the same command ids again.
+   */
+  | 'PENDING_RECONCILIATION'
+
+/**
+ * Unresolved commands are Allegro async tasks; give them time to
+ * finish instead of re-reading them on every 2.5 s cross-slice tick.
+ */
+export const PENDING_RECONCILIATION_COOLDOWN_MS = 10_000
+
+/**
+ * A command that is still unresolved after this long stops blocking
+ * workflow progress, but is not treated as a proven mutation failure.
+ * The journal keeps the command id unresolved so a later run reconciles
+ * the same command instead of dispatching a second one.
+ */
+export const PENDING_RECONCILIATION_MAX_AGE_MS = 10 * 60 * 1000
 
 export type InventorySliceBudget = {
   config: InventoryRefreshSliceConfig
@@ -191,6 +211,10 @@ export function sliceNextAdvanceAt(
     return Math.max(now, budget.rateLimitedUntil)
   }
 
+  if (budget.stopReason === 'PENDING_RECONCILIATION') {
+    return now + PENDING_RECONCILIATION_COOLDOWN_MS
+  }
+
   if (budget.stopReason !== null) {
     const paced =
       budget.lastMutationAt === null
@@ -269,6 +293,14 @@ export type InventoryCursorBatchState = {
   refreshDetails: unknown
   failureStatus: number | null
   lastStatus: number
+  /**
+   * Listings of this batch whose remote command is still unresolved.
+   * They are deliberately NOT in `completedListingIds`, so the next
+   * slice re-inspects the same command instead of forgetting it.
+   */
+  pendingListingIds: string[]
+  /** First instant this batch had unresolved listings (epoch ms). */
+  pendingSince: number | null
 }
 
 export function createEmptyBatchState(): InventoryCursorBatchState {
@@ -279,6 +311,8 @@ export function createEmptyBatchState(): InventoryCursorBatchState {
     refreshDetails: null,
     failureStatus: null,
     lastStatus: 200,
+    pendingListingIds: [],
+    pendingSince: null,
   }
 }
 
@@ -316,6 +350,11 @@ export type InventoryRefreshCursor = {
   plans: InventoryCursorPlan[]
   /** Server-side pacing gate: no `/advance` before this instant. */
   nextAdvanceAt: number | null
+  /**
+   * Diagnostic only: why the last slice stopped. Never read for
+   * correctness decisions.
+   */
+  lastStopReason: InventorySliceStopReason | null
 }
 
 /** What a single `/inventory-sync` call reports back to the slice driver. */
@@ -325,6 +364,8 @@ export type InventorySliceReport = {
   rateLimitedUntil: number | null
   nextAdvanceAt: number
   processedListingIds: string[]
+  /** Listings that stay in the batch because their command is unresolved. */
+  pendingListingIds: string[]
   summary: InventoryBatchSummary
   refresh: { status: string; details: unknown }
   /** Already compacted: `summary` plus only SKIP/FAILED rows. */
@@ -342,6 +383,19 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function asStringArray(value: unknown): string[] | null {
   if (!Array.isArray(value)) return null
   return value.every(item => typeof item === 'string') ? [...value] : null
+}
+
+const STOP_REASONS: ReadonlySet<string> = new Set([
+  'WRITE_BUDGET',
+  'SLICE_BUDGET',
+  'RATE_LIMIT',
+  'PENDING_RECONCILIATION',
+])
+
+function asStopReason(value: unknown): InventorySliceStopReason | null {
+  return typeof value === 'string' && STOP_REASONS.has(value)
+    ? (value as InventorySliceStopReason)
+    : null
 }
 
 function asBatchSummary(value: unknown): InventoryBatchSummary {
@@ -378,6 +432,11 @@ function asBatchState(value: unknown): InventoryCursorBatchState | null {
     failureStatus:
       typeof record.failureStatus === 'number' ? record.failureStatus : null,
     lastStatus: typeof record.lastStatus === 'number' ? record.lastStatus : 200,
+    pendingListingIds: asStringArray(record.pendingListingIds) ?? [],
+    pendingSince:
+      typeof record.pendingSince === 'number' && Number.isFinite(record.pendingSince)
+        ? record.pendingSince
+        : null,
   }
 }
 
@@ -504,6 +563,7 @@ export function parseInventoryRefreshCursor(
       Number.isFinite(record.nextAdvanceAt)
         ? record.nextAdvanceAt
         : null,
+    lastStopReason: asStopReason(record.lastStopReason),
   }
 }
 
@@ -514,14 +574,44 @@ export function parseInventoryRefreshCursor(
 export function readInventoryRefreshCursor(
   automationDetailsJson: string | null,
 ): InventoryRefreshCursor | null {
-  if (!automationDetailsJson || !automationDetailsJson.trim()) return null
+  const state = readInventoryRefreshCursorState(automationDetailsJson)
+  return state.kind === 'ok' ? state.cursor : null
+}
+
+/**
+ * Distinguish "this run never had a cursor" from "the stored cursor is
+ * unreadable". Self-resume must skip both, but only the second one is a
+ * diagnostic signal.
+ */
+export type InventoryRefreshCursorState =
+  | { kind: 'none' }
+  | { kind: 'corrupt' }
+  | { kind: 'ok'; cursor: InventoryRefreshCursor }
+
+export function readInventoryRefreshCursorState(
+  automationDetailsJson: string | null,
+): InventoryRefreshCursorState {
+  if (!automationDetailsJson || !automationDetailsJson.trim()) {
+    return { kind: 'none' }
+  }
+
+  let parsed: Record<string, unknown> | null
 
   try {
-    const parsed = asRecord(JSON.parse(automationDetailsJson))
-    return parseInventoryRefreshCursor(parsed?.cursor)
+    parsed = asRecord(JSON.parse(automationDetailsJson))
   } catch {
-    return null
+    return { kind: 'corrupt' }
   }
+
+  if (!parsed) return { kind: 'corrupt' }
+
+  const raw = parsed.cursor
+
+  if (raw === undefined || raw === null) return { kind: 'none' }
+
+  const cursor = parseInventoryRefreshCursor(raw)
+
+  return cursor ? { kind: 'ok', cursor } : { kind: 'corrupt' }
 }
 
 export function serializeAutomationDetailsWithCursor(
@@ -552,20 +642,36 @@ export function isCurrentBatchComplete(plan: InventoryCursorAllegroPlan) {
 /**
  * Fold one slice report into the in-flight batch.
  *
- * Summaries add up because each listing is processed exactly once
- * per batch: completed ids are removed from the next slice's input.
- * Diagnostic rows are de-duplicated by listing id so a retried
- * listing cannot inflate the skip/failure breakdown.
+ * Summaries add up because every listing reaches a terminal outcome at
+ * most once per batch. `pending` is the exception: an unresolved listing
+ * is re-inspected by later slices, so it is counted from the durable
+ * pending set instead of being added up again.
+ *
+ * Diagnostic rows are de-duplicated by listing id so a retried listing
+ * cannot inflate the skip/failure breakdown.
  */
 export function mergeSliceIntoBatchState(
   state: InventoryCursorBatchState,
   report: InventorySliceReport,
+  now = Date.now(),
 ): InventoryCursorBatchState {
   const summary = { ...state.summary }
 
   for (const key of Object.keys(summary) as Array<keyof InventoryBatchSummary>) {
+    if (key === 'pending') continue
     summary[key] += Math.max(0, Math.trunc(report.summary[key] ?? 0))
   }
+
+  const pending = new Set(state.pendingListingIds)
+
+  /*
+   * `?? []` guards a rolling deploy where the slice report comes from a
+   * server build that predates the pending set.
+   */
+  for (const listingId of report.pendingListingIds ?? []) pending.add(listingId)
+  for (const listingId of report.processedListingIds) pending.delete(listingId)
+
+  summary.pending = pending.size
 
   const byListingId = new Map<string, Record<string, unknown>>()
 
@@ -589,7 +695,54 @@ export function mergeSliceIntoBatchState(
     refreshDetails: report.refresh.details,
     failureStatus,
     lastStatus: report.status,
+    pendingListingIds: [...pending],
+    pendingSince:
+      pending.size === 0
+        ? null
+        : state.pendingSince ?? now,
   }
+}
+
+/**
+ * Stop waiting on commands whose terminal Allegro result could not be
+ * determined within the bounded reconciliation window.
+ *
+ * Timeout is not a proven mutation failure. The unresolved journal
+ * command id is deliberately left untouched so a later run reconciles
+ * the same command instead of creating or blindly dispatching another.
+ */
+export function expireUnresolvedPendingListings(
+  plan: InventoryCursorAllegroPlan,
+  now = Date.now(),
+  maxAgeMs = PENDING_RECONCILIATION_MAX_AGE_MS,
+): string[] {
+  const pending = plan.partial.pendingListingIds
+  const since = plan.partial.pendingSince
+
+  if (pending.length === 0 || since === null) return []
+  if (now - since < maxAgeMs) return []
+
+  const expired = [...pending]
+
+  for (const listingId of expired) {
+    plan.completedListingIds.push(listingId)
+    plan.partial.results.push({
+      listingId,
+      action: 'STOCK_UPDATE',
+      status: 'RECONCILIATION_TIMEOUT',
+      reason: 'PENDING_TIMEOUT',
+    })
+  }
+
+  plan.partial.summary.pending = Math.max(
+    0,
+    plan.partial.summary.pending - expired.length,
+  )
+  plan.partial.pendingListingIds = []
+  plan.partial.pendingSince = null
+  plan.partial.summary.pending = 0
+
+  return expired
 }
 
 /** Commit the in-flight batch once every listing has been processed. */
