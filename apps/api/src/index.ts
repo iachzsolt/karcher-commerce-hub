@@ -3350,41 +3350,21 @@ app.post(
     }
   },
 )
-app.post(
-  '/allegro/remote-campaigns/:campaignId/submit',
-  async (context) => {
-    if (!db) {
-      return context.json(
-        {
-          status: 'error',
-          message: 'Database is not configured',
-        },
-        500,
-      )
+async function submitCampaignListings(
+  externalCampaignId: string,
+  listingIds: string[],
+) {
+  if (!db) {
+    return {
+      statusCode: 500 as const,
+      body: {
+        status: 'error',
+        message: 'Database is not configured',
+      },
     }
+  }
 
     try {
-      const externalCampaignId =
-        context.req.param('campaignId')
-
-      const body = await context.req.json<{
-        listingIds?: string[]
-      }>()
-
-      const listingIds =
-        body.listingIds ?? []
-
-      if (listingIds.length === 0) {
-        return context.json(
-          {
-            status: 'error',
-            message:
-              'At least one listing is required',
-          },
-          400,
-        )
-      }
-
       const remoteCampaigns =
         await getAllegroBadgeCampaigns(
           'allegro-hu',
@@ -3397,19 +3377,20 @@ app.post(
         )
 
       if (!remoteCampaign) {
-        return context.json(
-          {
+        return {
+          statusCode: 404 as const,
+          body: {
             status: 'error',
             message:
               'Campaign is no longer available in Allegro',
           },
-          404,
-        )
+        }
       }
 
       if (!remoteCampaign.eligibility.eligible) {
-        return context.json(
-          {
+        return {
+          statusCode: 409 as const,
+          body: {
             status: 'error',
             message:
               'Allegro account is not eligible for this campaign',
@@ -3417,22 +3398,21 @@ app.post(
             refusalReasons:
               remoteCampaign.eligibility.refusalReasons,
           },
-          409,
-        )
+        }
       }
 
       if (
         remoteCampaign.application.type ===
         'NEVER'
       ) {
-        return context.json(
-          {
+        return {
+          statusCode: 409 as const,
+          body: {
             status: 'error',
             message:
               'This campaign does not accept manual applications',
           },
-          409,
-        )
+        }
       }
 
       if (
@@ -3459,28 +3439,28 @@ app.post(
           applicationFrom &&
           now < applicationFrom
         ) {
-          return context.json(
-            {
+          return {
+            statusCode: 409 as const,
+            body: {
               status: 'error',
               message:
                 'Campaign application period has not started yet',
             },
-            409,
-          )
+          }
         }
 
         if (
           applicationTo &&
           now > applicationTo
         ) {
-          return context.json(
-            {
+          return {
+            statusCode: 409 as const,
+            body: {
               status: 'error',
               message:
                 'Campaign application period has already ended',
             },
-            409,
-          )
+          }
         }
       }
 
@@ -3873,20 +3853,84 @@ app.post(
             result.status === 'SKIPPED',
         ).length
 
-      return context.json({
-        status:
-          failed === 0
-            ? 'ok'
-            : succeeded === 0
-              ? 'error'
-              : 'partial',
+      return {
+        statusCode: 200 as const,
+        body: {
+          status:
+            failed === 0
+              ? 'ok'
+              : succeeded === 0
+                ? 'error'
+                : 'partial',
 
-        count: results.length,
-        succeeded,
-        failed,
-        skipped,
-        data: results,
-      })
+          count: results.length,
+          succeeded,
+          failed,
+          skipped,
+          data: results,
+        },
+      }
+    } catch (error) {
+      console.error(
+        'Campaign batch submission failed:',
+        error,
+      )
+
+      return {
+        statusCode: 500 as const,
+        body: {
+          status: 'error',
+          message:
+            'Could not submit campaign listings',
+        },
+      }
+    }
+}
+app.post(
+  '/allegro/remote-campaigns/:campaignId/submit',
+  async (context) => {
+    if (!db) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Database is not configured',
+        },
+        500,
+      )
+    }
+
+    try {
+      const externalCampaignId =
+        context.req.param('campaignId')
+
+      const body = await context.req.json<{
+        listingIds?: string[]
+      }>()
+
+      const listingIds =
+        body.listingIds ?? []
+
+      if (listingIds.length === 0) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'At least one listing is required',
+          },
+          400,
+        )
+      }
+
+      const result =
+        await submitCampaignListings(
+          externalCampaignId,
+          listingIds,
+        )
+
+      return context.json(
+        result.body,
+        result.statusCode,
+      )
     } catch (error) {
       console.error(
         'Campaign batch submission failed:',
@@ -6303,41 +6347,21 @@ app.patch('/allegro/listings/:id/desired-status', async (context) => {
     )
   }
 })
-app.post(
-  '/allegro/remote-campaigns/:campaignId/finish',
-  async (context) => {
-    if (!db) {
-      return context.json(
-        {
-          status: 'error',
-          message: 'Database is not configured',
-        },
-        500,
-      )
+async function finishCampaignListings(
+  externalCampaignId: string,
+  listingIds: string[],
+) {
+  if (!db) {
+    return {
+      statusCode: 500 as const,
+      body: {
+        status: 'error',
+        message: 'Database is not configured',
+      },
     }
+  }
 
     try {
-      const externalCampaignId =
-        context.req.param('campaignId')
-
-      const body = await context.req.json<{
-        listingIds?: string[]
-      }>()
-
-      const listingIds =
-        body.listingIds ?? []
-
-      if (listingIds.length === 0) {
-        return context.json(
-          {
-            status: 'error',
-            message:
-              'At least one listing is required',
-          },
-          400,
-        )
-      }
-
       const results: Array<{
         listingId: string
         offerId?: string
@@ -6807,24 +6831,88 @@ app.post(
         failed -
         notDue
 
-      return context.json({
-        status:
-          failed === results.length
-            ? 'error'
-            : failed > 0
-              ? 'partial'
-              : 'ok',
+      return {
+        statusCode: 200 as const,
+        body: {
+          status:
+            failed === results.length
+              ? 'error'
+              : failed > 0
+                ? 'partial'
+                : 'ok',
 
-        count:
-          results.length,
+          count:
+            results.length,
 
-        accepted,
-        failed,
-        notDue,
+          accepted,
+          failed,
+          notDue,
 
-        data:
-          results,
-      })
+          data:
+            results,
+        },
+      }
+    } catch (error) {
+      console.error(
+        'Campaign finish failed:',
+        error,
+      )
+
+      return {
+        statusCode: 500 as const,
+        body: {
+          status: 'error',
+          message:
+            'Could not finish campaign listings',
+        },
+      }
+    }
+}
+app.post(
+  '/allegro/remote-campaigns/:campaignId/finish',
+  async (context) => {
+    if (!db) {
+      return context.json(
+        {
+          status: 'error',
+          message: 'Database is not configured',
+        },
+        500,
+      )
+    }
+
+    try {
+      const externalCampaignId =
+        context.req.param('campaignId')
+
+      const body = await context.req.json<{
+        listingIds?: string[]
+      }>()
+
+      const listingIds =
+        body.listingIds ?? []
+
+      if (listingIds.length === 0) {
+        return context.json(
+          {
+            status: 'error',
+            message:
+              'At least one listing is required',
+          },
+          400,
+        )
+      }
+
+      const result =
+        await finishCampaignListings(
+          externalCampaignId,
+          listingIds,
+        )
+
+      return context.json(
+        result.body,
+        result.statusCode,
+      )
     } catch (error) {
       console.error(
         'Campaign finish failed:',
@@ -8195,43 +8283,19 @@ async function processDueCampaignFinishes() {
         listingIds,
       ] of campaignsToFinish
     ) {
-      const response =
-        await app.request(
-          `/allegro/remote-campaigns/${encodeURIComponent(
-            campaignId,
-          )}/finish`,
-          {
-            method: 'POST',
-
-            headers: {
-              'Content-Type':
-                'application/json',
-            },
-
-            body: JSON.stringify({
-              listingIds,
-            }),
-          },
+      const result =
+        await finishCampaignListings(
+          campaignId,
+          listingIds,
         )
 
-      let responseBody: unknown = null
-
-      try {
-        responseBody =
-          await response.json()
-      } catch {
-        responseBody = null
-      }
-
-      if (!response.ok) {
+      if (result.statusCode !== 200) {
         console.warn(
           'Automatic campaign finish failed:',
           {
             campaignId,
-            status:
-              response.status,
-            response:
-              responseBody,
+            status: result.statusCode,
+            response: result.body,
           },
         )
 
@@ -8244,8 +8308,7 @@ async function processDueCampaignFinishes() {
           campaignId,
           listingCount:
             listingIds.length,
-          response:
-            responseBody,
+          response: result.body,
         },
       )
     }
@@ -8595,67 +8658,51 @@ async function processDueCampaignSubmissions() {
         listingIds,
       ] of campaignsToSubmit
     ) {
-      const response = await app.request(
-        `/allegro/remote-campaigns/${encodeURIComponent(
+      const result =
+        await submitCampaignListings(
           campaignId,
-        )}/submit`,
-        {
-          method: 'POST',
+          listingIds,
+        )
 
-          headers: {
-            'Content-Type':
-              'application/json',
-          },
+      const responseStatus: number =
+        result.statusCode
+      const responseBody: unknown =
+        result.body
 
-          body: JSON.stringify({
-            listingIds,
-          }),
-        },
-      )
-
-      let responseBody: unknown = null
-
-      try {
-        responseBody =
-          await response.json()
-      } catch {
-        responseBody = null
-      }
-
-      if (!response.ok) {
+      if (responseStatus !== 200) {
         const responseMessage =
           responseBody &&
           typeof responseBody === 'object' &&
           'message' in responseBody &&
           typeof responseBody.message === 'string'
             ? responseBody.message
-            : `HTTP ${response.status}`
+            : `HTTP ${responseStatus}`
 
         const retryableConflict =
-          response.status === 409 &&
+          responseStatus === 409 &&
           responseMessage.includes(
             'has not started yet',
           )
 
         const terminalFailure =
-          response.status >= 400 &&
-          response.status < 500 &&
-          response.status !== 429 &&
+          responseStatus >= 400 &&
+          responseStatus < 500 &&
+          responseStatus !== 429 &&
           !retryableConflict
 
         let retryDelayMs =
           60 * 60 * 1000
 
-        if (response.status === 429) {
+        if (responseStatus === 429) {
           retryDelayMs =
             15 * 60 * 1000
         } else if (
-          response.status >= 500
+          responseStatus >= 500
         ) {
           retryDelayMs =
             5 * 60 * 1000
         } else if (
-          response.status === 409 &&
+          responseStatus === 409 &&
           responseMessage.includes(
             'not eligible',
           )
@@ -8663,12 +8710,12 @@ async function processDueCampaignSubmissions() {
           retryDelayMs =
             6 * 60 * 60 * 1000
         } else if (
-          response.status === 409
+          responseStatus === 409
         ) {
           retryDelayMs =
             30 * 60 * 1000
         } else if (
-          response.status === 404
+          responseStatus === 404
         ) {
           retryDelayMs =
             24 * 60 * 60 * 1000
@@ -8737,7 +8784,7 @@ async function processDueCampaignSubmissions() {
           'Automatic campaign submission skipped or failed:',
           {
             campaignId,
-            status: response.status,
+            status: responseStatus,
             retryAfter:
               retryScheduled
                 ? retryAfter.toISOString()
