@@ -8,6 +8,7 @@ export async function coordinateInventoryRefresh<Existing extends { triggerType:
   existing: () => Promise<Existing | null>
   withLease: (action: (lease: Lease) => Promise<Existing | Result>) => Promise<Existing | Result>
   recentRun: () => Promise<{ id: string } | undefined>
+  recoverOrphanedRun?: (lease: Lease) => Promise<void>
   execute: (lease: Lease) => Promise<Result>
 }) {
   const existingManualRun = async () => {
@@ -21,6 +22,9 @@ export async function coordinateInventoryRefresh<Existing extends { triggerType:
   return input.withLease(async lease => {
     const completedDuringAcquisition = await existingManualRun()
     if (completedDuringAcquisition) return completedDuringAcquisition
+    if (input.recoverOrphanedRun) {
+      await input.recoverOrphanedRun(lease)
+    }
     const recent = await input.recentRun()
     if (recent) throw new InventoryRefreshError(`Recent unfinished inventory run: ${recent.id}`, 409)
     return input.execute(lease)

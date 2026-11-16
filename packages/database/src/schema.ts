@@ -947,6 +947,9 @@ export const inventoryImportRuns = pgTable(
       .notNull()
       .references(() => dataConnections.id),
 
+    parentRunId: uuid('parent_run_id')
+      .references(() => dataConnectionRuns.id, { onDelete: 'set null' }),
+
     status: text('status')
       .notNull()
       .default('RUNNING'),
@@ -1007,6 +1010,10 @@ export const inventoryImportRuns = pgTable(
     index(
       'inventory_import_runs_started_index',
     ).on(table.startedAt),
+
+    index(
+      'inventory_import_runs_parent_index',
+    ).on(table.parentRunId),
   ],
 )
 

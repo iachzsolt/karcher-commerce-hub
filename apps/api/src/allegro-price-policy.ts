@@ -111,3 +111,10 @@ export function resolveAllegroPricePolicy(input: PricePolicyInput): AllegroPrice
 export function shouldWriteAllegroPrice(policy: AllegroPricePolicy, automatic = false) {
   return policy.comparison === 'MISMATCH' && (automatic ? policy.automaticWriteAllowed : policy.writeAllowed)
 }
+
+export function shouldRestoreLockedBaseAfterPriceSchedule(
+  policy: AllegroPricePolicy,
+  isDueScheduleEnd: boolean,
+) {
+  return isDueScheduleEnd && policy.source === 'LOCKED_PRICE' && policy.writeAllowed
+}

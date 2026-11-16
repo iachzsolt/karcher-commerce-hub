@@ -39,6 +39,7 @@ import { executeInventoryRefresh, executeInventoryRefreshSlice, type InventoryRe
 import { inventoryExecutionLeaseName } from './inventory-execution-lease.js'
 import { createInventoryRefreshApi, InventoryRefreshError } from './inventory-refresh-api.js'
 import { coordinateInventoryRefresh } from './inventory-refresh-coordinator.js'
+import { canSkipInventoryImport } from './inventory-import-safety.js'
 import { readInventoryRefreshCursor, serializeAutomationDetailsWithCursor } from './inventory-refresh-slice.js'
 import {
   classifyInventoryRefreshRun,
@@ -243,6 +244,9 @@ export async function reapStaleDataConnectionRuns(
             dataConnectionRuns.status,
             'RUNNING',
           ),
+          // Never reap a run with persisted automation state.
+          // This includes valid and potentially corrupt cursors.
+          isNull(dataConnectionRuns.automationDetailsJson),
           ne(
             dataConnectionRuns.id,
             currentRunId,
@@ -637,13 +641,13 @@ async function analyzeInventorySheet(
 
   if (skuIndex < 0) {
     throw new Error(
-      `Cikkszám oszlop nem található: ${skuSourceField}`,
+      `CikkszÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă„â€¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€ąĂ˘â‚¬Ë‡m oszlop nem talÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă„â€¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€ąĂ˘â‚¬Ë‡lhatÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇĂ„â€šĂ˘â‚¬ĹľÄ‚â€žĂ˘â‚¬Â¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇ: ${skuSourceField}`,
     )
   }
 
   if (stockIndex < 0) {
     throw new Error(
-      `Készlet oszlop nem található: ${stockSourceField}`,
+      `KÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©szlet oszlop nem talÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă„â€¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€ąĂ˘â‚¬Ë‡lhatÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇĂ„â€šĂ˘â‚¬ĹľÄ‚â€žĂ˘â‚¬Â¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇ: ${stockSourceField}`,
     )
   }
 
@@ -1199,7 +1203,7 @@ dataConnectionsApi.put(
       return context.json(
         {
           error:
-            'Adatkapcsolat nem található.',
+            'Adatkapcsolat nem talÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă„â€¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€ąĂ˘â‚¬Ë‡lhatÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇĂ„â€šĂ˘â‚¬ĹľÄ‚â€žĂ˘â‚¬Â¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇ.',
         },
         404,
       )
@@ -1215,7 +1219,7 @@ dataConnectionsApi.put(
       return context.json(
         {
           error:
-            'Automatikus frissítés csak az aktív készletforráson kapcsolható be.',
+            'Automatikus frissÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©s csak az aktÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­v kÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©szletforrÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă„â€¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€ąĂ˘â‚¬Ë‡son kapcsolhatÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇĂ„â€šĂ˘â‚¬ĹľÄ‚â€žĂ˘â‚¬Â¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇ be.',
         },
         409,
       )
@@ -1252,7 +1256,7 @@ dataConnectionsApi.put(
       return context.json(
         {
           error:
-            'Adj meg legalább egy napi frissítési időpontot.',
+            'Adj meg legalÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă„â€¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€ąĂ˘â‚¬Ë‡bb egy napi frissÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©si idÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ˘â‚¬ĹľÄ‚ËĂ˘â€šÂ¬Ă‚Â¦Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ‚ÂĂ„â€šĂ‹ÂÄ‚ËĂ˘â€šÂ¬ÄąË‡Ä‚â€šĂ‚Â¬Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Âpontot.',
         },
         400,
       )
@@ -1270,7 +1274,7 @@ dataConnectionsApi.put(
       return context.json(
         {
           error:
-            'Az intervallum 15 és 1440 perc között lehet.',
+            'Az intervallum 15 Ä‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©s 1440 perc kÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â¶zÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â¶tt lehet.',
         },
         400,
       )
@@ -1312,7 +1316,7 @@ dataConnectionsApi.put(
       return context.json(
         {
           error:
-            'A következő frissítési időpont nem számítható ki.',
+            'A kÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â¶vetkezÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ˘â‚¬ĹľÄ‚ËĂ˘â€šÂ¬Ă‚Â¦Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ‚ÂĂ„â€šĂ‹ÂÄ‚ËĂ˘â€šÂ¬ÄąË‡Ä‚â€šĂ‚Â¬Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â frissÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©si idÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ˘â‚¬ĹľÄ‚ËĂ˘â€šÂ¬Ă‚Â¦Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ‚ÂĂ„â€šĂ‹ÂÄ‚ËĂ˘â€šÂ¬ÄąË‡Ä‚â€šĂ‚Â¬Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Âpont nem szÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă„â€¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€ąĂ˘â‚¬Ë‡mÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­thatÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇĂ„â€šĂ˘â‚¬ĹľÄ‚â€žĂ˘â‚¬Â¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇ ki.',
         },
         400,
       )
@@ -1432,14 +1436,7 @@ export async function runFullInventoryRefresh(input: {
       lostError: () => new InventoryRefreshError('Inventory refresh execution lease lost', 409),
       action,
       }),
-      recentRun: async () => {
-        // Compatibility with an execution started by the pre-lease deployment.
-        // Old RUNNING history alone is deliberately not an indefinite lock.
-        const [recent] = await database.select({ id: dataConnectionRuns.id }).from(dataConnectionRuns)
-          .where(and(eq(dataConnectionRuns.connectionId, input.connectionId), eq(dataConnectionRuns.status, 'RUNNING'),
-            gte(dataConnectionRuns.startedAt, new Date(Date.now() - 5 * 60 * 1000)))).limit(1)
-        return recent
-      },
+      recentRun: () => recentRunningInventoryRun(database, input.connectionId),
       execute: async (lease: { name: string; ownerId: string; assertOwned: () => Promise<void> }) => {
         const startedAt = new Date()
         const assertOwned = async () => {
@@ -1455,9 +1452,9 @@ await lease.assertOwned()
             await database.update(dataConnectionRuns).set(state).where(eq(dataConnectionRuns.id, runId))
           },
           importSource: async () => {
-            const response = await dataConnectionsApi.request(`/${input.connectionId}/import`, { method: 'POST' })
-            const body = await response.json() as { status?: string; rowsImported?: number; changedItemCount?: number; error?: string }
-            return { ...body, ok: response.ok }
+            const result = await executeInventoryImport(input.connectionId, lease, runId)
+            const body = result.body as { status?: string; rowsImported?: number; changedItemCount?: number; error?: string }
+            return { ...body, ok: result.status >= 200 && result.status < 300 }
           },
           catalog: input.catalog,
           automate: progress => runInventoryRefreshAutomations(database, input.connectionId, {
@@ -1492,14 +1489,20 @@ async function recentRunningInventoryRun(
   database: ReturnType<typeof requireDatabase>,
   connectionId: string,
 ) {
-  // Compatibility with an execution started by the pre-lease deployment.
-  // Old RUNNING history alone is deliberately not an indefinite lock.
-  const [recent] = await database.select({ id: dataConnectionRuns.id }).from(dataConnectionRuns)
-    .where(and(eq(dataConnectionRuns.connectionId, connectionId), eq(dataConnectionRuns.status, 'RUNNING'),
-      gte(dataConnectionRuns.startedAt, new Date(Date.now() - 5 * 60 * 1000)))).limit(1)
-  return recent
-}
+  const [running] = await database
+    .select({ id: dataConnectionRuns.id })
+    .from(dataConnectionRuns)
+    .where(and(
+      eq(dataConnectionRuns.connectionId, connectionId),
+      eq(dataConnectionRuns.status, 'RUNNING'),
+    ))
+    .orderBy(desc(dataConnectionRuns.startedAt))
+    .limit(1)
 
+  // A RUNNING row always blocks a new import, regardless of age
+  // or cursor validity. Recovery must be handled separately.
+  return running ? { id: running.id } : undefined
+}
 function runStateFromRow(row: {
   importStatus: string | null
   rowsImported: number
@@ -1525,11 +1528,13 @@ function runStateFromRow(row: {
  * first bounded slice. Every later slice is driven by
  * `advanceManualFullInventoryRefresh`.
  */
-export async function beginManualFullInventoryRefresh(input: {
+export async function beginSlicedInventoryRefresh(input: {
   connectionId: string
   runId?: string
   catalog?: () => Promise<void> | void
+  trigger?: InventoryRefreshTrigger
 }) {
+  const trigger = input.trigger ?? 'MANUAL'
   const database = requireDatabase()
   const [connection] = await database.select().from(dataConnections).where(eq(dataConnections.id, input.connectionId)).limit(1)
   if (!connection) throw new InventoryRefreshError('Inventory connection not found', 404)
@@ -1537,7 +1542,7 @@ export async function beginManualFullInventoryRefresh(input: {
   const runId = input.runId ?? randomUUID()
 
   return coordinateInventoryRefresh({
-    trigger: 'MANUAL',
+    trigger,
     existing: () => getInventoryRefreshRun(input.connectionId, runId),
     withLease: action => withRenewingSchedulerLease({
       ...inventoryRefreshLeaseOptions(database, input.connectionId),
@@ -1559,11 +1564,12 @@ export async function beginManualFullInventoryRefresh(input: {
       }
 
       await database.insert(dataConnectionRuns).values({
-        id: runId, connectionId: input.connectionId, triggerType: 'MANUAL', startedAt, ...state,
+        id: runId, connectionId: input.connectionId, triggerType: trigger, startedAt, ...state,
       })
 
-      const importedResponse = await dataConnectionsApi.request(`/${input.connectionId}/import`, { method: 'POST' })
-      const imported = await importedResponse.json() as {
+      const importedResult = await executeInventoryImport(input.connectionId, lease, runId)
+      const importedResponse = { ok: importedResult.status >= 200 && importedResult.status < 300 }
+      const imported = importedResult.body as {
         status?: string; rowsImported?: number; changedItemCount?: number; error?: string
       }
 
@@ -1579,7 +1585,7 @@ export async function beginManualFullInventoryRefresh(input: {
         await persist({ ...state })
 
         return {
-          runId, triggerType: 'MANUAL' as const, ...state,
+          runId, triggerType: trigger, ...state,
           advance: { done: true, nextAdvanceAt: null, stopReason: null, mutationAttempts: 0, rateLimited: false },
         }
       }
@@ -1606,7 +1612,7 @@ export async function beginManualFullInventoryRefresh(input: {
       await persist({ ...state })
 
       return executeInventoryRefreshSlice({
-        trigger: 'MANUAL', runId, cursor, state, assertOwned, persist,
+        trigger, runId, cursor, state, assertOwned, persist,
         advance: next => runInventoryRefreshSlice(input.connectionId, next, {
           executionLease: { name: lease.name, ownerId: lease.ownerId }, assertOwned,
         }),
@@ -1622,9 +1628,18 @@ export async function beginManualFullInventoryRefresh(input: {
  * before any remote call, so a mis-sequenced client cannot burn a
  * write budget or defeat the 429 cooldown.
  */
-export async function advanceManualFullInventoryRefresh(input: {
+
+export async function beginManualFullInventoryRefresh(input: {
+  connectionId: string
+  runId?: string
+  catalog?: () => Promise<void> | void
+}) {
+  return beginSlicedInventoryRefresh({ ...input, trigger: 'MANUAL' })
+}
+async function advanceSlicedInventoryRefresh(input: {
   connectionId: string
   runId: string
+  trigger: InventoryRefreshTrigger
 }) {
   const database = requireDatabase()
 
@@ -1633,7 +1648,7 @@ export async function advanceManualFullInventoryRefresh(input: {
     action: async (lease: { name: string; ownerId: string; assertOwned: () => Promise<void> }) => {
       const run = await getInventoryRefreshRun(input.connectionId, input.runId)
       if (!run) throw new InventoryRefreshError('Inventory refresh run not found', 404)
-      if (run.triggerType !== 'MANUAL') throw new InventoryRefreshError('Only manual runs can be advanced', 409)
+      if (run.triggerType !== input.trigger) throw new InventoryRefreshError('Only manual runs can be advanced', 409)
       if (run.status !== 'RUNNING') throw new InventoryRefreshError('Inventory refresh run is already finished', 409)
 
       const cursor = readInventoryRefreshCursor(run.automationDetailsJson)
@@ -1654,7 +1669,7 @@ export async function advanceManualFullInventoryRefresh(input: {
       }
 
       return executeInventoryRefreshSlice({
-        trigger: 'MANUAL', runId: input.runId, cursor, state: runStateFromRow(run),
+        trigger: input.trigger, runId: input.runId, cursor, state: runStateFromRow(run),
         assertOwned, persist,
         advance: next => runInventoryRefreshSlice(input.connectionId, next, {
           executionLease: { name: lease.name, ownerId: lease.ownerId }, assertOwned,
@@ -1670,6 +1685,13 @@ export async function advanceManualFullInventoryRefresh(input: {
  * The eligibility decision lives in the pure resume module so the same
  * rule set is used by the scheduler and by the UI adoption endpoint.
  */
+
+export async function advanceManualFullInventoryRefresh(input: {
+  connectionId: string
+  runId: string
+}) {
+  return advanceSlicedInventoryRefresh({ ...input, trigger: 'MANUAL' })
+}
 async function loadRunningManualInventoryRunRows(): Promise<InventoryRefreshRunRow[]> {
   return requireDatabase()
     .select({
@@ -1693,7 +1715,18 @@ async function loadRunningManualInventoryRunRows(): Promise<InventoryRefreshRunR
 export async function scanResumableInventoryRefreshRuns(
   _now = Date.now(),
 ): Promise<InventoryRefreshRunRow[]> {
-  return loadRunningManualInventoryRunRows()
+  return requireDatabase()
+    .select({
+      id: dataConnectionRuns.id,
+      connectionId: dataConnectionRuns.connectionId,
+      triggerType: dataConnectionRuns.triggerType,
+      status: dataConnectionRuns.status,
+      automationDetailsJson: dataConnectionRuns.automationDetailsJson,
+      startedAt: dataConnectionRuns.startedAt,
+    })
+    .from(dataConnectionRuns)
+    .where(eq(dataConnectionRuns.status, 'RUNNING'))
+    .orderBy(desc(dataConnectionRuns.startedAt))
 }
 
 /**
@@ -1734,7 +1767,16 @@ export async function resumeInventoryRefreshSchedulerTick(options?: {
 }) {
   const result = await resumeEligibleInventoryRefreshes({
     scan: scanResumableInventoryRefreshRuns,
-    advance: target => advanceManualFullInventoryRefresh(target),
+    advance: async target => {
+      if (target.triggerType === 'SCHEDULED') {
+        return advanceSlicedInventoryRefresh({
+          connectionId: target.connectionId,
+          runId: target.runId,
+          trigger: 'SCHEDULED',
+        })
+      }
+      return advanceManualFullInventoryRefresh(target)
+    },
     now: options?.now,
     limit: options?.limit,
     onSkip: entry => {
@@ -1866,18 +1908,27 @@ export async function processDueDataConnectionSchedules(
             .weekdaysOnly,
       }
 
-      const result = await runFullInventoryRefresh({
-        connectionId: item.connection.id,
-        trigger: 'SCHEDULED',
-        catalog: options?.beforeAutomation,
-      })
+      let result: Awaited<ReturnType<typeof beginSlicedInventoryRefresh>> | null = null
+
+      try {
+        result = await beginSlicedInventoryRefresh({
+          connectionId: item.connection.id,
+          trigger: 'SCHEDULED',
+          catalog: options?.beforeAutomation,
+        })
+      } catch (error) {
+        if (!(error instanceof InventoryRefreshError && error.status === 409)) {
+          throw error
+        }
+
+        console.info('Scheduled inventory refresh deferred: active execution', {
+          connectionId: item.connection.id,
+        })
+      }
+
       if (result) {
-        await reapStaleDataConnectionRuns(
-          db,
-          item.connection.id,
-          result.runId,
-          result.startedAt,
-        )
+        const startedAt = new Date()
+
 
         const nextRunAt =
           calculateNextRunAt(
@@ -1891,7 +1942,7 @@ export async function processDueDataConnectionSchedules(
           )
           .set({
             lastRunAt:
-              result.startedAt,
+              startedAt,
             nextRunAt,
             updatedAt:
               new Date(),
@@ -1985,7 +2036,7 @@ dataConnectionsApi.post(
         return context.json(
           {
             error:
-              'Érvénytelen Google Spreadsheet URL vagy ID.',
+              'Ä‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ‚ÂĂ„â€šĂ‹ÂÄ‚ËĂ˘â€šÂ¬ÄąË‡Ä‚â€šĂ‚Â¬Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â°rvÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nytelen Google Spreadsheet URL vagy ID.',
           },
           400,
         )
@@ -2114,7 +2165,7 @@ dataConnectionsApi.post(
       return context.json(
         {
           error:
-            'Hiányzó vagy hibás adatkapcsolati beállítás.',
+            'HiÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă„â€¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€ąĂ˘â‚¬Ë‡nyzÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇĂ„â€šĂ˘â‚¬ĹľÄ‚â€žĂ˘â‚¬Â¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇ vagy hibÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă„â€¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€ąĂ˘â‚¬Ë‡s adatkapcsolati beÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă„â€¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€ąĂ˘â‚¬Ë‡llÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă„â€¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€ąĂ˘â‚¬Ë‡s.',
         },
         400,
       )
@@ -2141,7 +2192,7 @@ dataConnectionsApi.post(
       return context.json(
         {
           error:
-            'Az adatkapcsolat nem jött létre.',
+            'Az adatkapcsolat nem jÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â¶tt lÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©tre.',
         },
         500,
       )
@@ -2220,7 +2271,7 @@ dataConnectionsApi.post(
       return context.json(
         {
           error:
-            'Adatkapcsolat nem található.',
+            'Adatkapcsolat nem talÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă„â€¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€ąĂ˘â‚¬Ë‡lhatÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇĂ„â€šĂ˘â‚¬ĹľÄ‚â€žĂ˘â‚¬Â¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇ.',
         },
         404,
       )
@@ -2366,7 +2417,7 @@ async function runPostInventoryImportFeedHook(
     return await requestGeneration('INVENTORY_SYNC')
   } catch (error) {
     console.error(
-      'Inventory import succeeded, but Árukereső feed generation failed:',
+      'Inventory import succeeded, but Ä‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚ÂrukeresÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ˘â‚¬ĹľÄ‚ËĂ˘â€šÂ¬Ă‚Â¦Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ‚ÂĂ„â€šĂ‹ÂÄ‚ËĂ˘â€šÂ¬ÄąË‡Ä‚â€šĂ‚Â¬Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â feed generation failed:',
       error,
     )
 
@@ -2375,21 +2426,30 @@ async function runPostInventoryImportFeedHook(
       message:
         error instanceof Error
           ? error.message
-          : 'Árukereső feed generation failed.',
+          : 'Ä‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚ÂrukeresÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ˘â‚¬ĹľÄ‚ËĂ˘â€šÂ¬Ă‚Â¦Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ‚ÂĂ„â€šĂ‹ÂÄ‚ËĂ˘â€šÂ¬ÄąË‡Ä‚â€šĂ‚Â¬Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â feed generation failed.',
     }
   }
 }
 
-dataConnectionsApi.post(
-  '/:connectionId/import',
-  async (context) => {
-    const database =
-      requireDatabase()
+type InventoryImportLease = {
+  name: string
+  ownerId: string
+  assertOwned: () => Promise<void>
+}
 
-    const connectionId =
-      context.req.param(
-        'connectionId',
-      )
+function inventoryImportResponse(
+  body: Record<string, unknown>,
+  status: number = 200,
+) {
+  return { body, status }
+}
+async function executeInventoryImport(
+  connectionId: string,
+  lease: InventoryImportLease,
+  parentRunId?: string,
+) {
+  const database = requireDatabase()
+  await lease.assertOwned()
 
     const stored =
       await getConnection(
@@ -2400,10 +2460,10 @@ dataConnectionsApi.post(
       !stored ||
       !stored.config
     ) {
-      return context.json(
+      return inventoryImportResponse(
         {
           error:
-            'Adatkapcsolat nem található.',
+            'Adatkapcsolat nem talÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă„â€¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€ąĂ˘â‚¬Ë‡lhatÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇĂ„â€šĂ˘â‚¬ĹľÄ‚â€žĂ˘â‚¬Â¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇ.',
         },
         404,
       )
@@ -2416,15 +2476,16 @@ dataConnectionsApi.post(
         )
         .values({
           connectionId,
+          parentRunId: parentRunId ?? null,
           status: 'RUNNING',
         })
         .returning()
 
     if (!run) {
-      return context.json(
+      return inventoryImportResponse(
         {
           error:
-            'Import futás nem hozható létre.',
+            'Import futÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă„â€¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€ąĂ˘â‚¬Ë‡s nem hozhatÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇĂ„â€šĂ˘â‚¬ĹľÄ‚â€žĂ˘â‚¬Â¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇ lÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©tre.',
         },
         500,
       )
@@ -2449,7 +2510,7 @@ dataConnectionsApi.post(
         analysis.rowsImported === 0
       ) {
         const message =
-          'A forrás nem tartalmaz használható cikkszámot.'
+          'A forrÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă„â€¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€ąĂ˘â‚¬Ë‡s nem tartalmaz hasznÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă„â€¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€ąĂ˘â‚¬Ë‡lhatÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇĂ„â€šĂ˘â‚¬ĹľÄ‚â€žĂ˘â‚¬Â¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇ cikkszÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă„â€¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€ąĂ˘â‚¬Ë‡mot.'
 
         const now =
           new Date()
@@ -2496,7 +2557,7 @@ dataConnectionsApi.post(
             ),
           )
 
-        return context.json(
+        return inventoryImportResponse(
           {
             status: 'FAILED',
             error: message,
@@ -2510,39 +2571,29 @@ dataConnectionsApi.post(
       const [previousRun] =
         await database
           .select({
+            status:
+              inventoryImportRuns.status,
             sourceFingerprint:
               inventoryImportRuns
                 .sourceFingerprint,
           })
-          .from(
-            inventoryImportRuns,
-          )
+          .from(inventoryImportRuns)
           .where(
             and(
               eq(
-                inventoryImportRuns
-                  .connectionId,
+                inventoryImportRuns.connectionId,
                 connectionId,
               ),
-              or(
-                eq(
-                  inventoryImportRuns
-                    .status,
-                  'SUCCESS',
-                ),
-                eq(
-                  inventoryImportRuns
-                    .status,
-                  'NO_CHANGE',
-                ),
+              ne(
+                inventoryImportRuns.id,
+                run.id,
               ),
             ),
           )
           .orderBy(
-            desc(
-              inventoryImportRuns
-                .startedAt,
-            ),
+            desc(inventoryImportRuns.startedAt),
+            desc(inventoryImportRuns.createdAt),
+            desc(inventoryImportRuns.id),
           )
           .limit(1)
 
@@ -2550,62 +2601,28 @@ dataConnectionsApi.post(
         new Date()
 
       if (
-        previousRun
-          ?.sourceFingerprint ===
-        analysis.fingerprint
+        canSkipInventoryImport({
+          latestRun: previousRun ?? null,
+          currentFingerprint: analysis.fingerprint,
+        })
       ) {
-        await database
-          .update(
-            inventoryImportRuns,
-          )
-          .set({
-            status:
-              'NO_CHANGE',
-            rowsRead:
-              analysis.rowsRead,
-            rowsImported:
-              analysis.rowsImported,
-            rowsNormalizedToZero:
-              analysis
-                .rowsNormalizedToZero,
-            duplicateSkuCount:
-              analysis
-                .duplicateSkuCount,
-            changedItemCount: 0,
-            sourceFingerprint:
-              analysis.fingerprint,
-            finishedAt: now,
-          })
-          .where(
-            eq(
-              inventoryImportRuns.id,
-              run.id,
-            ),
-          )
+        await lease.assertOwned()
 
-        await database
-          .update(
-            dataConnections,
+        await database.execute(sql`
+          SELECT finalize_unchanged_inventory_import(
+            ${connectionId}::uuid,
+            ${run.id}::uuid,
+            ${analysis.rowsRead},
+            ${analysis.rowsImported},
+            ${analysis.rowsNormalizedToZero},
+            ${analysis.duplicateSkuCount},
+            ${analysis.fingerprint},
+            ${lease.name},
+            ${lease.ownerId}::uuid
           )
-          .set({
-            status:
-              analysis
-                .duplicateSkuCount > 0
-                ? 'READY_WITH_WARNINGS'
-                : 'READY',
-            lastSuccessfulAt:
-              now,
-            lastError: null,
-            updatedAt: now,
-          })
-          .where(
-            eq(
-              dataConnections.id,
-              connectionId,
-            ),
-          )
+        `)
 
-        return context.json({
+        return inventoryImportResponse({
           status: 'NO_CHANGE',
           rowsRead:
             analysis.rowsRead,
@@ -2621,216 +2638,68 @@ dataConnectionsApi.post(
         })
       }
 
-      const existingItems =
-        await database
-          .select({
-            sku:
-              inventorySourceItems
-                .sku,
-            stock:
-              inventorySourceItems
-                .stock,
+      const existingItems = await database
+        .select({
+          sku: inventorySourceItems.sku,
+        })
+        .from(inventorySourceItems)
+        .where(eq(inventorySourceItems.connectionId, connectionId))
+
+      const currentSkuSet = new Set(
+        analysis.items.map((item) => item.sku),
+      )
+
+      const removedItemCount = existingItems.filter(
+        (item) => !currentSkuSet.has(item.sku),
+      ).length
+
+      const snapshot = analysis.items.map((item) => ({
+        sku: item.sku,
+        stock: item.stock,
+        source_stock_value: item.sourceStockValue,
+        normalized_to_zero: item.normalizedToZero,
+      }))
+
+      const applied = await database.execute<{
+        changed_item_count: number
+      }>(sql`
+        SELECT apply_inventory_snapshot(
+          ${connectionId}::uuid,
+          ${run.id}::uuid,
+          ${JSON.stringify(snapshot)}::jsonb,
+          ${analysis.rowsRead},
+          ${analysis.rowsNormalizedToZero},
+          ${analysis.duplicateSkuCount},
+          ${analysis.fingerprint},
+          ${lease.name},
+          ${lease.ownerId}::uuid
+        ) AS changed_item_count
+      `)
+
+      const changedItemCount = Number(
+        applied.rows[0]?.changed_item_count ?? 0,
+      )
+
+      const feedGeneration = await (async () => {
+        try {
+          return await runPostInventoryImportFeedHook({
+            status: 'SUCCESS',
+            changedItemCount,
           })
-          .from(
-            inventorySourceItems,
-          )
-          .where(
-            eq(
-              inventorySourceItems
-                .connectionId,
-              connectionId,
-            ),
-          )
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : 'Feed generation failed'
 
-      const existingBySku =
-        new Map(
-          existingItems.map(
-            (item) => [
-              item.sku,
-              item.stock,
-            ],
-          ),
-        )
+          console.error('Post-import feed generation failed:', message)
 
-      const currentSkuSet =
-        new Set(
-          analysis.items.map(
-            (item) => item.sku,
-          ),
-        )
+          return {
+            status: 'failed' as const,
+            error: message,
+          }
+        }
+      })()
 
-      const updatedOrAddedItemCount =
-        analysis.items.filter(
-          (item) =>
-            existingBySku.get(
-              item.sku,
-            ) !== item.stock,
-        ).length
-
-      const removedItemCount =
-        existingItems.filter(
-          (item) =>
-            !currentSkuSet.has(
-              item.sku,
-            ),
-        ).length
-
-      const changedItemCount =
-        updatedOrAddedItemCount +
-        removedItemCount
-
-      const chunkSize = 200
-
-      for (
-        let offset = 0;
-        offset <
-        analysis.items.length;
-        offset += chunkSize
-      ) {
-        const chunk =
-          analysis.items.slice(
-            offset,
-            offset + chunkSize,
-          )
-
-        await database
-          .insert(
-            inventorySourceItems,
-          )
-          .values(
-            chunk.map(
-              (item) => ({
-                connectionId,
-                sku: item.sku,
-                stock:
-                  item.stock,
-                sourceStockValue:
-                  item
-                    .sourceStockValue,
-                normalizedToZero:
-                  item
-                    .normalizedToZero,
-                lastImportRunId:
-                  run.id,
-                observedAt:
-                  now,
-                updatedAt:
-                  now,
-              }),
-            ),
-          )
-          .onConflictDoUpdate({
-            target: [
-              inventorySourceItems
-                .connectionId,
-              inventorySourceItems
-                .sku,
-            ],
-            set: {
-              stock:
-                sql`excluded.stock`,
-              sourceStockValue:
-                sql`excluded.source_stock_value`,
-              normalizedToZero:
-                sql`excluded.normalized_to_zero`,
-              lastImportRunId:
-                sql`excluded.last_import_run_id`,
-              observedAt:
-                sql`excluded.observed_at`,
-              updatedAt:
-                sql`excluded.updated_at`,
-            },
-          })
-      }
-
-      /*
-       * Remove items that are not part of the new full snapshot.
-       *
-       * Every item seen in this import has already been upserted
-       * with lastImportRunId = run.id. Anything else belongs to
-       * an older snapshot and must no longer remain active.
-       */
-      await database
-        .delete(
-          inventorySourceItems,
-        )
-        .where(
-          and(
-            eq(
-              inventorySourceItems
-                .connectionId,
-              connectionId,
-            ),
-            or(
-              isNull(
-                inventorySourceItems
-                  .lastImportRunId,
-              ),
-              ne(
-                inventorySourceItems
-                  .lastImportRunId,
-                run.id,
-              ),
-            ),
-          ),
-        )
-      await database
-        .update(
-          inventoryImportRuns,
-        )
-        .set({
-          status: 'SUCCESS',
-          rowsRead:
-            analysis.rowsRead,
-          rowsImported:
-            analysis.rowsImported,
-          rowsNormalizedToZero:
-            analysis
-              .rowsNormalizedToZero,
-          duplicateSkuCount:
-            analysis
-              .duplicateSkuCount,
-          changedItemCount,
-          sourceFingerprint:
-            analysis.fingerprint,
-          finishedAt: now,
-        })
-        .where(
-          eq(
-            inventoryImportRuns.id,
-            run.id,
-          ),
-        )
-
-      await database
-        .update(
-          dataConnections,
-        )
-        .set({
-          status:
-            analysis
-              .duplicateSkuCount > 0
-              ? 'READY_WITH_WARNINGS'
-              : 'READY',
-          lastSuccessfulAt:
-            now,
-          lastError: null,
-          updatedAt: now,
-        })
-        .where(
-          eq(
-            dataConnections.id,
-            connectionId,
-          ),
-        )
-
-      const feedGeneration =
-        await runPostInventoryImportFeedHook({
-          status: 'SUCCESS',
-          changedItemCount,
-        })
-
-      return context.json({
+      return inventoryImportResponse({
         status: 'SUCCESS',
         rowsRead:
           analysis.rowsRead,
@@ -2852,39 +2721,18 @@ dataConnectionsApi.post(
           ? error.message
           : 'Inventory import failed.'
 
-      await database
-        .update(
-          inventoryImportRuns,
+      await database.execute(sql`
+        SELECT fail_inventory_import(
+          ${connectionId}::uuid,
+          ${run.id}::uuid,
+          ${message},
+          ${lease.name},
+          ${lease.ownerId}::uuid
         )
-        .set({
-          status: 'FAILED',
-          error: message,
-          finishedAt:
-            new Date(),
-        })
-        .where(
-          eq(
-            inventoryImportRuns.id,
-            run.id,
-          ),
-        )
+      `)
 
-      await database
-        .update(dataConnections)
-        .set({
-          status: 'ERROR',
-          lastError: message,
-          updatedAt:
-            new Date(),
-        })
-        .where(
-          eq(
-            dataConnections.id,
-            connectionId,
-          ),
-        )
 
-      return context.json(
+      return inventoryImportResponse(
         {
           status: 'FAILED',
           error: message,
@@ -2892,10 +2740,23 @@ dataConnectionsApi.post(
         500,
       )
     }
+}
+
+dataConnectionsApi.post(
+  '/:connectionId/import',
+  async (context) => {
+    const connectionId = context.req.param('connectionId')
+    const database = requireDatabase()
+
+    return withRenewingSchedulerLease({
+      ...inventoryRefreshLeaseOptions(database, connectionId),
+      action: async (lease) => {
+        const result = await executeInventoryImport(connectionId, lease)
+        return context.json(result.body, result.status as 200)
+      },
+    })
   },
 )
-
-
 /* ============================================================
    ACTIVATE INVENTORY SOURCE
    ============================================================ */
@@ -2933,7 +2794,7 @@ dataConnectionsApi.post(
       return context.json(
         {
           error:
-            'Készlet adatkapcsolat nem található.',
+            'KÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©szlet adatkapcsolat nem talÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă„â€¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€ąĂ˘â‚¬Ë‡lhatÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇĂ„â€šĂ˘â‚¬ĹľÄ‚â€žĂ˘â‚¬Â¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇ.',
         },
         404,
       )
@@ -2946,7 +2807,7 @@ dataConnectionsApi.post(
       return context.json(
         {
           error:
-            'Csak sikeresen tesztelt adatkapcsolat állítható be aktív készletforrásként.',
+            'Csak sikeresen tesztelt adatkapcsolat Ä‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă„â€¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€ąĂ˘â‚¬Ë‡llÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­thatÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇĂ„â€šĂ˘â‚¬ĹľÄ‚â€žĂ˘â‚¬Â¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇ be aktÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­v kÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©szletforrÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă„â€¦Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚â€ąĂ˘â‚¬Ë‡skÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąÄľĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ă„Ä…Ă‹â€ˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬ÄąË‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nt.',
         },
         409,
       )

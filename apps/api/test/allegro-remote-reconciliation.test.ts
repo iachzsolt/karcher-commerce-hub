@@ -110,6 +110,15 @@ test('route and manual control boundaries prohibit Allegro writes and desired up
   assert.doesNotMatch(manual, /push-stock|push-price|push-status/)
 })
 
+test('targeted Allegro sync bounds its remote offer read', () => {
+  const source = readFileSync(new URL('../src/allegro-auth.ts', import.meta.url), 'utf8')
+  const routeStart = source.indexOf("allegroAuth.post('/sync'")
+  const routeEnd = source.indexOf("allegroAuth.post('/push-price/", routeStart)
+  const route = source.slice(routeStart, routeEnd)
+
+  assert.match(route, /signal: AbortSignal\.timeout\(10_000\)/)
+})
+
 test('HTTP route rejects empty, oversized, and malformed targeting before remote work', async () => {
   for (const listingIds of [[], Array(11).fill('11111111-1111-4111-8111-111111111111'), ['not-a-uuid']]) {
     const response = await allegroAuth.request('/reconcile-listings', {

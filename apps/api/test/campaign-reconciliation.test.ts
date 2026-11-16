@@ -2,6 +2,15 @@ import { strict as assert } from 'node:assert'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { campaignRejection, reconciledBadgeStatus, refreshCampaignListingPublication } from '../src/allegro-campaign-reconciliation.js'
+import { isAlreadyFinishedAllegroCampaignResponse } from '../src/allegro-auth.js'
+
+test('only Allegro 422 BB42 errors mean the campaign is already finished', () => {
+  const bb42 = { errors: [{ code: 'BB42', message: 'Campaign already finished' }] }
+  assert.equal(isAlreadyFinishedAllegroCampaignResponse(422, bb42), true)
+  assert.equal(isAlreadyFinishedAllegroCampaignResponse(422, { errors: [{ code: 'OTHER' }] }), false)
+  assert.equal(isAlreadyFinishedAllegroCampaignResponse(400, bb42), false)
+  assert.equal(isAlreadyFinishedAllegroCampaignResponse(422, { code: 'BB42' }), false)
+})
 
 test('known terminal applications follow authoritative badges without reopening on missing/unknown evidence', () => {
   for (const status of ['WAITING_FOR_PUBLICATION', 'FINISHED', 'ACTIVE', 'IN_VERIFICATION', 'DECLINED']) {
@@ -53,4 +62,10 @@ test('production reconciliation has no submission, stock, desired-state, or publ
   assert.ok(processor.includes('gte(listingCampaigns.validTo'))
   assert.ok(processor.includes('isNotNull(listingCampaigns.externalApplicationId)'))
   assert.match(processor, /applicationError:\s+badgeRejectionText/)
+})
+
+test('both campaign finish callers reconcile BB42 without requiring an operation ID', () => {
+  const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  assert.equal(source.match(/if \(result\.ok && result\.alreadyFinished\)/g)?.length, 2)
+  assert.equal(source.match(/finishOperationId: null,\s+campaignStatus: 'FINISHED',\s+finishError: null,\s+finishRetryAfter: null/g)?.length, 2)
 })

@@ -33,6 +33,7 @@ export type InventoryRefreshRunRow = {
 export type ResumableInventoryRefresh = {
   connectionId: string
   runId: string
+  triggerType: 'MANUAL' | 'SCHEDULED'
   nextAdvanceAt: number | null
 }
 
@@ -82,7 +83,7 @@ export function classifyInventoryRefreshRun(
 ): InventoryRefreshEligibility {
   const requireDue = options?.requireDue ?? true
 
-  if (row.triggerType !== 'MANUAL') {
+  if (row.triggerType !== 'MANUAL' && row.triggerType !== 'SCHEDULED') {
     return { resumable: false, reason: 'NOT_MANUAL' }
   }
 
@@ -117,6 +118,7 @@ export function classifyInventoryRefreshRun(
     target: {
       connectionId: row.connectionId,
       runId: row.id,
+        triggerType: row.triggerType as 'MANUAL' | 'SCHEDULED',
       nextAdvanceAt: state.cursor.nextAdvanceAt,
     },
   }

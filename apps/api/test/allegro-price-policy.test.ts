@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
 import { readFileSync } from 'node:fs'
-import { resolveAllegroPricePolicy, shouldWriteAllegroPrice, type PricePolicyInput } from '../src/allegro-price-policy.js'
+import { resolveAllegroPricePolicy, shouldRestoreLockedBaseAfterPriceSchedule, shouldWriteAllegroPrice, type PricePolicyInput } from '../src/allegro-price-policy.js'
 import { evaluateAllegroMismatch } from '../../web/src/utils/allegroMismatch.js'
 import { reconcileAllegroObservation } from '../src/allegro-remote-observation.js'
 
@@ -72,6 +72,16 @@ test('expired schedule restores locked base policy', () => {
   const result = resolveAllegroPricePolicy({ ...fixture(), priceLocked: true, schedules: [schedule], now: new Date('2026-10-05T12:00Z') })
   assert.equal(result.expectedPriceMinor, 10000)
   assert.equal(result.source, 'LOCKED_PRICE')
+})
+test('only a due schedule end may automatically restore a valid locked base', () => {
+  const mismatch = resolveAllegroPricePolicy({ ...fixture(), priceLocked: true })
+  const match = resolveAllegroPricePolicy({ ...fixture(), priceLocked: true, observedPriceMinor: 10000 })
+  const campaignBlocked = resolveAllegroPricePolicy({ ...fixture(), priceLocked: true, campaigns: [campaign] })
+
+  assert.equal(shouldRestoreLockedBaseAfterPriceSchedule(mismatch, true), true)
+  assert.equal(shouldRestoreLockedBaseAfterPriceSchedule(match, true), true)
+  assert.equal(shouldRestoreLockedBaseAfterPriceSchedule(mismatch, false), false)
+  assert.equal(shouldRestoreLockedBaseAfterPriceSchedule(campaignBlocked, true), false)
 })
 test('price lock owns base target; explicit push may apply it, automated schedule may not', () => {
   const result = resolveAllegroPricePolicy({ ...fixture(), priceLocked: true })
@@ -173,9 +183,14 @@ test('all price write decisions use the canonical policy; campaign routes remain
   assert.ok(single.indexOf('shouldWriteAllegroPrice') < single.indexOf('/sale/offer-price-change-commands/'))
   assert.match(single, /skipped: true, pricePolicy/)
   assert.match(single, /automatic = context.req.header/)
+  assert.match(single, /X-Commerce-Hub-Price-Schedule-End/)
+  assert.match(single, /scheduleEnd\.startAppliedAt !== null/)
+  assert.match(single, /scheduleEnd\.endAppliedAt === null/)
   const scheduler = source.slice(source.indexOf("'/process-price-schedules'"), source.indexOf("const priceChanged = pricePolicy"))
   assert.match(scheduler, /pricePolicy\?\.automaticWriteAllowed/)
   assert.match(scheduler, /X-Commerce-Hub-Price-Automation/)
+  assert.match(scheduler, /X-Commerce-Hub-Price-Schedule-End/)
+  assert.match(scheduler, /shouldRestoreLockedBaseAfterPriceSchedule\(/)
   assert.match(source, /const priceChanged = pricePolicy \? shouldWriteAllegroPrice\(pricePolicy\) : false/)
   assert.doesNotMatch(source, /hasActiveAllegroCampaignForBulkPrice|effectiveDesiredPriceMinorForBulk|hasActiveAllegroCampaign =/)
   const policy = readFileSync(new URL('../src/allegro-price-policy.ts', import.meta.url), 'utf8')
