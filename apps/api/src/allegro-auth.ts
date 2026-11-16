@@ -3,7 +3,7 @@ import { Hono } from 'hono'
 import { and, desc, eq, inArray } from 'drizzle-orm'
 import { reconcileAllegroObservation, type AllegroObservedOffer } from './allegro-remote-observation.js'
 import { loadAllegroPricePolicies } from './allegro-price-policy-store.js'
-import { shouldWriteAllegroPrice } from './allegro-price-policy.js'
+import { shouldRestoreLockedBaseAfterPriceSchedule, shouldWriteAllegroPrice } from './allegro-price-policy.js'
 import { compareObservedStock, observedStockMatches } from './allegro-stock-policy.js'
 import { readStockOwnershipSnapshot, reconcileStockOwnership } from './allegro-stock-ownership.js'
 import { executePublicationOperation, withPublicationLease, type PublicationTarget, type PublicationResult } from './allegro-publication-operation.js'
@@ -2617,12 +2617,36 @@ export type AllegroCampaignFinishResult =
       ok: true
       status: number
       data: unknown
+      alreadyFinished?: true
     }
   | {
       ok: false
       status: number
       data: unknown
     }
+
+export function isAlreadyFinishedAllegroCampaignResponse(
+  status: number,
+  data: unknown,
+): boolean {
+  if (
+    status !== 422 ||
+    !data ||
+    typeof data !== 'object' ||
+    !('errors' in data) ||
+    !Array.isArray(data.errors)
+  ) {
+    return false
+  }
+
+  return data.errors.some(
+    (error) =>
+      error !== null &&
+      typeof error === 'object' &&
+      'code' in error &&
+      error.code === 'BB42',
+  )
+}
 
 export async function finishOfferAllegroCampaign(
   input: FinishAllegroCampaignOfferInput,
@@ -2689,6 +2713,29 @@ const response = await allegroFetch(
     } catch {
       responseData =
         responseText
+    }
+  }
+
+  if (
+    isAlreadyFinishedAllegroCampaignResponse(
+      response.status,
+      responseData,
+    )
+  ) {
+    console.info(
+      'Allegro campaign already finished; reconciling local state.',
+      {
+        campaignId: input.campaignId,
+        offerId: input.offerId,
+        response: responseData,
+      },
+    )
+
+    return {
+      ok: true,
+      status: response.status,
+      data: responseData,
+      alreadyFinished: true,
     }
   }
 
@@ -6178,6 +6225,7 @@ allegroAuth.post('/sync', async (context) => {
     await allegroFetch(
       offersUrl.toString(),
       {
+        signal: AbortSignal.timeout(10_000),
         headers: {
           Authorization:
             `Bearer ${currentSession.accessToken}`,
@@ -6948,10 +6996,66 @@ allegroAuth.post('/push-price/:listingId', async (context) => {
 
   const pricePolicy = (await loadAllegroPricePolicies(db, [listingId])).get(listingId)
   const automatic = context.req.header('X-Commerce-Hub-Price-Automation') === 'true'
-  if (!pricePolicy || !shouldWriteAllegroPrice(pricePolicy, automatic)) {
+  const scheduleEndId = context.req.header('X-Commerce-Hub-Price-Schedule-End')
+  let isDueScheduleEnd = false
+
+  if (automatic && scheduleEndId) {
+    const [scheduleEnd] = await db
+      .select({
+        validTo: listingPriceSchedules.validTo,
+        startAppliedAt: listingPriceSchedules.startAppliedAt,
+        endAppliedAt: listingPriceSchedules.endAppliedAt,
+      })
+      .from(listingPriceSchedules)
+      .where(
+        and(
+          eq(listingPriceSchedules.id, scheduleEndId),
+          eq(listingPriceSchedules.listingId, listingId),
+          eq(listingPriceSchedules.enabled, true),
+        ),
+      )
+      .limit(1)
+
+    isDueScheduleEnd = Boolean(
+      scheduleEnd &&
+      scheduleEnd.startAppliedAt !== null &&
+      scheduleEnd.endAppliedAt === null &&
+      new Date() > scheduleEnd.validTo,
+    )
+  }
+
+  const restoreLockedBase = Boolean(
+    pricePolicy &&
+    shouldRestoreLockedBaseAfterPriceSchedule(
+      pricePolicy,
+      isDueScheduleEnd,
+    ),
+  )
+
+  if (
+    !pricePolicy ||
+    (
+      !shouldWriteAllegroPrice(pricePolicy, automatic) &&
+      !restoreLockedBase
+    )
+  ) {
     return context.json({ status: 'ok', skipped: true, pricePolicy,
       message: pricePolicy?.reason ?? 'PRICE_POLICY_UNAVAILABLE' })
   }
+
+  if (
+    restoreLockedBase &&
+    pricePolicy.comparison === 'MATCH'
+  ) {
+    return context.json({
+      status: 'ok',
+      skipped: true,
+      scheduleEndRestore: true,
+      pricePolicy,
+      message: 'Locked base price already matches after schedule end',
+    })
+  }
+
   const effectiveDesiredPriceMinor = pricePolicy.expectedPriceMinor!
 
   const desiredPrice =
@@ -8761,7 +8865,17 @@ allegroAuth.post(
         }
 
         const pricePolicy = (await loadAllegroPricePolicies(db, [schedule.listingId], now)).get(schedule.listingId)
-        if (!pricePolicy?.automaticWriteAllowed) {
+        const restoreLockedBase = Boolean(
+          pricePolicy &&
+          shouldRestoreLockedBaseAfterPriceSchedule(
+            pricePolicy,
+            shouldEnd,
+          ),
+        )
+        if (
+          !pricePolicy ||
+          (!pricePolicy.automaticWriteAllowed && !restoreLockedBase)
+        ) {
           const message = pricePolicy?.reason ?? 'PRICE_POLICY_UNAVAILABLE'
 
           if (schedule.lastError !== message) {
@@ -8807,7 +8921,15 @@ allegroAuth.post(
             )}`,
             {
               method: 'POST',
-              headers: { 'X-Commerce-Hub-Price-Automation': 'true' },
+              headers: {
+                'X-Commerce-Hub-Price-Automation': 'true',
+                ...(shouldEnd
+                  ? {
+                      'X-Commerce-Hub-Price-Schedule-End':
+                        schedule.id,
+                    }
+                  : {}),
+              },
             },
           )
 
@@ -8818,6 +8940,7 @@ allegroAuth.post(
             | {
                 message?: string
                 skipped?: boolean
+                scheduleEndRestore?: boolean
                 pricePolicy?: import('./allegro-price-policy.js').AllegroPricePolicy
               }
             | null
@@ -8875,7 +8998,7 @@ allegroAuth.post(
 
         // A campaign/lock may have changed between schedule evaluation and dispatch.
         // The single-price route re-resolves; a blocked NO-OP is not an applied schedule.
-        if (responseData?.skipped && (!responseData.pricePolicy?.automaticWriteAllowed || responseData.pricePolicy.comparison !== 'MATCH')) {
+        if (responseData?.skipped && !responseData.scheduleEndRestore && (!responseData.pricePolicy?.automaticWriteAllowed || responseData.pricePolicy.comparison !== 'MATCH')) {
           blocked += 1
           results.push({ scheduleId: schedule.id, listingId: schedule.listingId,
             action: shouldStart ? 'START' : 'END', status: 'BLOCKED',

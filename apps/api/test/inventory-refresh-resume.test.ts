@@ -63,6 +63,7 @@ void describe('self-resume eligibility', () => {
     assert.deepEqual(eligibility.resumable ? eligibility.target : null, {
       connectionId: 'connection-1',
       runId: 'run-1',
+      triggerType: 'MANUAL',
       nextAdvanceAt: NOW - 1,
     })
     assert.equal(cursorMatchesRun({
@@ -107,11 +108,19 @@ void describe('self-resume eligibility', () => {
     }
   })
 
-  void it('skips a scheduled run', () => {
-    const eligibility = classifyInventoryRefreshRun(runRow({ triggerType: 'SCHEDULED' }), NOW)
+  void it('accepts a scheduled run with a valid sliced cursor', () => {
+    const eligibility = classifyInventoryRefreshRun(
+      runRow({ triggerType: 'SCHEDULED' }),
+      NOW,
+    )
 
-    assert.equal(eligibility.resumable, false)
-    assert.equal(eligibility.resumable ? null : eligibility.reason, 'NOT_MANUAL')
+    assert.equal(eligibility.resumable, true)
+    assert.deepEqual(eligibility.resumable ? eligibility.target : null, {
+      connectionId: 'connection-1',
+      runId: 'run-1',
+      triggerType: 'SCHEDULED',
+      nextAdvanceAt: null,
+    })
   })
 
   /* -------------------------------------------------------------- *

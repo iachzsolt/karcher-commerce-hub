@@ -6601,6 +6601,34 @@ async function finishCampaignListings(
               },
             )
 
+          if (result.ok && result.alreadyFinished) {
+            const finishedAt = new Date()
+
+            await db
+              .update(listingCampaigns)
+              .set({
+                finishOperationId: null,
+                campaignStatus: 'FINISHED',
+                finishError: null,
+                finishRetryAfter: null,
+                lastSyncedAt: finishedAt,
+                updatedAt: finishedAt,
+              })
+              .where(
+                eq(
+                  listingCampaigns.id,
+                  preparation.id,
+                ),
+              )
+
+            results.push({
+              listingId,
+              offerId: preparation.offerId,
+              status: 'FINISHED',
+            })
+            continue
+          }
+
           if (!result.ok) {
             const errorText =
               typeof result.data === 'string'
@@ -7188,6 +7216,34 @@ app.post(
                 externalCampaignId,
               offerId: preparation.offerId,
             })
+
+          if (result.ok && result.alreadyFinished) {
+            const finishedAt = new Date()
+
+            await db
+              .update(listingCampaigns)
+              .set({
+                finishOperationId: null,
+                campaignStatus: 'FINISHED',
+                finishError: null,
+                finishRetryAfter: null,
+                lastSyncedAt: finishedAt,
+                updatedAt: finishedAt,
+              })
+              .where(
+                eq(
+                  listingCampaigns.id,
+                  preparation.id,
+                ),
+              )
+
+            results.push({
+              listingId,
+              offerId: preparation.offerId,
+              status: 'FINISHED',
+            })
+            continue
+          }
 
           if (!result.ok) {
             const errorText =

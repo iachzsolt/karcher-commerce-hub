@@ -21,7 +21,7 @@ import {
   randomUUID,
   timingSafeEqual,
 } from 'node:crypto'
-import {
+import { gt,
   and,
   asc,
   count,
@@ -101,7 +101,7 @@ class SnapshotSizeRejectedError extends Error {
     const ratio = incomingRows / previousRows
 
     super(
-      `A(z) ${source} snapshot túl kicsi: előző ${previousRows}, beérkező ${incomingRows}, arány ${ratio.toFixed(3)}, minimum ${minRatio.toFixed(3)}. A jelenlegi snapshot változatlan maradt.`,
+      `A(z) ${source} snapshot tĂşl kicsi: elĹ‘zĹ‘ ${previousRows}, beĂ©rkezĹ‘ ${incomingRows}, arĂˇny ${ratio.toFixed(3)}, minimum ${minRatio.toFixed(3)}. A jelenlegi snapshot vĂˇltozatlan maradt.`,
     )
     this.name = 'SnapshotSizeRejectedError'
   }
@@ -208,7 +208,7 @@ function snapshotSafetyErrorBody(
     status: 'error' as const,
     code: error.code,
     message:
-      'Az Árukereső snapshot biztonsági beállítása érvénytelen.',
+      'Az ĂrukeresĹ‘ snapshot biztonsĂˇgi beĂˇllĂ­tĂˇsa Ă©rvĂ©nytelen.',
   }
 }
 
@@ -1192,14 +1192,14 @@ function toCatalogRefreshError(
   if (error instanceof SnapshotSafetyConfigurationError) {
     return new SourceFeedRefreshError(
       'FAILED_SAFETY_GUARD',
-      'Az Árukereső snapshot biztonsági beállítása érvénytelen.',
+      'Az ĂrukeresĹ‘ snapshot biztonsĂˇgi beĂˇllĂ­tĂˇsa Ă©rvĂ©nytelen.',
       503,
     )
   }
 
   return new SourceFeedRefreshError(
     'FAILED_IMPORT',
-    'CMS katalógus import sikertelen.',
+    'CMS katalĂłgus import sikertelen.',
     500,
   )
 }
@@ -1250,8 +1250,8 @@ async function resolveCatalogConnection(
     throw new SourceFeedRefreshError(
       'FAILED_CONFIGURATION',
       activeConnections.length === 0
-        ? 'Nem található aktív CSV katalógusforrás.'
-        : 'Több aktív CSV katalógusforrás található; connectionId szükséges.',
+        ? 'Nem talĂˇlhatĂł aktĂ­v CSV katalĂłgusforrĂˇs.'
+        : 'TĂ¶bb aktĂ­v CSV katalĂłgusforrĂˇs talĂˇlhatĂł; connectionId szĂĽksĂ©ges.',
       409,
     )
   }
@@ -1280,7 +1280,7 @@ async function importCatalogSnapshot(input: {
   if (analysis.summary.invalidRows > 0) {
     throw new SourceFeedRefreshError(
       'FAILED_VALIDATION',
-      'A katalógus import hibás sorokat tartalmaz; a jelenlegi snapshot változatlan maradt.',
+      'A katalĂłgus import hibĂˇs sorokat tartalmaz; a jelenlegi snapshot vĂˇltozatlan maradt.',
       422,
       {
         summary: analysis.summary,
@@ -1292,7 +1292,7 @@ async function importCatalogSnapshot(input: {
   if (validItems.length === 0) {
     throw new SourceFeedRefreshError(
       'FAILED_VALIDATION',
-      'A katalógus import nem tartalmaz érvényes importálható sort.',
+      'A katalĂłgus import nem tartalmaz Ă©rvĂ©nyes importĂˇlhatĂł sort.',
       422,
       { summary: analysis.summary },
     )
@@ -1301,7 +1301,7 @@ async function importCatalogSnapshot(input: {
   if (analysis.summary.matchConflicts > 0) {
     throw new SourceFeedRefreshError(
       'FAILED_VALIDATION',
-      'A katalógus import SKU/EAN egyezési konfliktust tartalmaz.',
+      'A katalĂłgus import SKU/EAN egyezĂ©si konfliktust tartalmaz.',
       422,
       { summary: analysis.summary },
     )
@@ -1317,7 +1317,7 @@ async function importCatalogSnapshot(input: {
   ) {
     throw new SourceFeedRefreshError(
       'FAILED_VALIDATION',
-      'Az érvényes CSV sorok között kis- és nagybetűtől függetlenül duplikált Identifier található.',
+      'Az Ă©rvĂ©nyes CSV sorok kĂ¶zĂ¶tt kis- Ă©s nagybetĹ±tĹ‘l fĂĽggetlenĂĽl duplikĂˇlt Identifier talĂˇlhatĂł.',
       409,
       { summary: analysis.summary },
     )
@@ -1333,7 +1333,7 @@ async function importCatalogSnapshot(input: {
   ) {
     throw new SourceFeedRefreshError(
       'FAILED_VALIDATION',
-      'A katalógus import több forrássort kapcsol ugyanahhoz a Hub termékhez.',
+      'A katalĂłgus import tĂ¶bb forrĂˇssort kapcsol ugyanahhoz a Hub termĂ©khez.',
       409,
       { summary: analysis.summary },
     )
@@ -1645,13 +1645,13 @@ async function refreshArukeresoSourceFeed(input: {
         busyError: () =>
           new SourceFeedRefreshError(
             'REFRESH_BUSY',
-            'Az Árukereső source frissítése már folyamatban van; próbáld újra.',
+            'Az ĂrukeresĹ‘ source frissĂ­tĂ©se mĂˇr folyamatban van; prĂłbĂˇld Ăşjra.',
             409,
           ),
         lostError: () =>
           new SourceFeedRefreshError(
             'FAILED_IMPORT',
-            'Az Árukereső source frissítési zárolása lejárt.',
+            'Az ĂrukeresĹ‘ source frissĂ­tĂ©si zĂˇrolĂˇsa lejĂˇrt.',
             503,
           ),
         action: async (lease) => {
@@ -1671,7 +1671,7 @@ async function refreshArukeresoSourceFeed(input: {
           if (!run) {
             throw new SourceFeedRefreshError(
               'FAILED_IMPORT',
-              'A katalógus import futása nem hozható létre.',
+              'A katalĂłgus import futĂˇsa nem hozhatĂł lĂ©tre.',
               500,
             )
           }
@@ -1947,7 +1947,7 @@ arukeresoApi.post(
           {
             status: 'error',
             message:
-              'Az importáláshoz explicit confirm=true szükséges.',
+              'Az importĂˇlĂˇshoz explicit confirm=true szĂĽksĂ©ges.',
           },
           400,
         )
@@ -2017,7 +2017,7 @@ arukeresoApi.post(
         {
           status: 'error',
           message:
-            'A source frissítéséhez confirm=true szükséges.',
+            'A source frissĂ­tĂ©sĂ©hez confirm=true szĂĽksĂ©ges.',
         },
         400,
       )
@@ -2167,10 +2167,10 @@ arukeresoApi.get(
 const PRICING_SHEET_NAME = 'Napi adatok'
 
 const PRICING_REQUIRED_HEADERS = [
-  'Cikkszám',
+  'CikkszĂˇm',
   'Index',
-  'Mediánindex',
-  'Átlagindex',
+  'MediĂˇnindex',
+  'Ătlagindex',
 ] as const
 
 const PRICING_PREVIEW_LIMIT = 50
@@ -2297,7 +2297,7 @@ async function analyzePricingWorkbook(
     )
   } catch {
     throw new PricingWorkbookValidationError(
-      'A feltöltött fájl nem olvasható XLSX munkafüzetként.',
+      'A feltĂ¶ltĂ¶tt fĂˇjl nem olvashatĂł XLSX munkafĂĽzetkĂ©nt.',
     )
   }
 
@@ -2308,7 +2308,7 @@ async function analyzePricingWorkbook(
 
   if (!sheet) {
     throw new PricingWorkbookValidationError(
-      `A "${PRICING_SHEET_NAME}" munkalap nem található a munkafüzetben.`,
+      `A "${PRICING_SHEET_NAME}" munkalap nem talĂˇlhatĂł a munkafĂĽzetben.`,
     )
   }
 
@@ -2355,7 +2355,7 @@ async function analyzePricingWorkbook(
     )
 
     if (
-      candidate.has('Cikkszám')
+      candidate.has('CikkszĂˇm')
     ) {
       headerRowIndex = rowIndex
       headerIndexByName = candidate
@@ -2365,7 +2365,7 @@ async function analyzePricingWorkbook(
 
   if (headerRowIndex < 0) {
     throw new PricingWorkbookValidationError(
-      'A fejlécsor nem található a "Napi adatok" munkalapon.',
+      'A fejlĂ©csor nem talĂˇlhatĂł a "Napi adatok" munkalapon.',
       [...PRICING_REQUIRED_HEADERS],
     )
   }
@@ -2378,7 +2378,7 @@ async function analyzePricingWorkbook(
 
   if (missingHeaders.length > 0) {
     throw new PricingWorkbookValidationError(
-      `Hiányzó kötelező oszlopok: ${missingHeaders.join(', ')}.`,
+      `HiĂˇnyzĂł kĂ¶telezĹ‘ oszlopok: ${missingHeaders.join(', ')}.`,
       [...missingHeaders],
     )
   }
@@ -2459,7 +2459,7 @@ async function analyzePricingWorkbook(
 
     const scanSkuCell = getCell(
       scanRow,
-      'Cikkszám',
+      'CikkszĂˇm',
     )
 
     const scanSku =
@@ -2474,11 +2474,11 @@ async function analyzePricingWorkbook(
         null &&
       getCell(
         scanRow,
-        'Mediánindex',
+        'MediĂˇnindex',
       ) === null &&
       getCell(
         scanRow,
-        'Átlagindex',
+        'Ătlagindex',
       ) === null
     ) {
       continue
@@ -2502,7 +2502,7 @@ async function analyzePricingWorkbook(
 
     const rawSku = getCell(
       row,
-      'Cikkszám',
+      'CikkszĂˇm',
     )
 
     const sku =
@@ -2518,12 +2518,12 @@ async function analyzePricingWorkbook(
 
     const rawMedianIndex = getCell(
       row,
-      'Mediánindex',
+      'MediĂˇnindex',
     )
 
     const rawAverageIndex = getCell(
       row,
-      'Átlagindex',
+      'Ătlagindex',
     )
 
     const isEmptyRow =
@@ -2751,7 +2751,7 @@ arukeresoApi.post(
           {
             status: 'error',
             message:
-              'XLSX fájl feltöltése szükséges a file mezőben.',
+              'XLSX fĂˇjl feltĂ¶ltĂ©se szĂĽksĂ©ges a file mezĹ‘ben.',
           },
           400,
         )
@@ -3102,7 +3102,7 @@ async function applyPricingSnapshot(args: {
     const message =
       error instanceof Error
         ? error.message
-        : 'Árazási import sikertelen.'
+        : 'ĂrazĂˇsi import sikertelen.'
 
     try {
       await database
@@ -3210,8 +3210,8 @@ async function resolveActivePricingConnection(
       ok: false,
       message:
         activeConnections.length === 0
-          ? 'Nem található aktív árazási forrás.'
-          : 'Több aktív árazási forrás található; connectionId szükséges.',
+          ? 'Nem talĂˇlhatĂł aktĂ­v ĂˇrazĂˇsi forrĂˇs.'
+          : 'TĂ¶bb aktĂ­v ĂˇrazĂˇsi forrĂˇs talĂˇlhatĂł; connectionId szĂĽksĂ©ges.',
     }
   }
 
@@ -3401,7 +3401,7 @@ async function normalizePricingPayload(
     Array.isArray(body)
   ) {
     return fail(
-      'Érvénytelen szinkron kérés: items tömb szükséges.',
+      'Ă‰rvĂ©nytelen szinkron kĂ©rĂ©s: items tĂ¶mb szĂĽksĂ©ges.',
     )
   }
 
@@ -3411,13 +3411,13 @@ async function normalizePricingPayload(
 
   if (!Array.isArray(items)) {
     return fail(
-      'Érvénytelen szinkron kérés: items tömb szükséges.',
+      'Ă‰rvĂ©nytelen szinkron kĂ©rĂ©s: items tĂ¶mb szĂĽksĂ©ges.',
     )
   }
 
   if (items.length === 0) {
     return fail(
-      'A szinkron kérés üres items tömböt tartalmaz.',
+      'A szinkron kĂ©rĂ©s ĂĽres items tĂ¶mbĂ¶t tartalmaz.',
     )
   }
 
@@ -3425,7 +3425,7 @@ async function normalizePricingPayload(
     items.length > PRICING_SYNC_MAX_ROWS
   ) {
     return fail(
-      `Túl nagy szinkron kérés: legfeljebb ${PRICING_SYNC_MAX_ROWS} sor küldhető.`,
+      `TĂşl nagy szinkron kĂ©rĂ©s: legfeljebb ${PRICING_SYNC_MAX_ROWS} sor kĂĽldhetĹ‘.`,
     )
   }
 
@@ -3486,7 +3486,7 @@ async function normalizePricingPayload(
     !options?.fullDiagnostics
   ) {
     return fail(
-      'A szinkron kérés duplikált Cikkszám sorokat tartalmaz.',
+      'A szinkron kĂ©rĂ©s duplikĂˇlt CikkszĂˇm sorokat tartalmaz.',
       {
         summary: {
           ...emptySummary,
@@ -3750,7 +3750,7 @@ async function normalizePricingPayload(
     return {
       ok: false,
       message:
-        'A szinkron kérés hibás sorokat tartalmaz.',
+        'A szinkron kĂ©rĂ©s hibĂˇs sorokat tartalmaz.',
       summary,
       invalidRows:
         options?.fullDiagnostics
@@ -3770,7 +3770,7 @@ async function normalizePricingPayload(
     return {
       ok: false,
       message:
-        'A szinkron kérés nem tartalmaz érvényes importálható sort.',
+        'A szinkron kĂ©rĂ©s nem tartalmaz Ă©rvĂ©nyes importĂˇlhatĂł sort.',
       summary,
       invalidRows: [],
       duplicateSkus: [],
@@ -3827,7 +3827,7 @@ export type PricingIngressAudit = {
  * Pure last-push audit over a normalize result. rawItems
  * is body.items.length BEFORE any filtering; the equation
  * rawItems = normalizedItems + droppedItems always holds.
- * Only technical counts and SKU strings are retained —
+ * Only technical counts and SKU strings are retained â€”
  * never prices, names, credentials, tokens, or the body.
  */
 const PRICING_INGRESS_AUDIT_SKU_LIMIT = 200
@@ -4106,8 +4106,8 @@ arukeresoApi.post(
           status: 'error',
           message:
             auth.status === 503
-              ? 'Az árazási egyeztetés nincs konfigurálva.'
-              : 'Hiányzó vagy érvénytelen hitelesítés.',
+              ? 'Az ĂˇrazĂˇsi egyeztetĂ©s nincs konfigurĂˇlva.'
+              : 'HiĂˇnyzĂł vagy Ă©rvĂ©nytelen hitelesĂ­tĂ©s.',
         },
         auth.status,
       )
@@ -4261,8 +4261,8 @@ arukeresoApi.post(
           status: 'error',
           message:
             catalogConnections.length === 0
-              ? 'Nincs aktív CMS katalógusforrás.'
-              : 'Több aktív CMS katalógusforrás található; a diagnosztika nem egyértelmű.',
+              ? 'Nincs aktĂ­v CMS katalĂłgusforrĂˇs.'
+              : 'TĂ¶bb aktĂ­v CMS katalĂłgusforrĂˇs talĂˇlhatĂł; a diagnosztika nem egyĂ©rtelmĹ±.',
         },
         409,
       )
@@ -4585,7 +4585,7 @@ arukeresoApi.post(
           classification =
             'I_AMBIGUOUS_PRODUCT_CANDIDATES'
           recommendedAction =
-            'Manuális termékazonosítás szükséges; ne módosíts automatikusan.'
+            'ManuĂˇlis termĂ©kazonosĂ­tĂˇs szĂĽksĂ©ges; ne mĂłdosĂ­ts automatikusan.'
         } else if (productCandidates.length === 1) {
           if (hasEanMatch) {
             classification = 'D_PRODUCT_IDENTIFIED_BY_EAN'
@@ -4605,16 +4605,16 @@ arukeresoApi.post(
             classification = 'B_HUB_SKU_DIFFERS'
           }
           recommendedAction = cmsMatch
-            ? `A Cockpit SKU-t igazítsd a kanonikus Hub/CMS SKU-hoz: ${productCandidates[0]?.sku}.`
-            : 'A Hub-termék létezik, de nincs aktuális CMS-sor; feedhez CMS-forrás szükséges.'
+            ? `A Cockpit SKU-t igazĂ­tsd a kanonikus Hub/CMS SKU-hoz: ${productCandidates[0]?.sku}.`
+            : 'A Hub-termĂ©k lĂ©tezik, de nincs aktuĂˇlis CMS-sor; feedhez CMS-forrĂˇs szĂĽksĂ©ges.'
         } else if (catalogCandidates.length > 0) {
           classification = 'A_HUB_PRODUCT_MISSING'
           recommendedAction =
-            'A CMS-sor alapján csak ütközésmentes promotion/linking ellenőrzés után javítható.'
+            'A CMS-sor alapjĂˇn csak ĂĽtkĂ¶zĂ©smentes promotion/linking ellenĹ‘rzĂ©s utĂˇn javĂ­thatĂł.'
         } else {
           classification = 'I_NO_AUTHORITATIVE_MATCH'
           recommendedAction =
-            'Nincs Hub/CMS/EAN/alias bizonyíték; manuális forrásellenőrzés szükséges.'
+            'Nincs Hub/CMS/EAN/alias bizonyĂ­tĂ©k; manuĂˇlis forrĂˇsellenĹ‘rzĂ©s szĂĽksĂ©ges.'
         }
 
         const group = cmsMatch
@@ -4808,13 +4808,13 @@ arukeresoApi.post(
         {
           status: 'error',
           message:
-            'A pricing forrás létrehozásához explicit confirm=true szükséges.',
+            'A pricing forrĂˇs lĂ©trehozĂˇsĂˇhoz explicit confirm=true szĂĽksĂ©ges.',
         },
         400,
       )
     }
 
-    let connectionName = 'Árukereső Pricing'
+    let connectionName = 'ĂrukeresĹ‘ Pricing'
 
     if (name !== undefined && name !== null) {
       if (
@@ -4824,7 +4824,7 @@ arukeresoApi.post(
         return context.json(
           {
             status: 'error',
-            message: 'Érvénytelen connection név.',
+            message: 'Ă‰rvĂ©nytelen connection nĂ©v.',
           },
           400,
         )
@@ -4864,7 +4864,7 @@ arukeresoApi.post(
           {
             status: 'error',
             message:
-              'Az árazási forrás nem jött létre.',
+              'Az ĂˇrazĂˇsi forrĂˇs nem jĂ¶tt lĂ©tre.',
           },
           500,
         )
@@ -4891,7 +4891,7 @@ arukeresoApi.post(
           {
             status: 'error',
             message:
-              'Létezik inaktív árazási forrás, manuális beavatkozás szükséges.',
+              'LĂ©tezik inaktĂ­v ĂˇrazĂˇsi forrĂˇs, manuĂˇlis beavatkozĂˇs szĂĽksĂ©ges.',
             connectionId: existing.id,
           },
           409,
@@ -4909,7 +4909,7 @@ arukeresoApi.post(
       {
         status: 'error',
         message:
-          'Több árazási forrás létezik, manuális beavatkozás szükséges.',
+          'TĂ¶bb ĂˇrazĂˇsi forrĂˇs lĂ©tezik, manuĂˇlis beavatkozĂˇs szĂĽksĂ©ges.',
         connectionIds:
           existingConnections.map(
             (connection) =>
@@ -4936,7 +4936,7 @@ arukeresoApi.post(
           {
             status: 'error',
             message:
-              'Az importáláshoz explicit confirm=true szükséges.',
+              'Az importĂˇlĂˇshoz explicit confirm=true szĂĽksĂ©ges.',
           },
           400,
         )
@@ -4953,7 +4953,7 @@ arukeresoApi.post(
           {
             status: 'error',
             message:
-              'XLSX fájl feltöltése szükséges a file mezőben.',
+              'XLSX fĂˇjl feltĂ¶ltĂ©se szĂĽksĂ©ges a file mezĹ‘ben.',
           },
           400,
         )
@@ -4976,7 +4976,7 @@ arukeresoApi.post(
           {
             status: 'error',
             message:
-              'A munkafüzet hibás egyező sorokat tartalmaz, az import megszakítva.',
+              'A munkafĂĽzet hibĂˇs egyezĹ‘ sorokat tartalmaz, az import megszakĂ­tva.',
             summary: analysis.summary,
             invalidRows:
               analysis.invalidRows,
@@ -4993,7 +4993,7 @@ arukeresoApi.post(
           {
             status: 'error',
             message:
-              'A munkafüzet duplikált Cikkszám sorokat tartalmaz, az import megszakítva.',
+              'A munkafĂĽzet duplikĂˇlt CikkszĂˇm sorokat tartalmaz, az import megszakĂ­tva.',
             summary: analysis.summary,
           },
           422,
@@ -5007,7 +5007,7 @@ arukeresoApi.post(
           {
             status: 'error',
             message:
-              'Az árazási import nem tartalmaz érvényes importálható sort.',
+              'Az ĂˇrazĂˇsi import nem tartalmaz Ă©rvĂ©nyes importĂˇlhatĂł sort.',
             summary: analysis.summary,
           },
           422,
@@ -5086,7 +5086,7 @@ arukeresoApi.post(
         const message =
           error instanceof Error
             ? error.message
-            : 'Árazási import sikertelen.'
+            : 'ĂrazĂˇsi import sikertelen.'
 
         return context.json(
           {
@@ -5156,7 +5156,7 @@ arukeresoApi.post(
           message:
             error instanceof Error
               ? error.message
-              : 'Árazási import sikertelen.',
+              : 'ĂrazĂˇsi import sikertelen.',
         },
         500,
       )
@@ -5178,8 +5178,8 @@ arukeresoApi.post(
           status: 'error',
           message:
             auth.status === 503
-              ? 'Az árazási szinkronizálás nincs konfigurálva.'
-              : 'Hiányzó vagy érvénytelen hitelesítés.',
+              ? 'Az ĂˇrazĂˇsi szinkronizĂˇlĂˇs nincs konfigurĂˇlva.'
+              : 'HiĂˇnyzĂł vagy Ă©rvĂ©nytelen hitelesĂ­tĂ©s.',
         },
         auth.status,
       )
@@ -5259,7 +5259,7 @@ arukeresoApi.post(
       const message =
         error instanceof Error
           ? error.message
-          : 'Árazási szinkronizálás sikertelen.'
+          : 'ĂrazĂˇsi szinkronizĂˇlĂˇs sikertelen.'
 
       return context.json(
         {
@@ -5605,13 +5605,13 @@ export type PricingImportDiagnostics = {
  * Read-only source-to-pricing reconciliation over the
  * CURRENT stored pricing source rows. Matching reuses the
  * exact production sync semantics (identifier trimmed,
- * then exact Map lookup — no case folding, no
+ * then exact Map lookup â€” no case folding, no
  * normalization), so the diagnostic explains the live
  * data instead of a reimplementation. Every row lands in
  * exactly one bucket:
  * blank identifier / duplicate occurrence / unmatched /
  * matched-but-excluded / linked. No prices, names, or
- * secrets are returned — identifiers only.
+ * secrets are returned â€” identifiers only.
  */
 const PRICING_IMPORT_DIAGNOSTIC_LIST_LIMIT = 200
 
@@ -6339,7 +6339,7 @@ arukeresoApi.get(
  * response.
  *
  * Architectural fact this endpoint reports honestly:
- * Commerce Hub never fetches Pricing Cockpit — there is no
+ * Commerce Hub never fetches Pricing Cockpit â€” there is no
  * pull source, pagination, CSV download, or source
  * credential on the Hub side. The Cockpit sender pushes
  * `{ items: [...] }` payloads to POST /pricing/sync (or
@@ -6403,8 +6403,8 @@ arukeresoApi.get(
           status: 'error',
           message:
             connectionRows.length === 0
-              ? 'Nem található aktív árazási forrás.'
-              : 'Több aktív árazási forrás található; a diagnosztika nem egyértelmű.',
+              ? 'Nem talĂˇlhatĂł aktĂ­v ĂˇrazĂˇsi forrĂˇs.'
+              : 'TĂ¶bb aktĂ­v ĂˇrazĂˇsi forrĂˇs talĂˇlhatĂł; a diagnosztika nem egyĂ©rtelmĹ±.',
         },
         409,
       )
@@ -6714,7 +6714,7 @@ function digitsOnlyArukereso(
 }
 
 /**
- * Shared Árukereső product search predicate for the
+ * Shared ĂrukeresĹ‘ product search predicate for the
  * Products and Feed Preview endpoints. Matches Hub
  * SKU, catalog source Identifier, catalog source EAN
  * and product/source names with case-insensitive
@@ -7592,14 +7592,14 @@ function assertCatalogFeedOutputUniqueness(
   for (const item of items) {
     if (identifiers.has(item.source.Identifier)) {
       throw new FeedOutputError(
-        `Duplikált feed Identifier: ${item.source.Identifier}.`,
+        `DuplikĂˇlt feed Identifier: ${item.source.Identifier}.`,
         'DUPLICATE_FEED_IDENTIFIER',
       )
     }
 
     if (productNumbers.has(item.sku)) {
       throw new FeedOutputError(
-        `Duplikált feed ProductNumber: ${item.sku}.`,
+        `DuplikĂˇlt feed ProductNumber: ${item.sku}.`,
         'DUPLICATE_FEED_PRODUCT_NUMBER',
       )
     }
@@ -7922,7 +7922,7 @@ arukeresoApi.get(
           message:
             error instanceof Error
               ? error.message
-              : 'CMS katalógus promotion preview sikertelen.',
+              : 'CMS katalĂłgus promotion preview sikertelen.',
         },
         500,
       )
@@ -7949,7 +7949,7 @@ arukeresoApi.post(
           {
             status: 'error',
             message:
-              'A termék-promócióhoz explicit confirm=true szükséges.',
+              'A termĂ©k-promĂłciĂłhoz explicit confirm=true szĂĽksĂ©ges.',
           },
           400,
         )
@@ -7970,7 +7970,7 @@ arukeresoApi.post(
           {
             status: 'error',
             message:
-              'A katalógus-promóció nem biztonságos: nem minden tétel SAFE_NEW_PRODUCT.',
+              'A katalĂłgus-promĂłciĂł nem biztonsĂˇgos: nem minden tĂ©tel SAFE_NEW_PRODUCT.',
             summary: analysis.summary,
           },
           409,
@@ -7989,7 +7989,7 @@ arukeresoApi.post(
           {
             status: 'error',
             message:
-              'A várt biztonságos tételszám nem egyezik a friss elemzéssel.',
+              'A vĂˇrt biztonsĂˇgos tĂ©telszĂˇm nem egyezik a friss elemzĂ©ssel.',
             summary: analysis.summary,
           },
           409,
@@ -8037,7 +8037,7 @@ arukeresoApi.post(
           !item.name?.trim()
         ) {
           throw new Error(
-            'A promóciós terv inkonzisztens a friss elemzéssel.',
+            'A promĂłciĂłs terv inkonzisztens a friss elemzĂ©ssel.',
           )
         }
 
@@ -8165,7 +8165,7 @@ arukeresoApi.post(
       const message =
         error instanceof Error
           ? error.message
-          : 'CMS katalógus promóció sikertelen.'
+          : 'CMS katalĂłgus promĂłciĂł sikertelen.'
 
       const isConflict =
         /unique|duplicate|23505/i.test(
@@ -8765,7 +8765,7 @@ function parseCatalogFeedSourceRow(
         : JSON.parse(rawDataJson)
   } catch {
     throw new FeedOutputError(
-      `A katalógussor raw_data_json mezője nem értelmezhető: ${catalogSourceItemId}.`,
+      `A katalĂłgussor raw_data_json mezĹ‘je nem Ă©rtelmezhetĹ‘: ${catalogSourceItemId}.`,
       'INVALID_RAW_DATA_JSON',
     )
   }
@@ -8776,7 +8776,7 @@ function parseCatalogFeedSourceRow(
     Array.isArray(parsed)
   ) {
     throw new FeedOutputError(
-      `A katalógussor raw_data_json mezője nem objektum: ${catalogSourceItemId}.`,
+      `A katalĂłgussor raw_data_json mezĹ‘je nem objektum: ${catalogSourceItemId}.`,
       'INVALID_RAW_DATA_JSON',
     )
   }
@@ -8790,7 +8790,7 @@ function parseCatalogFeedSourceRow(
   for (const header of EXPECTED_CATALOG_HEADERS) {
     if (typeof source[header] !== 'string') {
       throw new FeedOutputError(
-        `A katalógussorból hiányzik a(z) ${header} forrásmező: ${catalogSourceItemId}.`,
+        `A katalĂłgussorbĂłl hiĂˇnyzik a(z) ${header} forrĂˇsmezĹ‘: ${catalogSourceItemId}.`,
         'MISSING_RAW_SOURCE_FIELD',
       )
     }
@@ -8808,13 +8808,13 @@ function escapeFeedCsvCell(value: string) {
 }
 
 /**
- * Final Árukereső output field order. The official
+ * Final ĂrukeresĹ‘ output field order. The official
  * field documentation does not mandate a strict
  * column order, so the confirmed ProductNumber is
  * appended after the 13 original CMS source fields
  * to minimize disruption. Identifier keeps the
  * original CMS value; ProductNumber carries the Hub
- * SKU, which is the official Kärcher manufacturer
+ * SKU, which is the official KĂ¤rcher manufacturer
  * product number (e.g. Identifier 10040620 ->
  * ProductNumber 1.004-062.0).
  */
@@ -8858,7 +8858,7 @@ function parseCatalogFeedOutputRow(
     Array.isArray(value)
   ) {
     throw new FeedOutputError(
-      `A feed-sor nem értelmezhető: ${rowLabel}.`,
+      `A feed-sor nem Ă©rtelmezhetĹ‘: ${rowLabel}.`,
       'INVALID_RESOLVED_FEED_ITEM',
     )
   }
@@ -8869,7 +8869,7 @@ function parseCatalogFeedOutputRow(
   for (const header of FEED_OUTPUT_HEADERS) {
     if (typeof source[header] !== 'string') {
       throw new FeedOutputError(
-        `A feed-sorból hiányzik a(z) ${header} mező: ${rowLabel}.`,
+        `A feed-sorbĂłl hiĂˇnyzik a(z) ${header} mezĹ‘: ${rowLabel}.`,
         'MISSING_FEED_OUTPUT_FIELD',
       )
     }
@@ -8911,7 +8911,7 @@ function assertFeedOutputSafety(
 ) {
   if (outputRows < minOutputRows) {
     throw new FeedOutputError(
-      `A generálás leállt: ${outputRows} feed-sor nem éri el a minimális ${minOutputRows} értéket.`,
+      `A generĂˇlĂˇs leĂˇllt: ${outputRows} feed-sor nem Ă©ri el a minimĂˇlis ${minOutputRows} Ă©rtĂ©ket.`,
       'MIN_INCLUDED_ITEMS_NOT_MET',
     )
   }
@@ -8934,7 +8934,7 @@ async function buildCatalogFeedOutput(
 
   if (!resolved.channel) {
     throw new FeedOutputError(
-      'Az Árukereső feed csatorna nincs konfigurálva (ARUKERESO_HU).',
+      'Az ĂrukeresĹ‘ feed csatorna nincs konfigurĂˇlva (ARUKERESO_HU).',
       'FEED_CHANNEL_NOT_FOUND',
     )
   }
@@ -9022,8 +9022,8 @@ async function buildCatalogFeedOutput(
   if (catalogConnections.length !== 1) {
     throw new FeedOutputError(
       catalogConnections.length === 0
-        ? 'Nincs aktív CSV katalóguskapcsolat.'
-        : 'Több aktív CSV katalóguskapcsolat található; a forrás nem egyértelmű.',
+        ? 'Nincs aktĂ­v CSV katalĂłguskapcsolat.'
+        : 'TĂ¶bb aktĂ­v CSV katalĂłguskapcsolat talĂˇlhatĂł; a forrĂˇs nem egyĂ©rtelmĹ±.',
       'CATALOG_CONNECTION_NOT_UNIQUE',
     )
   }
@@ -9033,7 +9033,7 @@ async function buildCatalogFeedOutput(
 
   if (!catalogConnection) {
     throw new FeedOutputError(
-      'Nincs aktív CSV katalóguskapcsolat.',
+      'Nincs aktĂ­v CSV katalĂłguskapcsolat.',
       'CATALOG_CONNECTION_NOT_FOUND',
     )
   }
@@ -9144,7 +9144,7 @@ async function buildCatalogFeedOutput(
 
   if (catalogRows.length === 0) {
     throw new FeedOutputError(
-      'Az aktív katalógusforrás nem tartalmaz feed-sorokat.',
+      'Az aktĂ­v katalĂłgusforrĂˇs nem tartalmaz feed-sorokat.',
       'EMPTY_CATALOG_SOURCE',
     )
   }
@@ -9207,7 +9207,7 @@ async function buildCatalogFeedOutput(
 
     if (seenProductIds.has(row.productId)) {
       throw new FeedOutputError(
-        `Több katalógussor kapcsolódik ugyanahhoz a termékhez: ${row.productId}.`,
+        `TĂ¶bb katalĂłgussor kapcsolĂłdik ugyanahhoz a termĂ©khez: ${row.productId}.`,
         'DUPLICATE_CATALOG_PRODUCT',
       )
     }
@@ -9265,7 +9265,7 @@ async function buildCatalogFeedOutput(
 
   if (items.length === 0) {
     throw new FeedOutputError(
-      'Az aktív katalógusforrás nem tartalmaz termékhez kapcsolt sorokat.',
+      'Az aktĂ­v katalĂłgusforrĂˇs nem tartalmaz termĂ©khez kapcsolt sorokat.',
       'NO_MATCHED_CATALOG_ROWS',
     )
   }
@@ -10185,6 +10185,7 @@ async function withRenewingSchedulerLease<T>(input: {
         and(
           eq(schedulerLeases.name, name),
           eq(schedulerLeases.ownerId, ownerId),
+          gt(schedulerLeases.lockedUntil, now),
         ),
       )
       .returning({ ownerId: schedulerLeases.ownerId })
@@ -10409,7 +10410,7 @@ async function generateCatalogFeedRun(input: {
 
   if (!run) {
     throw new FeedOutputError(
-      'A feed generálási futás nem hozható létre.',
+      'A feed generĂˇlĂˇsi futĂˇs nem hozhatĂł lĂ©tre.',
       'FEED_RUN_CREATE_FAILED',
     )
   }
@@ -10442,7 +10443,7 @@ async function generateCatalogFeedRun(input: {
       )
     ) {
       throw new FeedOutputError(
-        'A feed forrásadatai generálás közben megváltoztak.',
+        'A feed forrĂˇsadatai generĂˇlĂˇs kĂ¶zben megvĂˇltoztak.',
         'FEED_SOURCE_REVISION_CHANGED',
       )
     }
@@ -10704,7 +10705,7 @@ async function generateCatalogFeedRun(input: {
       )
     ) {
       throw new FeedOutputError(
-        'A feed forrásadatai mentés előtt megváltoztak.',
+        'A feed forrĂˇsadatai mentĂ©s elĹ‘tt megvĂˇltoztak.',
         'FEED_SOURCE_REVISION_CHANGED',
       )
     }
@@ -10723,7 +10724,7 @@ async function generateCatalogFeedRun(input: {
 
     if (completeRunResult.length === 0) {
       throw new FeedOutputError(
-        'A feed generálási zárolás mentés előtt lejárt.',
+        'A feed generĂˇlĂˇsi zĂˇrolĂˇs mentĂ©s elĹ‘tt lejĂˇrt.',
         'FEED_GENERATION_LEASE_LOST',
       )
     }
@@ -10735,7 +10736,7 @@ async function generateCatalogFeedRun(input: {
 
       if (channelUpdateResult.length === 0) {
         throw new FeedOutputError(
-          'Az aktiválás közben a forrás vagy a beállítás megváltozott. A csatorna kikapcsolva maradt; próbáld újra.',
+          'Az aktivĂˇlĂˇs kĂ¶zben a forrĂˇs vagy a beĂˇllĂ­tĂˇs megvĂˇltozott. A csatorna kikapcsolva maradt; prĂłbĂˇld Ăşjra.',
           'CHANNEL_ACTIVATION_SOURCE_CHANGED',
         )
       }
@@ -10840,12 +10841,12 @@ async function coordinateCatalogFeedGeneration(input: {
         logLabel: 'Feed generation',
         busyError: () =>
           new FeedOutputError(
-            'A feed generálás már folyamatban van; próbáld újra.',
+            'A feed generĂˇlĂˇs mĂˇr folyamatban van; prĂłbĂˇld Ăşjra.',
             'FEED_GENERATION_BUSY',
           ),
         lostError: () =>
           new FeedOutputError(
-            'A feed generálási zárolás lejárt vagy másik folyamat vette át.',
+            'A feed generĂˇlĂˇsi zĂˇrolĂˇs lejĂˇrt vagy mĂˇsik folyamat vette Ăˇt.',
             'FEED_GENERATION_LEASE_LOST',
           ),
         action: async (lease) => {
@@ -10872,7 +10873,7 @@ async function coordinateCatalogFeedGeneration(input: {
 
             if (sourceRevision.inventoryImportRunning) {
               throw new FeedOutputError(
-                'A készletimport még folyamatban van; a feed generálása nem indult el.',
+                'A kĂ©szletimport mĂ©g folyamatban van; a feed generĂˇlĂˇsa nem indult el.',
                 'INVENTORY_IMPORT_RUNNING',
               )
             }
@@ -10931,7 +10932,7 @@ async function coordinateCatalogFeedGeneration(input: {
           }
 
           throw new FeedOutputError(
-            'A feed forrásadatai ismételten megváltoztak.',
+            'A feed forrĂˇsadatai ismĂ©telten megvĂˇltoztak.',
             'FEED_SOURCE_REVISION_CHANGED',
           )
         },
@@ -10947,7 +10948,7 @@ async function requestArukeresoFeedGeneration(
 
   if (!channel) {
     throw new FeedOutputError(
-      'Az Árukereső feed csatorna nincs konfigurálva (ARUKERESO_HU).',
+      'Az ĂrukeresĹ‘ feed csatorna nincs konfigurĂˇlva (ARUKERESO_HU).',
       'FEED_CHANNEL_NOT_FOUND',
     )
   }
@@ -10957,7 +10958,7 @@ async function requestArukeresoFeedGeneration(
       status: 'skipped' as const,
       code: 'CHANNEL_INACTIVE' as const,
       message:
-        'Az Árukereső feed csatorna ki van kapcsolva. Generálás nem történt.',
+        'Az ĂrukeresĹ‘ feed csatorna ki van kapcsolva. GenerĂˇlĂˇs nem tĂ¶rtĂ©nt.',
     }
   }
 
@@ -10992,7 +10993,7 @@ arukeresoApi.post(
         {
           status: 'error',
           message:
-            'A feed generálásához confirm=true szükséges.',
+            'A feed generĂˇlĂˇsĂˇhoz confirm=true szĂĽksĂ©ges.',
         },
         400,
       )
@@ -11007,7 +11008,7 @@ arukeresoApi.post(
           status: 'error',
           code: 'FEED_CHANNEL_NOT_FOUND',
           message:
-            'Az Árukereső feed csatorna nincs konfigurálva (ARUKERESO_HU).',
+            'Az ĂrukeresĹ‘ feed csatorna nincs konfigurĂˇlva (ARUKERESO_HU).',
         },
         409,
       )
@@ -11018,7 +11019,7 @@ arukeresoApi.post(
         status: 'skipped',
         code: 'CHANNEL_INACTIVE',
         message:
-          'Az Árukereső feed csatorna ki van kapcsolva. Generálás nem történt.',
+          'Az ĂrukeresĹ‘ feed csatorna ki van kapcsolva. GenerĂˇlĂˇs nem tĂ¶rtĂ©nt.',
       })
     }
 
@@ -11082,7 +11083,7 @@ async function buildFeedRunCsv(runId: string) {
 
   if (!channel) {
     throw new FeedOutputError(
-      'Az Árukereső feed csatorna nincs konfigurálva.',
+      'Az ĂrukeresĹ‘ feed csatorna nincs konfigurĂˇlva.',
       'FEED_CHANNEL_NOT_FOUND',
     )
   }
@@ -11112,14 +11113,14 @@ async function buildFeedRunCsv(runId: string) {
 
   if (!run) {
     throw new FeedOutputError(
-      'A feed futás nem található.',
+      'A feed futĂˇs nem talĂˇlhatĂł.',
       'FEED_RUN_NOT_FOUND',
     )
   }
 
   if (run.status !== 'COMPLETED') {
     throw new FeedOutputError(
-      'Csak sikeresen befejezett feed tölthető le.',
+      'Csak sikeresen befejezett feed tĂ¶lthetĹ‘ le.',
       'FEED_RUN_NOT_COMPLETED',
     )
   }
@@ -11132,7 +11133,7 @@ async function buildFeedRunCsv(runId: string) {
     run.generatorVersion !== FEED_GENERATOR_VERSION
   ) {
     throw new FeedOutputError(
-      'A feed futás nem ezzel a generátorverzióval készült.',
+      'A feed futĂˇs nem ezzel a generĂˇtorverziĂłval kĂ©szĂĽlt.',
       'UNSUPPORTED_FEED_GENERATOR_VERSION',
     )
   }
@@ -11161,7 +11162,7 @@ async function buildFeedRunCsv(runId: string) {
     // feed_runs summaries are kept, so a completed run
     // can legitimately have no downloadable detail rows.
     throw new FeedOutputError(
-      'A részletes termékadatok ehhez a korábbi feed futáshoz már nem érhetők el.',
+      'A rĂ©szletes termĂ©kadatok ehhez a korĂˇbbi feed futĂˇshoz mĂˇr nem Ă©rhetĹ‘k el.',
       'FEED_RUN_ITEM_COUNT_MISMATCH',
     )
   }
@@ -11174,7 +11175,7 @@ async function buildFeedRunCsv(runId: string) {
     )
   ) {
     throw new FeedOutputError(
-      'A V3 feed futás kizárt elemet tartalmaz.',
+      'A V3 feed futĂˇs kizĂˇrt elemet tartalmaz.',
       'INVALID_V3_RUN_ITEM_DECISION',
     )
   }
@@ -11197,7 +11198,7 @@ async function buildFeedRunCsv(runId: string) {
       Array.isArray(resolved)
     ) {
       throw new FeedOutputError(
-        `A feed futás ${index + 1}. elemének tartalma sérült.`,
+        `A feed futĂˇs ${index + 1}. elemĂ©nek tartalma sĂ©rĂĽlt.`,
         'INVALID_RESOLVED_FEED_ITEM',
       )
     }
@@ -11213,7 +11214,7 @@ async function buildFeedRunCsv(runId: string) {
 
     if (!('source' in resolved)) {
       throw new FeedOutputError(
-        `A feed futás ${index + 1}. elemének tartalma sérült.`,
+        `A feed futĂˇs ${index + 1}. elemĂ©nek tartalma sĂ©rĂĽlt.`,
         'INVALID_RESOLVED_FEED_ITEM',
       )
     }
@@ -11235,7 +11236,7 @@ async function buildFeedRunCsv(runId: string) {
       typeof entry.productNumber !== 'string'
     ) {
       throw new FeedOutputError(
-        `A feed futás ${index + 1}. elemének tartalma sérült.`,
+        `A feed futĂˇs ${index + 1}. elemĂ©nek tartalma sĂ©rĂĽlt.`,
         'INVALID_RESOLVED_FEED_ITEM',
       )
     }
@@ -11255,7 +11256,7 @@ async function buildFeedRunCsv(runId: string) {
     run.artifactFingerprint !== fingerprint
   ) {
     throw new FeedOutputError(
-      'A regenerált feed ujjlenyomata nem egyezik a futás rekordjával.',
+      'A regenerĂˇlt feed ujjlenyomata nem egyezik a futĂˇs rekordjĂˇval.',
       'FEED_ARTIFACT_FINGERPRINT_MISMATCH',
     )
   }
@@ -11321,7 +11322,7 @@ arukeresoApi.get(
       return context.json(
         {
           status: 'error',
-          message: 'Érvénytelen runId.',
+          message: 'Ă‰rvĂ©nytelen runId.',
         },
         400,
       )
@@ -11346,7 +11347,7 @@ arukeresoApi.get(
           {
             status: 'error',
             message:
-              'Az Árukereső feed csatorna nincs konfigurálva.',
+              'Az ĂrukeresĹ‘ feed csatorna nincs konfigurĂˇlva.',
           },
           409,
         )
@@ -11448,7 +11449,7 @@ arukeresoApi.get(
           message:
             error instanceof Error
               ? error.message
-              : 'A legutóbbi feed betöltése sikertelen.',
+              : 'A legutĂłbbi feed betĂ¶ltĂ©se sikertelen.',
         },
         500,
       )
@@ -11566,7 +11567,7 @@ function parseDisabledCatalogFeedRows(csv: string) {
     )
   ) {
     throw new FeedOutputError(
-      'A leállító feed tartalék forrásának sémája nem kompatibilis.',
+      'A leĂˇllĂ­tĂł feed tartalĂ©k forrĂˇsĂˇnak sĂ©mĂˇja nem kompatibilis.',
       'SHUTDOWN_FALLBACK_SCHEMA_MISMATCH',
     )
   }
@@ -11574,7 +11575,7 @@ function parseDisabledCatalogFeedRows(csv: string) {
   const rows = parsed.slice(1).map((values, rowIndex) => {
     if (values.length !== FEED_OUTPUT_HEADERS.length) {
       throw new FeedOutputError(
-        `A leállító feed tartalék forrásának ${rowIndex + 1}. sora sérült.`,
+        `A leĂˇllĂ­tĂł feed tartalĂ©k forrĂˇsĂˇnak ${rowIndex + 1}. sora sĂ©rĂĽlt.`,
         'SHUTDOWN_FALLBACK_ROW_INVALID',
       )
     }
@@ -11591,7 +11592,7 @@ function parseDisabledCatalogFeedRows(csv: string) {
 
       if (!header || value === undefined) {
         throw new FeedOutputError(
-          `A leállító feed tartalék forrásának ${rowIndex + 1}. sora sérült.`,
+          `A leĂˇllĂ­tĂł feed tartalĂ©k forrĂˇsĂˇnak ${rowIndex + 1}. sora sĂ©rĂĽlt.`,
           'SHUTDOWN_FALLBACK_ROW_INVALID',
         )
       }
@@ -11679,7 +11680,7 @@ async function buildShutdownFeedCsv(input: {
 
     if (rows.length === 0) {
       throw sourceError ?? new FeedOutputError(
-        'Nincs elérhető leállító feed-forrás.',
+        'Nincs elĂ©rhetĹ‘ leĂˇllĂ­tĂł feed-forrĂˇs.',
         'SHUTDOWN_SOURCE_UNAVAILABLE',
       )
     }
@@ -11726,7 +11727,7 @@ arukeresoApi.get(
 
         if (!channel) {
           throw new FeedOutputError(
-            'Az Árukereső feed csatorna nincs konfigurálva.',
+            'Az ĂrukeresĹ‘ feed csatorna nincs konfigurĂˇlva.',
             'FEED_CHANNEL_NOT_FOUND',
           )
         }
@@ -11739,7 +11740,7 @@ arukeresoApi.get(
 
         if (!latestRunId) {
           throw new FeedOutputError(
-            'Még nincs sikeresen generált feed.',
+            'MĂ©g nincs sikeresen generĂˇlt feed.',
             'SUCCESSFUL_FEED_RUN_NOT_FOUND',
           )
         }
@@ -11780,9 +11781,9 @@ function truncateFeedAccessUserAgent(
 }
 
 // Conservative derivation only: true when the UA
-// explicitly names Árukereső (diacritics normalized,
-// since Hungarian text may spell it with Á). Anything
-// else stays neutral — absence of the token proves
+// explicitly names ĂrukeresĹ‘ (diacritics normalized,
+// since Hungarian text may spell it with Ă). Anything
+// else stays neutral â€” absence of the token proves
 // nothing.
 function isLikelyArukeresoRequest(
   userAgent: string | null,
@@ -11895,7 +11896,7 @@ async function recordFeedAccessServe(input: {
   }
 }
 
-// Dedicated public Árukereső feed. Served directly by
+// Dedicated public ĂrukeresĹ‘ feed. Served directly by
 // the API deployment (same pattern as the Cockpit
 // pricing sync); it does not pass through the
 // Cloudflare Pages proxy auth. The opaque URL token is
@@ -12019,7 +12020,7 @@ arukeresoApi.get(
           {
             status: 'error',
             message:
-              'Az Árukereső feed csatorna nincs konfigurálva.',
+              'Az ĂrukeresĹ‘ feed csatorna nincs konfigurĂˇlva.',
           },
           409,
         )
@@ -12149,7 +12150,7 @@ arukeresoApi.get(
           {
             status: 'error',
             message:
-              'Az Árukereső feed csatorna nincs konfigurálva (ARUKERESO_HU).',
+              'Az ĂrukeresĹ‘ feed csatorna nincs konfigurĂˇlva (ARUKERESO_HU).',
           },
           409,
         )
@@ -12888,7 +12889,7 @@ arukeresoApi.get(
           {
             status: 'error',
             message:
-              'Az Árukereső feed csatorna nincs konfigurálva (ARUKERESO_HU).',
+              'Az ĂrukeresĹ‘ feed csatorna nincs konfigurĂˇlva (ARUKERESO_HU).',
           },
           409,
         )
@@ -12946,7 +12947,7 @@ arukeresoApi.patch(
         return context.json(
           {
             status: 'error',
-            message: 'Érvénytelen kérés test.',
+            message: 'Ă‰rvĂ©nytelen kĂ©rĂ©s test.',
           },
           400,
         )
@@ -12972,7 +12973,7 @@ arukeresoApi.patch(
           {
             status: 'error',
             message:
-              'A ruleVersion nem állítható közvetlenül.',
+              'A ruleVersion nem ĂˇllĂ­thatĂł kĂ¶zvetlenĂĽl.',
           },
           400,
         )
@@ -13011,7 +13012,7 @@ arukeresoApi.patch(
           return context.json(
             {
               status: 'error',
-              message: `${key} pozitív egész kell legyen (Bps).`,
+              message: `${key} pozitĂ­v egĂ©sz kell legyen (Bps).`,
             },
             400,
           )
@@ -13057,7 +13058,7 @@ arukeresoApi.patch(
           {
             status: 'error',
             message:
-              'maxPricingAgeHours 0 és 8760 közötti szám kell legyen.',
+              'maxPricingAgeHours 0 Ă©s 8760 kĂ¶zĂ¶tti szĂˇm kell legyen.',
           },
           400,
         )
@@ -13071,7 +13072,7 @@ arukeresoApi.patch(
           {
             status: 'error',
             message:
-              'Az Árukereső feed csatorna nincs konfigurálva (ARUKERESO_HU).',
+              'Az ĂrukeresĹ‘ feed csatorna nincs konfigurĂˇlva (ARUKERESO_HU).',
           },
           409,
         )
@@ -13314,7 +13315,7 @@ arukeresoApi.patch(
         return context.json(
           {
             status: 'error',
-            message: 'Érvénytelen productId.',
+            message: 'Ă‰rvĂ©nytelen productId.',
           },
           400,
         )
@@ -13358,7 +13359,7 @@ arukeresoApi.patch(
           {
             status: 'error',
             message:
-              'reason csak szöveg lehet.',
+              'reason csak szĂ¶veg lehet.',
           },
           400,
         )
@@ -13372,7 +13373,7 @@ arukeresoApi.patch(
           {
             status: 'error',
             message:
-              'Az Árukereső feed csatorna nincs konfigurálva (ARUKERESO_HU).',
+              'Az ĂrukeresĹ‘ feed csatorna nincs konfigurĂˇlva (ARUKERESO_HU).',
           },
           409,
         )
@@ -13388,7 +13389,7 @@ arukeresoApi.patch(
         return context.json(
           {
             status: 'error',
-            message: 'Termék nem található.',
+            message: 'TermĂ©k nem talĂˇlhatĂł.',
           },
           404,
         )
@@ -13494,7 +13495,7 @@ arukeresoApi.delete(
         return context.json(
           {
             status: 'error',
-            message: 'Érvénytelen productId.',
+            message: 'Ă‰rvĂ©nytelen productId.',
           },
           400,
         )
@@ -13508,7 +13509,7 @@ arukeresoApi.delete(
           {
             status: 'error',
             message:
-              'Az Árukereső feed csatorna nincs konfigurálva (ARUKERESO_HU).',
+              'Az ĂrukeresĹ‘ feed csatorna nincs konfigurĂˇlva (ARUKERESO_HU).',
           },
           409,
         )
@@ -13524,7 +13525,7 @@ arukeresoApi.delete(
         return context.json(
           {
             status: 'error',
-            message: 'Termék nem található.',
+            message: 'TermĂ©k nem talĂˇlhatĂł.',
           },
           404,
         )
