@@ -293,13 +293,18 @@ export async function reapStaleDataConnectionRuns(
  * check, so it can clear the orphan and unblock the new execution.
  *
  * Safety:
- * - Only runs with `automationDetailsJson IS NULL` (no Allegro
- *   mutations were dispatched).
+ * - Only runs WITHOUT a valid resumable cursor (NULL, empty,
+ *   corrupt, or legacy diagnostics without a cursor key).
+ *   A run with a valid cursor is left for the resume scheduler.
  * - Requires the execution lease (caller holds it).
  * - Age threshold (30 min) prevents recovering a legitimately fresh
  *   run whose executor is merely slow.
  * - Atomic WHERE `status = 'RUNNING'` guard prevents double-writes
  *   if the original executor finalizes concurrently.
+ * - Pending Allegro mutations from a dead legacy run are safe:
+ *   the per-listing mutation journal tracks each stock command by
+ *   commandId, and `reconcileUnresolvedStockCommands` resolves
+ *   them at the start of the next sync.
  */
 export async function recoverOrphanedInventoryRuns(
   database: ReturnType<typeof createDatabase>,
@@ -319,7 +324,6 @@ export async function recoverOrphanedInventoryRuns(
     .where(and(
       eq(dataConnectionRuns.connectionId, connectionId),
       eq(dataConnectionRuns.status, 'RUNNING'),
-      isNull(dataConnectionRuns.automationDetailsJson),
     ))
 
   const recovered: string[] = []
