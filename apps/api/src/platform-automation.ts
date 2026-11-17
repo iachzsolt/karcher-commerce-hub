@@ -675,6 +675,12 @@ export async function runInventoryRefreshSlice(
       /*
        * No retry here: the caller surfaces the failure and the run
        * stays resumable. Never guess how far the batch got.
+       *
+       * Intentionally a plain Error: the HTTP status from `/inventory-sync`
+       * does not map to the resume scheduler's BUSY classification.
+       * Concurrency conflicts (execution lease) are signalled by
+       * `withRenewingSchedulerLease`'s own InventoryRefreshError(409),
+       * which propagates without going through this HTTP round-trip.
        */
       throw new Error(
         details?.message ??
