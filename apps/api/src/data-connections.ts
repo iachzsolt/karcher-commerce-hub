@@ -41,6 +41,7 @@ import { createInventoryRefreshApi, InventoryRefreshError } from './inventory-re
 import { coordinateInventoryRefresh } from './inventory-refresh-coordinator.js'
 import { canSkipInventoryImport } from './inventory-import-safety.js'
 import { readInventoryRefreshCursor, serializeAutomationDetailsWithCursor, type InventoryRefreshCursor } from './inventory-refresh-slice.js'
+import { canRecoverOrphanedInventoryRun } from './inventory-refresh-recovery.js'
 import {
   classifyInventoryRefreshRun,
   resumeEligibleInventoryRefreshes,
@@ -277,6 +278,86 @@ export async function reapStaleDataConnectionRuns(
 
     return { reaped: 0 }
   }
+}
+
+/**
+ * Recover orphaned inventory runs that block new refreshes.
+ *
+ * A RUNNING record with no automation cursor and older than the stale
+ * threshold belongs to a dead runtime.  The resume scheduler skips it
+ * (NO_CURSOR), and `recentRunningInventoryRun` blocks any new run for
+ * the same connection — a deadlock.
+ *
+ * This function is called inside the execution lease (via the
+ * coordinator's `recoverOrphanedRun` hook) BEFORE the `recentRun`
+ * check, so it can clear the orphan and unblock the new execution.
+ *
+ * Safety:
+ * - Only runs with `automationDetailsJson IS NULL` (no Allegro
+ *   mutations were dispatched).
+ * - Requires the execution lease (caller holds it).
+ * - Age threshold (30 min) prevents recovering a legitimately fresh
+ *   run whose executor is merely slow.
+ * - Atomic WHERE `status = 'RUNNING'` guard prevents double-writes
+ *   if the original executor finalizes concurrently.
+ */
+export async function recoverOrphanedInventoryRuns(
+  database: ReturnType<typeof createDatabase>,
+  connectionId: string,
+  now?: Date,
+): Promise<{ recovered: string[] }> {
+  const currentTime = now ?? new Date()
+
+  const orphans = await database
+    .select({
+      id: dataConnectionRuns.id,
+      status: dataConnectionRuns.status,
+      startedAt: dataConnectionRuns.startedAt,
+      automationDetailsJson: dataConnectionRuns.automationDetailsJson,
+    })
+    .from(dataConnectionRuns)
+    .where(and(
+      eq(dataConnectionRuns.connectionId, connectionId),
+      eq(dataConnectionRuns.status, 'RUNNING'),
+      isNull(dataConnectionRuns.automationDetailsJson),
+    ))
+
+  const recovered: string[] = []
+
+  for (const orphan of orphans) {
+    if (!canRecoverOrphanedInventoryRun({
+      run: {
+        status: orphan.status,
+        startedAt: orphan.startedAt,
+        automationDetailsJson: orphan.automationDetailsJson,
+      },
+      importState: 'SAFE',
+      leaseOwned: true,
+      now: currentTime,
+    })) continue
+
+    await database
+      .update(dataConnectionRuns)
+      .set({
+        status: 'INTERRUPTED',
+        error:
+          'Az elárvult futást automatikusan lezárta az ütemező.',
+        finishedAt: currentTime,
+      })
+      .where(and(
+        eq(dataConnectionRuns.id, orphan.id),
+        eq(dataConnectionRuns.status, 'RUNNING'),
+      ))
+
+    recovered.push(orphan.id)
+    console.info('Recovered orphaned inventory run:', {
+      runId: orphan.id,
+      connectionId,
+      ageMs: currentTime.getTime() - orphan.startedAt.getTime(),
+    })
+  }
+
+  return { recovered }
 }
 
 const dataConnectionsApi = new Hono()
@@ -1436,6 +1517,7 @@ export async function runFullInventoryRefresh(input: {
       lostError: () => new InventoryRefreshError('Inventory refresh execution lease lost', 409),
       action,
       }),
+      recoverOrphanedRun: async () => { await recoverOrphanedInventoryRuns(database, input.connectionId) },
       recentRun: () => recentRunningInventoryRun(database, input.connectionId),
       execute: async (lease: { name: string; ownerId: string; assertOwned: () => Promise<void> }) => {
         const startedAt = new Date()
@@ -1548,6 +1630,7 @@ export async function beginSlicedInventoryRefresh(input: {
       ...inventoryRefreshLeaseOptions(database, input.connectionId),
       action,
     }),
+    recoverOrphanedRun: async () => { await recoverOrphanedInventoryRuns(database, input.connectionId) },
     recentRun: () => recentRunningInventoryRun(database, input.connectionId),
     execute: async (lease: { name: string; ownerId: string; assertOwned: () => Promise<void> }) => {
       const startedAt = new Date()
