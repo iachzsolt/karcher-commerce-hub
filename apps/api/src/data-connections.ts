@@ -40,7 +40,7 @@ import { inventoryExecutionLeaseName } from './inventory-execution-lease.js'
 import { createInventoryRefreshApi, InventoryRefreshError } from './inventory-refresh-api.js'
 import { coordinateInventoryRefresh } from './inventory-refresh-coordinator.js'
 import { canSkipInventoryImport } from './inventory-import-safety.js'
-import { readInventoryRefreshCursor, serializeAutomationDetailsWithCursor } from './inventory-refresh-slice.js'
+import { readInventoryRefreshCursor, serializeAutomationDetailsWithCursor, type InventoryRefreshCursor } from './inventory-refresh-slice.js'
 import {
   classifyInventoryRefreshRun,
   resumeEligibleInventoryRefreshes,
@@ -1611,12 +1611,25 @@ export async function beginSlicedInventoryRefresh(input: {
       state.automationDetailsJson = serializeAutomationDetailsWithCursor({ version: 1, platforms: [] }, cursor)
       await persist({ ...state })
 
-      return executeInventoryRefreshSlice({
-        trigger, runId, cursor, state, assertOwned, persist,
-        advance: next => runInventoryRefreshSlice(input.connectionId, next, {
+      const advance = (next: InventoryRefreshCursor) =>
+        runInventoryRefreshSlice(input.connectionId, next, {
           executionLease: { name: lease.name, ownerId: lease.ownerId }, assertOwned,
-        }),
+        })
+
+      let result = await executeInventoryRefreshSlice({
+        trigger, runId, cursor, state, assertOwned, persist, advance,
       })
+
+      if (trigger === 'SCHEDULED') {
+        result = await continueScheduledSlices({
+          result,
+          runSlice: currentState => executeInventoryRefreshSlice({
+            trigger, runId, cursor, state: currentState, assertOwned, persist, advance,
+          }),
+        })
+      }
+
+      return result
     },
   })
 }
@@ -1636,6 +1649,84 @@ export async function beginManualFullInventoryRefresh(input: {
 }) {
   return beginSlicedInventoryRefresh({ ...input, trigger: 'MANUAL' })
 }
+/**
+ * Time-bounded continuation loop for SCHEDULED inventory refreshes.
+ *
+ * MANUAL runs are paced by the browser's `/advance` polling loop.
+ * SCHEDULED runs have no such driver — the resume scheduler fires
+ * every 15 minutes and was advancing only one slice per tick.  This
+ * helper closes the gap by looping through slices within a single
+ * execution context, honoring cooldowns and a wall-clock budget so
+ * the execution lease, rate-limit back-off and write pacing are
+ * never bypassed.
+ */
+export const SCHEDULED_TICK_BUDGET_MS = positiveIntegerEnv(
+  'COMMERCE_HUB_SCHEDULED_TICK_BUDGET_MS',
+  2 * 60 * 1000,
+)
+export const SCHEDULED_MAX_COOLDOWN_MS = 30_000
+
+function positiveIntegerEnv(key: string, fallback: number): number {
+  const raw = process.env[key]
+  if (raw === undefined) return fallback
+  const parsed = Number(raw)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
+}
+
+export type ScheduledSliceResult = {
+  advance: { done: boolean; rateLimited: boolean; nextAdvanceAt: number | null }
+  status: string
+  importStatus: string | null
+  rowsImported: number
+  changedItemCount: number
+  automationDetailsJson: string | null
+  error: string | null
+  finishedAt: Date | null
+}
+
+export async function continueScheduledSlices<T extends ScheduledSliceResult>(input: {
+  result: T
+  runSlice: (state: InventoryRefreshState) => Promise<T>
+  now?: () => number
+  sleep?: (ms: number) => Promise<void>
+  tickBudgetMs?: number
+  maxCooldownMs?: number
+}): Promise<T> {
+  const now = input.now ?? Date.now
+  const sleep = input.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms)))
+  const tickBudgetMs = input.tickBudgetMs ?? SCHEDULED_TICK_BUDGET_MS
+  const maxCooldownMs = input.maxCooldownMs ?? SCHEDULED_MAX_COOLDOWN_MS
+  const tickStart = now()
+  let result = input.result
+
+  while (
+    !result.advance.done &&
+    !result.advance.rateLimited &&
+    now() - tickStart < tickBudgetMs
+  ) {
+    const cooldownMs = Math.max(
+      0,
+      (result.advance.nextAdvanceAt ?? now()) - now(),
+    )
+    if (cooldownMs > maxCooldownMs) break
+    if (cooldownMs > 0) {
+      await sleep(cooldownMs)
+    }
+
+    result = await input.runSlice({
+      status: result.status as InventoryRefreshState['status'],
+      importStatus: result.importStatus,
+      rowsImported: result.rowsImported,
+      changedItemCount: result.changedItemCount,
+      automationDetailsJson: result.automationDetailsJson,
+      error: result.error,
+      finishedAt: result.finishedAt,
+    })
+  }
+
+  return result
+}
+
 async function advanceSlicedInventoryRefresh(input: {
   connectionId: string
   runId: string
@@ -1668,13 +1759,27 @@ async function advanceSlicedInventoryRefresh(input: {
         await database.update(dataConnectionRuns).set(state).where(eq(dataConnectionRuns.id, input.runId))
       }
 
-      return executeInventoryRefreshSlice({
-        trigger: input.trigger, runId: input.runId, cursor, state: runStateFromRow(run),
-        assertOwned, persist,
-        advance: next => runInventoryRefreshSlice(input.connectionId, next, {
+      const advance = (next: InventoryRefreshCursor) =>
+        runInventoryRefreshSlice(input.connectionId, next, {
           executionLease: { name: lease.name, ownerId: lease.ownerId }, assertOwned,
-        }),
+        })
+
+      let result = await executeInventoryRefreshSlice({
+        trigger: input.trigger, runId: input.runId, cursor, state: runStateFromRow(run),
+        assertOwned, persist, advance,
       })
+
+      if (input.trigger === 'SCHEDULED') {
+        result = await continueScheduledSlices({
+          result,
+          runSlice: currentState => executeInventoryRefreshSlice({
+            trigger: input.trigger, runId: input.runId, cursor,
+            state: currentState, assertOwned, persist, advance,
+          }),
+        })
+      }
+
+      return result
     },
   })
 }
