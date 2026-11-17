@@ -31,11 +31,36 @@ test('does not recover a recent run', () => {
   })), false)
 })
 
-test('never recovers a run containing persisted automation state', () => {
+test('never recovers a run with a valid resumable cursor', () => {
+  const validCursor = JSON.stringify({
+    version: 1,
+    platforms: [],
+    cursor: {
+      version: 1,
+      runId: 'run-1',
+      connectionId: 'conn-1',
+      phase: 'AUTOMATION',
+      plans: [{ kind: 'UNSUPPORTED', platformCode: 'ALLEGRO', accountId: 'a-1' }],
+      planIndex: 0,
+    },
+  })
+  assert.equal(canRecoverOrphanedInventoryRun(candidate({
+    run: { ...candidate().run, automationDetailsJson: validCursor },
+  })), false)
+})
+
+test('recovers a run with non-null details but no cursor key (legacy format)', () => {
+  const legacyDetails = JSON.stringify({ version: 1, platforms: [{ ok: true }] })
+  assert.equal(canRecoverOrphanedInventoryRun(candidate({
+    run: { ...candidate().run, automationDetailsJson: legacyDetails },
+  })), true)
+})
+
+test('recovers a run with corrupt or empty automation details', () => {
   for (const value of ['{"cursor":{}}', 'invalid-json', '']) {
     assert.equal(canRecoverOrphanedInventoryRun(candidate({
       run: { ...candidate().run, automationDetailsJson: value },
-    })), false)
+    })), true, `expected recovery for automationDetailsJson = ${JSON.stringify(value)}`)
   }
 })
 

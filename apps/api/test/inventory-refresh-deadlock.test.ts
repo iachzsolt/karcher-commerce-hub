@@ -173,9 +173,21 @@ void describe('recoverOrphanedInventoryRuns', () => {
     assert.equal(updateCalls.length, 0)
   })
 
-  void it('never touches records with automation cursors', async () => {
+  void it('never touches records with a valid resumable cursor', async () => {
+    const validCursor = JSON.stringify({
+      version: 1,
+      platforms: [],
+      cursor: {
+        version: 1,
+        runId: 'with-cursor',
+        connectionId: connectionId,
+        phase: 'AUTOMATION',
+        plans: [{ kind: 'UNSUPPORTED', platformCode: 'ALLEGRO', accountId: 'a-1' }],
+        planIndex: 0,
+      },
+    })
     const { database, updateCalls } = stubRecoveryDatabase([
-      { id: 'with-cursor', status: 'RUNNING', startedAt: staleStart, automationDetailsJson: '{"cursor":{}}' },
+      { id: 'with-cursor', status: 'RUNNING', startedAt: staleStart, automationDetailsJson: validCursor },
     ])
 
     const result = await recoverOrphanedInventoryRuns(
@@ -184,6 +196,41 @@ void describe('recoverOrphanedInventoryRuns', () => {
 
     assert.deepEqual(result.recovered, [])
     assert.equal(updateCalls.length, 0)
+  })
+
+  void it('recovers legacy non-null details without cursor key (production scenario)', async () => {
+    const legacyDetails = JSON.stringify({
+      version: 1,
+      platforms: [
+        { ok: true, httpStatus: 204, attempted: 0, pending: 0 },
+        { ok: false, httpStatus: 200, attempted: 15, pending: 15, failed: 0, totalListings: 470 },
+      ],
+    })
+    const { database, updateCalls } = stubRecoveryDatabase([
+      { id: 'legacy-run', status: 'RUNNING', startedAt: staleStart, automationDetailsJson: legacyDetails },
+    ])
+
+    const result = await recoverOrphanedInventoryRuns(
+      database as never, connectionId, now,
+    )
+
+    assert.deepEqual(result.recovered, ['legacy-run'])
+    assert.equal(updateCalls.length, 1)
+    assert.equal(updateCalls[0]!.set['status'], 'INTERRUPTED')
+  })
+
+  void it('recovers corrupt automation details', async () => {
+    const { database, updateCalls } = stubRecoveryDatabase([
+      { id: 'corrupt-1', status: 'RUNNING', startedAt: staleStart, automationDetailsJson: '{"cursor":{}}' },
+      { id: 'corrupt-2', status: 'RUNNING', startedAt: staleStart, automationDetailsJson: 'not-json' },
+    ])
+
+    const result = await recoverOrphanedInventoryRuns(
+      database as never, connectionId, now,
+    )
+
+    assert.deepEqual(result.recovered, ['corrupt-1', 'corrupt-2'])
+    assert.equal(updateCalls.length, 2)
   })
 
   void it('recovers multiple orphans in one pass', async () => {
