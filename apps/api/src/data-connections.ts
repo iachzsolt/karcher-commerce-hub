@@ -40,6 +40,11 @@ import { inventoryExecutionLeaseName } from './inventory-execution-lease.js'
 import { createInventoryRefreshApi, InventoryRefreshError } from './inventory-refresh-api.js'
 import { coordinateInventoryRefresh } from './inventory-refresh-coordinator.js'
 import { canSkipInventoryImport } from './inventory-import-safety.js'
+import {
+  logInventoryImportError,
+  logInventoryImportFinalizationError,
+  logInventoryImportFinalizationRejected,
+} from './inventory-import-diagnostics.js'
 import { readInventoryRefreshCursor, serializeAutomationDetailsWithCursor, type InventoryRefreshCursor } from './inventory-refresh-slice.js'
 import { canRecoverOrphanedInventoryRun } from './inventory-refresh-recovery.js'
 import {
@@ -2913,16 +2918,34 @@ async function executeInventoryImport(
           ? error.message
           : 'Inventory import failed.'
 
-      await database.execute(sql`
-        SELECT fail_inventory_import(
-          ${connectionId}::uuid,
-          ${run.id}::uuid,
-          ${message},
-          ${lease.name},
-          ${lease.ownerId}::uuid
-        )
-      `)
+      logInventoryImportError(
+        connectionId,
+        error,
+        'apply_inventory_snapshot',
+      )
 
+      try {
+        const finalized = await database.execute(sql`
+          SELECT fail_inventory_import(
+            ${connectionId}::uuid,
+            ${run.id}::uuid,
+            ${message},
+            ${lease.name},
+            ${lease.ownerId}::uuid
+          )
+        `)
+        if (finalized.rows[0]?.fail_inventory_import === false) {
+          // Database finalization was rejected (not a thrown exception):
+          // lease lost, lock contended, stale run, or newer completed run.
+          // Log a safe predefined event without masking the original error
+          // or changing the HTTP response contract.
+          logInventoryImportFinalizationRejected(connectionId)
+        }
+      } catch (failError) {
+        // A secondary finalization failure must not mask the original
+        // error or falsely report successful database finalization.
+        logInventoryImportFinalizationError(connectionId, failError)
+      }
 
       return inventoryImportResponse(
         {
