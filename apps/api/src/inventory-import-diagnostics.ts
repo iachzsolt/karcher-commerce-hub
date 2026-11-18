@@ -18,6 +18,7 @@ export type PostgresErrorCategory =
   | 'INVALID_LEASE_NAME'
   | 'EMPTY_SNAPSHOT'
   | 'NOT_ARRAY'
+  | 'FINALIZATION_REJECTED'
   | 'OTHER'
 
 export type PostgresErrorInfo = {
@@ -152,23 +153,19 @@ export function extractPostgresError(
 
     try {
       if (current instanceof Error) {
-        // Deeper cause messages take precedence: overwrite so the
-        // innermost message is used for categorization.
+        // Deeper cause messages and codes take precedence: overwrite so
+        // the innermost valid value is used for categorization.
         const msg = safeStringProp(current, 'message')
         if (msg) message = msg
-        if (!info.code) {
-          const code = safeStringProp(current, 'code')
-          if (code && SQLSTATE_RE.test(code)) info.code = code
-        }
+        const code = safeStringProp(current, 'code')
+        if (code && SQLSTATE_RE.test(code)) info.code = code
       } else if (typeof current === 'string') {
         message = current
       } else if (typeof current === 'object') {
         const msg = safeStringProp(current, 'message')
         if (msg) message = msg
-        if (!info.code) {
-          const code = safeStringProp(current, 'code')
-          if (code && SQLSTATE_RE.test(code)) info.code = code
-        }
+        const code = safeStringProp(current, 'code')
+        if (code && SQLSTATE_RE.test(code)) info.code = code
       }
     } catch {
       break
@@ -257,6 +254,34 @@ export function logInventoryImportFinalizationError(
   try {
     console.error(
       `inventory_import_finalization_error ${JSON.stringify(info)}`,
+    )
+  } catch {
+    // Logging must never throw or mask the original error.
+  }
+}
+
+/**
+ * Logs a safe, predefined finalization-rejected event when
+ * `fail_inventory_import()` returns `false` (not a thrown exception).
+ * This indicates the database finalization was rejected due to lease
+ * loss, advisory lock contention, a stale run, or a newer completed
+ * run — none of which should mask the original import error or change
+ * the HTTP response contract.
+ *
+ * @param connectionId - Non-sensitive UUID identifier.
+ */
+export function logInventoryImportFinalizationRejected(
+  connectionId: string,
+): void {
+  const info: PostgresErrorInfo = {
+    category: 'FINALIZATION_REJECTED',
+    operation: 'fail_inventory_import',
+    connectionId,
+  }
+
+  try {
+    console.error(
+      `inventory_import_finalization_rejected ${JSON.stringify(info)}`,
     )
   } catch {
     // Logging must never throw or mask the original error.

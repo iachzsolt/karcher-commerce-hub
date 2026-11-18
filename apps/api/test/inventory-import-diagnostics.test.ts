@@ -4,6 +4,7 @@ import {
   extractPostgresError,
   logInventoryImportError,
   logInventoryImportFinalizationError,
+  logInventoryImportFinalizationRejected,
   type PostgresErrorInfo,
 } from '../src/inventory-import-diagnostics.js'
 
@@ -167,6 +168,21 @@ describe('extractPostgresError', () => {
     assert.equal(result.category, 'LEASE_LOST')
     assert.equal(result.code, '40P01')
     assert.equal(result.operation, 'apply_inventory_snapshot')
+  })
+
+  void it('prefers deepest valid SQLSTATE code over outer invalid code', () => {
+    const inner = new Error('deep error')
+    ;(inner as { code?: string }).code = '40001'
+    const middle = new Error('middle wrapper')
+    ;(middle as { code?: string }).code = 'not-a-code'
+    ;(middle as { cause?: unknown }).cause = inner
+    const outer = new Error('outer wrapper')
+    ;(outer as { code?: string }).code = 'XX999'
+    ;(outer as { cause?: unknown }).cause = middle
+
+    const result = extractPostgresError(outer, 'apply_inventory_snapshot')
+    assert.equal(result.code, '40001')
+    assert.equal(result.category, 'OTHER')
   })
 
   void it('prefers inner cause message for categorization over outer message', () => {
@@ -422,6 +438,43 @@ describe('logInventoryImportFinalizationError', () => {
     try {
       assert.doesNotThrow(() =>
         logInventoryImportFinalizationError(connectionId, new Error('x')),
+      )
+    } finally {
+      console.error = originalError
+    }
+  })
+})
+
+describe('logInventoryImportFinalizationRejected', () => {
+  void it('logs a safe string with finalization-rejected prefix', () => {
+    const logged: string[] = []
+    const originalError = console.error
+    console.error = (...args: unknown[]) => {
+      logged.push(args.join(' '))
+    }
+    try {
+      logInventoryImportFinalizationRejected(connectionId)
+    } finally {
+      console.error = originalError
+    }
+
+    assert.equal(logged.length, 1)
+    const line = logged[0]
+    assert.ok(
+      line.includes('inventory_import_finalization_rejected'),
+      'missing finalization-rejected log prefix',
+    )
+    assert.ok(line.includes(connectionId), 'missing connection id')
+    assert.ok(line.includes('FINALIZATION_REJECTED'), 'missing category')
+    assert.ok(line.includes('fail_inventory_import'), 'missing operation')
+  })
+
+  void it('never throws when console.error is unavailable', () => {
+    const originalError = console.error
+    console.error = undefined as unknown as typeof console.error
+    try {
+      assert.doesNotThrow(() =>
+        logInventoryImportFinalizationRejected(connectionId),
       )
     } finally {
       console.error = originalError
