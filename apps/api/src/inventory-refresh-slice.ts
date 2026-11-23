@@ -631,6 +631,38 @@ export function remainingBatchListingIds(plan: InventoryCursorAllegroPlan) {
   return batch.filter(listingId => !completed.has(listingId))
 }
 
+/**
+ * Listings sent to a single `/inventory-sync` call.
+ *
+ * The logical batch stays `MAX_LISTINGS_PER_BATCH`; a batch is simply
+ * worked through in several execution units. One slice runs exactly one
+ * unit and returns, so the caller persists the cursor before the next
+ * unit starts. An interrupted execution therefore loses at most one unit.
+ */
+export const MAX_LISTINGS_PER_EXECUTION_UNIT = 10
+
+/**
+ * The next execution unit of the in-flight batch.
+ *
+ * Listings not yet handled come first and listings with an unresolved
+ * command last, so a unit full of slow Allegro commands cannot starve the
+ * rest of the batch. Unresolved listings are still re-inspected once the
+ * fresh ones are exhausted, and expiry does not depend on re-inspection.
+ */
+export function nextExecutionUnitListingIds(
+  plan: InventoryCursorAllegroPlan,
+  maxListings = MAX_LISTINGS_PER_EXECUTION_UNIT,
+) {
+  const remaining = remainingBatchListingIds(plan)
+  const unresolved = new Set(plan.partial.pendingListingIds)
+  const ordered = [
+    ...remaining.filter(listingId => !unresolved.has(listingId)),
+    ...remaining.filter(listingId => unresolved.has(listingId)),
+  ]
+
+  return ordered.slice(0, Math.max(1, Math.trunc(maxListings)))
+}
+
 export function isCurrentBatchComplete(plan: InventoryCursorAllegroPlan) {
   const batch = plan.batches[plan.batchIndex]
   if (!batch) return true

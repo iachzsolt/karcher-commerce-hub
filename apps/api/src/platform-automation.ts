@@ -26,6 +26,7 @@ import {
   expireUnresolvedPendingListings,
   isCurrentBatchComplete,
   mergeSliceIntoBatchState,
+  nextExecutionUnitListingIds,
   remainingBatchListingIds,
   type InventoryCursorAllegroPlan,
   type InventoryRefreshCursor,
@@ -603,8 +604,25 @@ export async function buildInventoryRefreshCursor(
   }
 }
 
+/** In-process `/inventory-sync` transport; injectable for tests only. */
+export type InventorySyncTransport = (body: string) => Response | Promise<Response>
+
+const defaultInventorySyncTransport: InventorySyncTransport = body =>
+  allegroAuth.request('/inventory-sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+  })
+
 /**
- * Run one bounded slice.
+ * Run one bounded slice: at most one execution unit
+ * (`MAX_LISTINGS_PER_EXECUTION_UNIT` listings of the current batch).
+ *
+ * Returning after every unit is the durable checkpoint: the caller
+ * persists the cursor before the next unit, so an interrupted cron
+ * execution loses at most the unit in flight. Bookkeeping that needs no
+ * remote call (closing a finished batch, skipping empty plans) still
+ * happens in the same slice.
  *
  * The slice budget lives inside `/inventory-sync` (it cannot cross
  * an in-process request boundary as an object), so this driver only
@@ -618,12 +636,15 @@ export async function runInventoryRefreshSlice(
     executionLease: InventoryExecutionLease
     assertOwned: () => Promise<void>
     now?: () => number
+    transport?: InventorySyncTransport
   },
 ): Promise<InventoryRefreshSliceRunResult> {
   const now = options.now ?? Date.now
+  const transport = options.transport ?? defaultInventorySyncTransport
   let stopReason: InventorySliceStopReason | null = null
   let nextAdvanceAt = now()
   let mutationAttempts = 0
+  let unitsExecuted = 0
 
   while (cursor.planIndex < cursor.plans.length) {
     const plan = cursor.plans[cursor.planIndex]
@@ -648,7 +669,11 @@ export async function runInventoryRefreshSlice(
       continue
     }
 
+    // Durable checkpoint: one execution unit per slice.
+    if (unitsExecuted > 0) break
+
     const remaining = remainingBatchListingIds(plan)
+    const unitListingIds = nextExecutionUnitListingIds(plan)
 
     const sliceDiagnostics = {
       runId: cursor.runId,
@@ -656,21 +681,21 @@ export async function runInventoryRefreshSlice(
       planIndex: cursor.planIndex,
       batchIndex: plan.batchIndex,
       remainingListings: remaining.length,
+      unitListings: unitListingIds.length,
     }
 
     await tracePhase('slice.lease-check', sliceDiagnostics, () => options.assertOwned())
 
-    // Diagnostics only: the request and the response handling are unchanged.
+    unitsExecuted += 1
+
     const response = await tracePhase(
       'slice.inventory-sync-request',
       sliceDiagnostics,
-      () => allegroAuth.request('/inventory-sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(
+      () => transport(
+        JSON.stringify(
           buildInventorySyncRequest({
             connectionId,
-            listingIds: remaining,
+            listingIds: unitListingIds,
             historyGroupId: plan.historyGroupId,
             batchIndex: plan.batchIndex + 1,
             executionLease: options.executionLease,
@@ -678,7 +703,7 @@ export async function runInventoryRefreshSlice(
             runId: cursor.runId,
           }),
         ),
-      }),
+      ),
       sliceResponse => ({ httpStatus: sliceResponse.status }),
     )
 
@@ -736,6 +761,21 @@ export async function runInventoryRefreshSlice(
      * reconciles that same command instead of dispatching a new one.
      */
     expireUnresolvedPendingListings(plan, now())
+
+    const batchSize = plan.batches[plan.batchIndex]?.length ?? 0
+    logDiagnostic('slice.execution-unit', 'info', {
+      runId: cursor.runId,
+      connectionId,
+      batchIndex: plan.batchIndex,
+      batchCount: plan.batches.length,
+      unitListings: unitListingIds.length,
+      processedListings: report.processedListingIds.length,
+      completedInBatch: plan.completedListingIds.length,
+      batchSize,
+      pendingInBatch: plan.partial.pendingListingIds.length,
+      batchComplete: isCurrentBatchComplete(plan),
+      stopReason: report.stopReason,
+    })
 
     /*
      * Expiry can be the last thing a batch was waiting for. Close it now

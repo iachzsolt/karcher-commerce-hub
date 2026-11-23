@@ -422,14 +422,24 @@ void describe('slice driver', () => {
     })
 
     const state = cursor()
+
+    // One execution unit per slice: batch 1 closes, then the slice returns
+    // so the caller can persist the cursor before batch 2 starts.
     const first = await runInventoryRefreshSlice('connection-1', state, { executionLease: lease, assertOwned })
 
     assert.equal(first.done, false)
-    assert.equal(first.stopReason, 'WRITE_BUDGET')
-    assert.equal(first.nextAdvanceAt, 9_000)
-    // Cumulative across this slice's two `/inventory-sync` calls.
-    assert.equal(first.mutationAttempts, 7)
+    assert.equal(first.stopReason, null)
+    assert.equal(first.mutationAttempts, 2)
     assert.equal(state.plans[0].kind, 'ALLEGRO')
+    assert.equal((state.plans[0] as InventoryCursorAllegroPlan).batchIndex, 1)
+    assert.equal((state.plans[0] as InventoryCursorAllegroPlan).completedBatches.length, 1)
+
+    const budgetStopped = await runInventoryRefreshSlice('connection-1', state, { executionLease: lease, assertOwned })
+
+    assert.equal(budgetStopped.done, false)
+    assert.equal(budgetStopped.stopReason, 'WRITE_BUDGET')
+    assert.equal(budgetStopped.nextAdvanceAt, 9_000)
+    assert.equal(budgetStopped.mutationAttempts, 5)
 
     const plan = state.plans[0] as InventoryCursorAllegroPlan
     assert.equal(plan.batchIndex, 1)
