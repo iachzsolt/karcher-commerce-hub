@@ -18,6 +18,7 @@ import {
 import {
   allegroAuth,
 } from './allegro-auth.js'
+import { logDiagnostic, tracePhase } from './inventory-resume-diagnostics.js'
 import {
   MAX_LISTINGS_PER_BATCH,
   completeCurrentBatch,
@@ -649,27 +650,59 @@ export async function runInventoryRefreshSlice(
 
     const remaining = remainingBatchListingIds(plan)
 
-    await options.assertOwned()
+    const sliceDiagnostics = {
+      runId: cursor.runId,
+      connectionId,
+      planIndex: cursor.planIndex,
+      batchIndex: plan.batchIndex,
+      remainingListings: remaining.length,
+    }
 
-    const response = await allegroAuth.request('/inventory-sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(
-        buildInventorySyncRequest({
-          connectionId,
-          listingIds: remaining,
-          historyGroupId: plan.historyGroupId,
-          batchIndex: plan.batchIndex + 1,
-          executionLease: options.executionLease,
-          executionMode: 'SLICED',
-          runId: cursor.runId,
-        }),
-      ),
-    })
+    await tracePhase('slice.lease-check', sliceDiagnostics, () => options.assertOwned())
+
+    // Diagnostics only: the request and the response handling are unchanged.
+    const response = await tracePhase(
+      'slice.inventory-sync-request',
+      sliceDiagnostics,
+      () => allegroAuth.request('/inventory-sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          buildInventorySyncRequest({
+            connectionId,
+            listingIds: remaining,
+            historyGroupId: plan.historyGroupId,
+            batchIndex: plan.batchIndex + 1,
+            executionLease: options.executionLease,
+            executionMode: 'SLICED',
+            runId: cursor.runId,
+          }),
+        ),
+      }),
+      sliceResponse => ({ httpStatus: sliceResponse.status }),
+    )
 
     const details = (await response.json().catch(() => null)) as
       | { slice?: InventorySliceReport | null; message?: string }
       | null
+
+    logDiagnostic('slice.inventory-sync-response', 'info', {
+      ...sliceDiagnostics,
+      httpStatus: response.status,
+      hasSliceReport: Boolean(details?.slice),
+      processedListings: Array.isArray(details?.slice?.processedListingIds)
+        ? details.slice.processedListingIds.length
+        : null,
+      pendingListings: Array.isArray(details?.slice?.pendingListingIds)
+        ? details.slice.pendingListingIds.length
+        : null,
+      mutationAttempts: typeof details?.slice?.mutationAttempts === 'number'
+        ? details.slice.mutationAttempts
+        : null,
+      stopReason: typeof details?.slice?.stopReason === 'string'
+        ? details.slice.stopReason
+        : null,
+    })
 
     if (!response.ok || !details?.slice) {
       /*

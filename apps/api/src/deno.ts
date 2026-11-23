@@ -24,6 +24,15 @@ import {
   setNotifyKvStore,
   openDenoNotifyKv,
 } from './allegro-notify.js'
+import {
+  installGlobalErrorDiagnostics,
+  logDiagnostic,
+  logDiagnosticError,
+} from './inventory-resume-diagnostics.js'
+
+// Log-only listeners: no preventDefault, so termination semantics stay
+// unchanged, but a silent isolate failure now leaves a structured line.
+installGlobalErrorDiagnostics()
 
 /*
  * Budapest nyári (CEST, UTC+2) és téli (CET, UTC+1) óráeltolása.
@@ -52,8 +61,30 @@ async function runCronJob(
     return
   }
 
-  await initializeCommerceHubRuntime()
-  await job()
+  // Diagnostics only: errors are logged with their phase and rethrown
+  // unchanged, so Deno still records the cron execution as failed.
+  const startedAt = Date.now()
+  let phase = 'runtime-initialization'
+  logDiagnostic('cron', 'start', { cron: name })
+
+  try {
+    await initializeCommerceHubRuntime()
+    phase = 'job'
+    logDiagnostic('cron', 'info', { cron: name, checkpoint: 'runtime-initialized' })
+    await job()
+  } catch (error) {
+    logDiagnosticError('cron', error, {
+      cron: name,
+      failedPhase: phase,
+      durationMs: Date.now() - startedAt,
+    })
+    throw error
+  }
+
+  logDiagnostic('cron', 'end', {
+    cron: name,
+    durationMs: Date.now() - startedAt,
+  })
 }
 
 function dailyTimesToCronPatterns(

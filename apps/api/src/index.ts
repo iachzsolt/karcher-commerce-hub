@@ -1,6 +1,7 @@
 import 'dotenv/config'
 import { randomUUID } from 'node:crypto'
 import { createRuntimeInitializer, needsPrimaryAllegroSession } from './runtime-initialization.js'
+import { logDiagnostic } from './inventory-resume-diagnostics.js'
 import {
   createDatabase,
   allegroChangeEvents,
@@ -9498,6 +9499,11 @@ export async function runInventoryRefreshResumeScheduler() {
     'inventory-refresh-resume',
     5 * 60 * 1000,
     async () => {
+      // Reached only after the scheduler lease was acquired.
+      logDiagnostic('resume.scheduler-lease', 'info', {
+        lease: 'inventory-refresh-resume',
+        checkpoint: 'acquired',
+      })
       await resumeInventoryRefreshSchedulerTick()
     },
   )
