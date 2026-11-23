@@ -12,6 +12,7 @@ import { getCommerceHubUser } from './access-auth.js'
 import { decryptSecret, encryptSecret } from './token-crypto.js'
 import { applyAllegroDesiredStock, resolveAllegroInventoryRows, syncAllegroInventoryRows } from './allegro-inventory-sync.js'
 import { assertInventoryExecutionLease, assertInventoryExecutionLeaseOwned, type InventoryExecutionLease } from './inventory-execution-lease.js'
+import { tracePhase } from './inventory-resume-diagnostics.js'
 import {
   createSliceBudget,
   resolveInventoryRefreshSliceConfig,
@@ -1078,15 +1079,32 @@ allegroAuth.post('/inventory-sync', async (context) => {
   }
 
   const db = createDatabase(databaseUrl)
+  const session = currentSession
+
+  // Diagnostics only: identifiers and counts, never payloads.
+  const syncDiagnostics = {
+    runId: body.runId ?? null,
+    connectionId: body.connectionId,
+    executionMode: body.executionMode ?? 'LEGACY',
+    batchIndex: typeof body.batchIndex === 'number' ? body.batchIndex : null,
+    requestedListings: Array.isArray(body.listingIds) ? body.listingIds.length : null,
+  }
 
   const resolved =
-    await resolveAllegroInventoryRows(
-      db,
-      {
-        connectionId: body.connectionId,
-        accountId:
-          currentSession.platformAccountId,
-      },
+    await tracePhase(
+      'inventory-sync.resolve-rows',
+      syncDiagnostics,
+      () => resolveAllegroInventoryRows(
+        db,
+        {
+          connectionId: body.connectionId!,
+          accountId:
+            session.platformAccountId,
+        },
+      ),
+      resolvedRows => resolvedRows.ok
+        ? { ok: true, resolvedRows: resolvedRows.rows.length }
+        : { ok: false, reason: String(resolvedRows.reason) },
     )
 
   if (!resolved.ok) {
@@ -1164,11 +1182,15 @@ allegroAuth.post('/inventory-sync', async (context) => {
   const assertExecutionOwned = async () => {
     if (body.executionLease) await assertInventoryExecutionLease(db, body.connectionId!, body.executionLease)
   }
-  await assertExecutionOwned()
+  await tracePhase('inventory-sync.execution-lease-check', syncDiagnostics, assertExecutionOwned)
   const applied =
-    await applyAllegroDesiredStock(
-      db,
-      rowsToApply,
+    await tracePhase(
+      'inventory-sync.desired-stock-prepare',
+      { ...syncDiagnostics, rowsToApply: rowsToApply.length },
+      () => applyAllegroDesiredStock(
+        db,
+        rowsToApply,
+      ),
     )
 
   /*
@@ -1184,28 +1206,47 @@ allegroAuth.post('/inventory-sync', async (context) => {
         (offerId): offerId is string =>
           typeof offerId === 'string' && offerId.trim().length > 0,
       )
+    const chunkCount = Math.ceil(offerIds.length / 10)
 
     for (let index = 0; index < offerIds.length; index += 10) {
-      await allegroAuth.request('/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          offerIds: offerIds.slice(index, index + 10),
+      // Diagnostics only: the response is still not inspected here.
+      await tracePhase(
+        'inventory-sync.allegro-sync-request',
+        {
+          ...syncDiagnostics,
+          chunk: index / 10 + 1,
+          chunkCount,
+          chunkOffers: offerIds.slice(index, index + 10).length,
+        },
+        () => allegroAuth.request('/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            offerIds: offerIds.slice(index, index + 10),
+          }),
         }),
-      })
+        syncResponse => ({ httpStatus: syncResponse.status }),
+      )
     }
 
-    await assertExecutionOwned()
+    await tracePhase('inventory-sync.execution-lease-check', { ...syncDiagnostics, checkpoint: 'after-allegro-sync' }, assertExecutionOwned)
   }
 
   const refreshed =
-    await resolveAllegroInventoryRows(
-      db,
-      {
-        connectionId: body.connectionId,
-        accountId:
-          currentSession.platformAccountId,
-      },
+    await tracePhase(
+      'inventory-sync.post-sync-resolve-rows',
+      syncDiagnostics,
+      () => resolveAllegroInventoryRows(
+        db,
+        {
+          connectionId: body.connectionId!,
+          accountId:
+            currentSession!.platformAccountId,
+        },
+      ),
+      refreshedRows => refreshedRows.ok
+        ? { ok: true, resolvedRows: refreshedRows.rows.length }
+        : { ok: false, reason: String(refreshedRows.reason) },
     )
 
   if (!refreshed.ok) {
@@ -1241,21 +1282,31 @@ allegroAuth.post('/inventory-sync', async (context) => {
       path: string,
       payload?: unknown,
     ) => {
+      const [, operation = 'unknown', encodedListingId = ''] = path.split('/')
       const response =
-        await allegroAuth.request(
-          path,
-          payload === undefined
-            ? { method: 'POST' }
-            : {
-                method: 'POST',
-                headers: {
-                  'Content-Type':
-                    'application/json',
+        await tracePhase(
+          'inventory-sync.mutation-request',
+          {
+            ...syncDiagnostics,
+            operation,
+            listingId: encodedListingId,
+          },
+          () => allegroAuth.request(
+            path,
+            payload === undefined
+              ? { method: 'POST' }
+              : {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type':
+                      'application/json',
+                  },
+                  body: JSON.stringify(
+                    payload,
+                  ),
                 },
-                body: JSON.stringify(
-                  payload,
-                ),
-              },
+          ),
+          mutationResponse => ({ httpStatus: mutationResponse.status }),
         )
 
       const details =
@@ -1287,16 +1338,24 @@ allegroAuth.post('/inventory-sync', async (context) => {
       : undefined
 
   const syncResult =
-    await syncAllegroInventoryRows(
+    await tracePhase(
+      'inventory-sync.mutation-preparation',
+      { ...syncDiagnostics, rows: rows.length, sliced: sliceBudget !== undefined },
+      () => syncAllegroInventoryRows(
       db,
       rows,
       {
         reconcileOwnership: async listingId => {
           await assertExecutionOwned()
-          const response = await allegroAuth.request('/reconcile-listings', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ listingIds: [listingId] }),
-          })
+          const response = await tracePhase(
+            'inventory-sync.reconcile-ownership-request',
+            { ...syncDiagnostics, listingId },
+            () => allegroAuth.request('/reconcile-listings', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ listingIds: [listingId] }),
+            }),
+            reconcileResponse => ({ httpStatus: reconcileResponse.status }),
+          )
           if (!response.ok) return { cleared: false }
           const result = await response.json() as { results?: Array<{ listingId: string; ownership?: { cleared: boolean } }> }
           return { cleared: result.results?.find(item => item.listingId === listingId)?.ownership?.cleared === true }
@@ -1394,18 +1453,23 @@ allegroAuth.post('/inventory-sync', async (context) => {
 
             for (const batch of batches) {
               const response =
-                await allegroAuth.request(
-                  '/sync',
-                  {
-                    method: 'POST',
-                    headers: {
-                      'Content-Type':
-                        'application/json',
+                await tracePhase(
+                  'inventory-sync.refresh-request',
+                  { ...syncDiagnostics, chunkOffers: batch.length, chunkCount: batches.length },
+                  () => allegroAuth.request(
+                    '/sync',
+                    {
+                      method: 'POST',
+                      headers: {
+                        'Content-Type':
+                          'application/json',
+                      },
+                      body: JSON.stringify({
+                        offerIds: batch,
+                      }),
                     },
-                    body: JSON.stringify({
-                      offerIds: batch,
-                    }),
-                  },
+                  ),
+                  refreshResponse => ({ httpStatus: refreshResponse.status }),
                 )
 
               const details =
@@ -1454,6 +1518,12 @@ allegroAuth.post('/inventory-sync', async (context) => {
           ? { slice: sliceBudget }
           : {}),
       },
+    ),
+      result => ({
+        hasSliceReport: Boolean(result.slice),
+        mutationAttempts: result.slice?.mutationAttempts ?? null,
+        stopReason: result.slice?.stopReason ?? null,
+      }),
     )
 
   const { slice: sliceReport, ...syncPayload } =
@@ -6516,6 +6586,13 @@ const currency =
               '/sale/product-offers/' +
               encodeURIComponent(offer.id),
             {
+              /*
+               * Read-only lookup with an existing fallback (the catch
+               * below keeps the list status). Without a bound, one slow
+               * response stalls the whole inventory slice while its
+               * execution lease keeps renewing.
+               */
+              signal: AbortSignal.timeout(10_000),
               headers: {
                 Authorization:
                   'Bearer ' +

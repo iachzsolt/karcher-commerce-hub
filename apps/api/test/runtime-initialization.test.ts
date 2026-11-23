@@ -39,7 +39,9 @@ test('health and notification routes do not request primary-session I/O', () => 
 test('Deno cron registration stays awaited and callbacks await initialization', () => {
   const deno = readFileSync(new URL('../src/deno.ts', import.meta.url), 'utf8')
   assert.match(deno, /await registerDataConnectionSchedulerCrons\(\)/)
-  assert.match(deno, /await initializeCommerceHubRuntime\(\)\s+await job\(\)/)
+  // Initialization is awaited before the job; only short diagnostic
+  // statements may sit between the two awaits.
+  assert.match(deno, /await initializeCommerceHubRuntime\(\)\n(?:[ \t]*(?:phase = '[a-z-]+'|logDiagnostic\([^\n]*\))\n){0,2}[ \t]*await job\(\)/)
   assert.doesNotMatch(deno, /initializeCommerceHubRuntime\(\)\.catch/)
   assert.match(deno, /validateCommerceHubRuntimeConfiguration\(\)\s+Deno.serve/)
   const index = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')

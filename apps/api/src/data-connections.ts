@@ -47,6 +47,7 @@ import {
 } from './inventory-import-diagnostics.js'
 import { readInventoryRefreshCursor, serializeAutomationDetailsWithCursor, type InventoryRefreshCursor } from './inventory-refresh-slice.js'
 import { canRecoverOrphanedInventoryRun } from './inventory-refresh-recovery.js'
+import { logDiagnostic, summarizeInventoryCursor, tracePhase } from './inventory-resume-diagnostics.js'
 import {
   classifyInventoryRefreshRun,
   resumeEligibleInventoryRefreshes,
@@ -1825,36 +1826,72 @@ async function advanceSlicedInventoryRefresh(input: {
   trigger: InventoryRefreshTrigger
 }) {
   const database = requireDatabase()
+  const diagnostics = {
+    runId: input.runId,
+    connectionId: input.connectionId,
+    trigger: input.trigger,
+  }
 
-  return withRenewingSchedulerLease({
+  // Diagnostics only: tracePhase rethrows every error unchanged.
+  return tracePhase('resume.advance', diagnostics, () => withRenewingSchedulerLease({
     ...inventoryRefreshLeaseOptions(database, input.connectionId),
     action: async (lease: { name: string; ownerId: string; assertOwned: () => Promise<void> }) => {
-      const run = await getInventoryRefreshRun(input.connectionId, input.runId)
-      if (!run) throw new InventoryRefreshError('Inventory refresh run not found', 404)
-      if (run.triggerType !== input.trigger) throw new InventoryRefreshError('Only manual runs can be advanced', 409)
-      if (run.status !== 'RUNNING') throw new InventoryRefreshError('Inventory refresh run is already finished', 409)
+      logDiagnostic('resume.execution-lease', 'info', { ...diagnostics, checkpoint: 'acquired' })
 
-      const cursor = readInventoryRefreshCursor(run.automationDetailsJson)
-      if (!cursor) throw new InventoryRefreshError('Inventory refresh run has no resumable cursor', 409)
+      const loadedRun = await tracePhase(
+        'resume.run-load',
+        diagnostics,
+        () => getInventoryRefreshRun(input.connectionId, input.runId),
+        loaded => ({ found: loaded !== null, status: loaded?.status ?? null }),
+      )
 
-      if (cursor.nextAdvanceAt !== null && Date.now() < cursor.nextAdvanceAt) {
-        throw new InventoryRefreshError(
-          `Inventory refresh is cooling down until ${new Date(cursor.nextAdvanceAt).toISOString()}`,
-          409,
-        )
-      }
+      const { run, cursor } = await tracePhase('resume.cursor-validation', diagnostics, async () => {
+        if (!loadedRun) throw new InventoryRefreshError('Inventory refresh run not found', 404)
+        if (loadedRun.triggerType !== input.trigger) throw new InventoryRefreshError('Only manual runs can be advanced', 409)
+        if (loadedRun.status !== 'RUNNING') throw new InventoryRefreshError('Inventory refresh run is already finished', 409)
+
+        const loadedCursor = readInventoryRefreshCursor(loadedRun.automationDetailsJson)
+        if (!loadedCursor) throw new InventoryRefreshError('Inventory refresh run has no resumable cursor', 409)
+
+        if (loadedCursor.nextAdvanceAt !== null && Date.now() < loadedCursor.nextAdvanceAt) {
+          throw new InventoryRefreshError(
+            `Inventory refresh is cooling down until ${new Date(loadedCursor.nextAdvanceAt).toISOString()}`,
+            409,
+          )
+        }
+
+        return { run: loadedRun, cursor: loadedCursor }
+      }, validated => summarizeInventoryCursor(validated.cursor))
 
       const assertOwned = async () => {
         await lease.assertOwned()
       }
       const persist = async (state: InventoryRefreshState) => {
-        await database.update(dataConnectionRuns).set(state).where(eq(dataConnectionRuns.id, input.runId))
+        await tracePhase(
+          'resume.cursor-persistence',
+          { ...diagnostics, status: state.status },
+          async () => {
+            await database.update(dataConnectionRuns).set(state).where(eq(dataConnectionRuns.id, input.runId))
+          },
+        )
       }
 
+      let sliceNumber = 0
       const advance = (next: InventoryRefreshCursor) =>
-        runInventoryRefreshSlice(input.connectionId, next, {
-          executionLease: { name: lease.name, ownerId: lease.ownerId }, assertOwned,
-        })
+        tracePhase(
+          'resume.slice-execution',
+          { ...diagnostics, slice: ++sliceNumber, ...summarizeInventoryCursor(next) },
+          () => runInventoryRefreshSlice(input.connectionId, next, {
+            executionLease: { name: lease.name, ownerId: lease.ownerId }, assertOwned,
+          }),
+          sliceResult => ({
+            done: sliceResult.done,
+            stopReason: sliceResult.stopReason,
+            mutationAttempts: sliceResult.mutationAttempts,
+            nextAdvanceAt: sliceResult.nextAdvanceAt,
+            completedBatchCount: summarizeInventoryCursor(sliceResult.cursor).completedBatchCount,
+          }),
+        )
 
       let result = await executeInventoryRefreshSlice({
         trigger: input.trigger, runId: input.runId, cursor, state: runStateFromRow(run),
@@ -1873,7 +1910,7 @@ async function advanceSlicedInventoryRefresh(input: {
 
       return result
     },
-  })
+  }))
 }
 
 /**
@@ -1963,7 +2000,13 @@ export async function resumeInventoryRefreshSchedulerTick(options?: {
   limit?: number
 }) {
   const result = await resumeEligibleInventoryRefreshes({
-    scan: scanResumableInventoryRefreshRuns,
+    // Diagnostics only: a scan failure escapes the tick, so log it here.
+    scan: now => tracePhase(
+      'resume.scan',
+      {},
+      () => scanResumableInventoryRefreshRuns(now),
+      rows => ({ runningRows: rows.length }),
+    ),
     advance: async target => {
       if (target.triggerType === 'SCHEDULED') {
         return advanceSlicedInventoryRefresh({
@@ -1984,6 +2027,15 @@ export async function resumeInventoryRefreshSchedulerTick(options?: {
     onError: entry => {
       console.error('Inventory refresh self-resume failed:', entry)
     },
+  })
+
+  logDiagnostic('resume.tick', 'end', {
+    considered: result.considered,
+    eligible: result.eligible,
+    advanced: result.advanced.length,
+    skipped: result.skipped.length,
+    failed: result.failed.length,
+    firstSkipReason: result.skipped[0]?.reason ?? null,
   })
 
   if (result.advanced.length > 0 || result.failed.length > 0) {
