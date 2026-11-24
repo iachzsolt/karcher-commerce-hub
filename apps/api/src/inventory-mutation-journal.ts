@@ -4,6 +4,7 @@ import {
   createDatabase,
 } from '@karcher-commerce-hub/database'
 import { observedStockMatches } from './allegro-stock-policy.js'
+import type { AllegroTaskDiagnostics } from './allegro-remote-verification.js'
 
 type Database = ReturnType<typeof createDatabase>
 
@@ -61,6 +62,10 @@ export type StockAuditEvent = {
   reason?: string
   observedStock?: number | null
   taskStatus?: string | null
+  /* Additive diagnostics; existing journal readers ignore them. */
+  failureKind?: StockFailureKind
+  allegroTask?: AllegroTaskDiagnostics | null
+  allegroResponse?: string | null
 }
 
 const UNRESOLVED_STOCK_STATUSES: ReadonlySet<string> = new Set([
@@ -171,6 +176,10 @@ export async function recordStockAudit(
         reason: event.reason ?? null,
         observedStock: event.observedStock ?? null,
         taskStatus: event.taskStatus ?? null,
+        // Present only on failures, so existing events keep their shape.
+        ...(event.failureKind ? { failureKind: event.failureKind } : {}),
+        ...(event.allegroTask ? { allegroTask: event.allegroTask } : {}),
+        ...(event.allegroResponse ? { allegroResponse: event.allegroResponse } : {}),
       }),
       occurredAt: sql`now()`,
     })
@@ -316,14 +325,33 @@ export type StockCommandTaskState =
 
 export type StockDispatchResult =
   | { kind: 'ACCEPTED'; httpStatus: number }
-  | { kind: 'REJECTED'; httpStatus: number; reason?: string }
+  /** `allegroResponse`: bounded original response body of the rejected PUT. */
+  | { kind: 'REJECTED'; httpStatus: number; reason?: string; allegroResponse?: string | null }
   | { kind: 'RATE_LIMITED'; httpStatus: number; retryAfterMs: number }
   | { kind: 'UNKNOWN'; reason?: string }
+
+/**
+ * Where a FAILED stock command failed. `httpStatus` 502 on an
+ * ALLEGRO_TASK_FAILED outcome is synthetic: the PUT itself was accepted
+ * and Allegro's asynchronous task reported the failure.
+ */
+export type StockFailureKind =
+  | 'ALLEGRO_TASK_FAILED'
+  | 'ALLEGRO_COMMAND_REJECTED'
 
 export type StockMutationOutcome =
   | { status: 'UPDATED'; commandId: string; observedStock: number | null }
   | { status: 'PENDING'; commandId: string; observedStock: number | null }
-  | { status: 'FAILED'; commandId: string; message: string; httpStatus: number; taskStatus?: string | null }
+  | {
+      status: 'FAILED'
+      commandId: string
+      message: string
+      httpStatus: number
+      taskStatus?: string | null
+      failureKind?: StockFailureKind
+      allegroTask?: AllegroTaskDiagnostics | null
+      allegroResponse?: string | null
+    }
   | { status: 'RATE_LIMITED'; commandId: string; retryAfterMs: number }
   | { status: 'UNKNOWN'; commandId: string; message: string }
   | { status: 'SKIPPED'; reason: string; commandId?: string }
@@ -372,6 +400,11 @@ export type StockMutationPorts = {
   newCommandId: () => string
   /** Called synchronously immediately before the remote PUT leaves the process. */
   onDispatch?: () => void
+  /**
+   * Original Allegro task details for the last `readCommandTask` of this
+   * command, if the adapter captured them. Diagnostic only.
+   */
+  describeTask?: (commandId: string) => AllegroTaskDiagnostics | null
   wait?: (ms: number) => Promise<void>
   pollAttempts?: number
   pollIntervalMs?: number
@@ -379,6 +412,15 @@ export type StockMutationPorts = {
 
 const defaultWait = (ms: number) =>
   new Promise<void>(resolve => setTimeout(resolve, ms))
+
+/** Diagnostics must never change the mutation outcome. */
+function describeTask(ports: StockMutationPorts, commandId: string): AllegroTaskDiagnostics | null {
+  try {
+    return ports.describeTask?.(commandId) ?? null
+  } catch {
+    return null
+  }
+}
 
 /*
  * The only code path allowed to create a stock commandId.
@@ -526,6 +568,8 @@ export async function executeStockMutation(
         commandId,
         fromStock,
         reason: message,
+        failureKind: 'ALLEGRO_COMMAND_REJECTED',
+        allegroResponse: dispatched.allegroResponse ?? null,
       })
 
       return {
@@ -533,6 +577,8 @@ export async function executeStockMutation(
         commandId,
         message,
         httpStatus: dispatched.httpStatus,
+        failureKind: 'ALLEGRO_COMMAND_REJECTED',
+        allegroResponse: dispatched.allegroResponse ?? null,
       }
     }
 
@@ -558,6 +604,8 @@ export async function executeStockMutation(
       if (task === 'ABSENT' || task === 'PENDING') continue
 
       if (task === 'FAILED') {
+        const allegroTask = describeTask(ports, commandId)
+
         await ports.record({
           ...base,
           status: 'FAILED',
@@ -565,6 +613,8 @@ export async function executeStockMutation(
           fromStock,
           reason: 'ALLEGRO_TASK_FAILED',
           taskStatus: task,
+          failureKind: 'ALLEGRO_TASK_FAILED',
+          allegroTask,
         })
 
         return {
@@ -573,6 +623,8 @@ export async function executeStockMutation(
           message: 'Allegro stock update failed',
           httpStatus: 502,
           taskStatus: task,
+          failureKind: 'ALLEGRO_TASK_FAILED',
+          allegroTask,
         }
       }
 
@@ -631,6 +683,8 @@ export async function executeStockMutation(
     }
 
     if (task === 'FAILED') {
+      const allegroTask = describeTask(ports, reusable.commandId)
+
       await ports.record({
         ...base,
         status: 'FAILED',
@@ -638,6 +692,8 @@ export async function executeStockMutation(
         fromStock: reusable.fromStock,
         reason: 'ALLEGRO_TASK_FAILED',
         taskStatus: task,
+        failureKind: 'ALLEGRO_TASK_FAILED',
+        allegroTask,
       })
 
       return {
@@ -646,6 +702,8 @@ export async function executeStockMutation(
         message: 'Allegro stock update failed',
         httpStatus: 502,
         taskStatus: task,
+        failureKind: 'ALLEGRO_TASK_FAILED',
+        allegroTask,
       }
     }
 

@@ -1074,10 +1074,24 @@ export async function syncAllegroInventoryRows(
     slice?: InventorySliceBudget
     sliceWait?: (ms: number) => Promise<void>
     now?: () => number
+    /*
+     * Listings whose remote state this request could not verify, with the
+     * reason. When present, these listings never get a new stock or
+     * publication mutation, and their cached remote state is not used to
+     * close journal commands. Absent means "no verification performed"
+     * (LEGACY behavior, unchanged).
+     */
+    remoteUnverified?: ReadonlyMap<string, string>
   },
 ) {
   const results:
     Array<Record<string, unknown>> = []
+
+  const remoteUnverified = options?.remoteUnverified ?? null
+  /* Reconciliation compares cached remote state: only verified rows may use it. */
+  const reconcilableRows = remoteUnverified
+    ? rows.filter(row => !remoteUnverified.has(row.listingId))
+    : rows
 
   const slice = options?.slice ?? null
   const now = options?.now ?? Date.now
@@ -1158,7 +1172,7 @@ export async function syncAllegroInventoryRows(
   const reconciliation =
     await reconcileOpenPendingSyncEvents(
       database,
-      rows,
+      reconcilableRows,
     )
 
   console.info('Allegro inventory batch reconciliation completed', {
@@ -1175,7 +1189,7 @@ export async function syncAllegroInventoryRows(
    */
   const stockReconciliation = await reconcileUnresolvedStockCommands(
     database,
-    rows.map((row) => ({
+    reconcilableRows.map((row) => ({
       listingId: row.listingId,
       remoteStock: row.remoteStock,
     })),
@@ -1186,6 +1200,7 @@ export async function syncAllegroInventoryRows(
     rowCount: rows.length,
     reconciled: stockReconciliation.reconciled,
     unresolved: stockReconciliation.unresolved,
+    unverifiedRows: rows.length - reconcilableRows.length,
   })
 
   rowLoop: for (const row of rows) {
@@ -1228,6 +1243,75 @@ export async function syncAllegroInventoryRows(
         listingId: row.listingId,
         action: 'SKIP',
         status: 'TARGET_STOCK_UNKNOWN',
+      })
+
+      continue
+    }
+
+    /*
+     * No new stock or publication mutation may be decided on a remote
+     * state this request could not verify. The listing is reported, not
+     * hidden as unchanged; an unresolved journal command stays in the
+     * journal and is reconciled by a later, verified run.
+     */
+    const unverifiedReason = remoteUnverified?.get(row.listingId)
+
+    /*
+     * Zero target stock on an offer the cache still shows as selling would
+     * normally END it. Without verified remote state nothing is sent, so
+     * this is reported as a FAILED listing: the batch, the execution unit
+     * and the run fail visibly. This improves visibility only; it does not
+     * remove the overselling risk while the offer stays live.
+     *
+     * Only where a verified run would END: an explicit manual INACTIVE
+     * intent is skipped there too, so it is not reported as a failure.
+     */
+    const manualInactiveIntent =
+      !row.stockAutoPaused && row.desiredPublicationStatus === 'INACTIVE'
+
+    if (
+      unverifiedReason &&
+      row.targetStock === 0 &&
+      !manualInactiveIntent &&
+      (row.publicationStatus === 'ACTIVE' || row.publicationStatus === 'ACTIVATING')
+    ) {
+      failed += 1
+
+      results.push({
+        sku: row.sku,
+        listingId: row.listingId,
+        offerId: row.offerId,
+        action: 'END',
+        status: 'FAILED',
+        reason: 'REMOTE_UNVERIFIED_ZERO_STOCK',
+        verificationReason: unverifiedReason,
+        remoteStock: row.remoteStock,
+        targetStock: row.targetStock,
+        publicationStatus: row.publicationStatus,
+        desiredPublicationStatus: row.desiredPublicationStatus,
+        details: {
+          message:
+            `Nulla célkészlet, de az Allegro-állapot nem ellenőrizhető (${unverifiedReason}); ` +
+            'az ajánlat nem lett leállítva, túleladás lehetséges (REMOTE_UNVERIFIED_ZERO_STOCK).',
+        },
+      })
+
+      continue
+    }
+
+    if (unverifiedReason) {
+      skipped += 1
+
+      results.push({
+        sku: row.sku,
+        listingId: row.listingId,
+        offerId: row.offerId,
+        action: 'SKIP',
+        status: 'REMOTE_UNVERIFIED',
+        reason: unverifiedReason,
+        remoteStock: row.remoteStock,
+        targetStock: row.targetStock,
+        publicationStatus: row.publicationStatus,
       })
 
       continue

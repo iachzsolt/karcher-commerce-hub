@@ -76,6 +76,8 @@ const SKIP_REASONS: Record<string, string> = {
     'Ismeretlen Allegro-készlet',
   UNSUPPORTED_PUBLICATION_STATE:
     'Nem támogatott állapot',
+  REMOTE_UNVERIFIED:
+    'Az Allegro-állapot nem ellenőrizhető',
 }
 
 function firstNumber(

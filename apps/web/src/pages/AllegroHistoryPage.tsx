@@ -421,6 +421,7 @@ const SYNC_STATUS_LABELS: Record<string, string> = {
   TARGET_STOCK_UNKNOWN: 'Nincs célkészlet',
   REMOTE_STOCK_UNKNOWN: 'Az Allegro-készlet ismeretlen',
   UNSUPPORTED_PUBLICATION_STATE: 'Nem támogatott állapot',
+  REMOTE_UNVERIFIED: 'Az Allegro-állapot nem ellenőrizhető',
 }
 
 function formatEventValue(event: AllegroHistoryEvent, value: string | null) {
