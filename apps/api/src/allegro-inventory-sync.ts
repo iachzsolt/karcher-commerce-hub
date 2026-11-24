@@ -33,6 +33,14 @@ import {
   type InventorySliceReport,
 } from './inventory-refresh-slice.js'
 import { STOCK_RATE_LIMIT_FALLBACK_MS, reconcileUnresolvedStockCommands } from './inventory-mutation-journal.js'
+import {
+  beginAutomaticActivateIntent,
+  beginAutomaticEndIntent,
+  classifyPublicationOwnership,
+  confirmAutomaticEndOwnership,
+  revertAutomaticEndIntent,
+  type OwnershipScope,
+} from './allegro-publication-intent.js'
 
 type Database =
   ReturnType<typeof createDatabase>
@@ -55,6 +63,10 @@ export type AllegroInventorySyncRow = {
 
   desiredPublicationStatus:
     string
+
+  /* Durable publication intent (0029); absent/null for legacy rows. */
+  publicationIntentSource?: string | null
+  publicationIntentId?: string | null
 
   duplicateOfferCount: number
 
@@ -187,6 +199,12 @@ export async function resolveAllegroInventoryRows(
         desiredPublicationStatus:
           listingDesiredStates
             .desiredPublicationStatus,
+
+        publicationIntentSource:
+          listingDesiredStates.publicationIntentSource,
+
+        publicationIntentId:
+          listingDesiredStates.publicationIntentId,
       })
       .from(platformListings)
       .innerJoin(
@@ -318,6 +336,12 @@ export async function resolveAllegroInventoryRows(
             listing
               .desiredPublicationStatus ??
             'UNKNOWN',
+
+          publicationIntentSource:
+            listing.publicationIntentSource ?? null,
+
+          publicationIntentId:
+            listing.publicationIntentId ?? null,
 
           duplicateOfferCount:
             listingCountBySku.get(
@@ -1082,10 +1106,18 @@ export async function syncAllegroInventoryRows(
      * (LEGACY behavior, unchanged).
      */
     remoteUnverified?: ReadonlyMap<string, string>
+    /*
+     * Account and environment of the connected session. Required to
+     * confirm automatic auto-pause ownership from journal evidence; without
+     * it ownership is never confirmed (fail closed).
+     */
+    publicationOwnership?: OwnershipScope
   },
 ) {
   const results:
     Array<Record<string, unknown>> = []
+
+  const ownershipScope = options?.publicationOwnership ?? null
 
   const remoteUnverified = options?.remoteUnverified ?? null
   /* Reconciliation compares cached remote state: only verified rows may use it. */
@@ -1266,8 +1298,11 @@ export async function syncAllegroInventoryRows(
      * Only where a verified run would END: an explicit manual INACTIVE
      * intent is skipped there too, so it is not reported as a failure.
      */
+    const ownership = classifyPublicationOwnership(row)
+    // Manual and unresolved (legacy) INACTIVE decisions are never ended by
+    // automation; a pending automatic END intent is not a manual decision.
     const manualInactiveIntent =
-      !row.stockAutoPaused && row.desiredPublicationStatus === 'INACTIVE'
+      ownership === 'MANUAL' || ownership === 'UNRESOLVED'
 
     if (
       unverifiedReason &&
@@ -1326,15 +1361,103 @@ export async function syncAllegroInventoryRows(
       row.publicationStatus === 'ACTIVATING'
 
     /*
+     * Pending automatic END intent: desired INACTIVE was recorded by
+     * automation, but auto-pause ownership is not yet proven.
+     *
+     * - Verified ENDED/INACTIVE: let the publication operation read back the
+     *   bound command (read-only verification, never a resend), then confirm
+     *   ownership only from journal evidence of OUR END for THIS intent.
+     *   An ENDED offer without that evidence is never claimed.
+     * - Verified ACTIVE with a positive target: the END never took effect;
+     *   revert the intent unless a publication command is still unresolved.
+     * - Verified ACTIVE with zero target: continue to the END path below,
+     *   which keeps the same intent id.
+     */
+    if (ownership === 'PENDING_AUTOMATIC') {
+      if (remoteEnded) {
+        if (!(await reserveMutation())) break rowLoop
+
+        const readBack = await adapter.pushStatus(row.listingId)
+
+        settleMutation(readBack)
+
+        if (readBack.status === 429) break rowLoop
+
+        const confirmed =
+          ownershipScope && row.publicationIntentId
+            ? await confirmAutomaticEndOwnership(database, row.listingId, row.publicationIntentId, ownershipScope)
+            : false
+
+        if (confirmed) {
+          row.stockAutoPaused = true
+
+          if (row.targetStock === 0) {
+            autoPaused += 1
+            results.push({
+              sku: row.sku,
+              listingId: row.listingId,
+              action: 'END',
+              status: 'SUCCESS',
+              reason: 'AUTOMATIC_OWNERSHIP_CONFIRMED',
+            })
+            continue
+          }
+          // Positive target: continue with the regular reactivation below.
+        } else if (readBack.status === 202) {
+          pending += 1
+          pendingListingIds.add(row.listingId)
+          results.push({
+            sku: row.sku,
+            listingId: row.listingId,
+            action: 'END',
+            status: 'PENDING',
+            details: readBack.details,
+          })
+          continue
+        } else {
+          skipped += 1
+          results.push({
+            sku: row.sku,
+            listingId: row.listingId,
+            action: 'SKIP',
+            status: 'OWNERSHIP_UNRESOLVED',
+            reason: 'NO_AUTOMATIC_END_EVIDENCE',
+          })
+          continue
+        }
+      } else if (remoteActive && row.targetStock !== null && row.targetStock > 0) {
+        const reverted = row.publicationIntentId
+          ? await revertAutomaticEndIntent(database, row.listingId, row.publicationIntentId)
+          : false
+
+        if (!reverted) {
+          skipped += 1
+          results.push({
+            sku: row.sku,
+            listingId: row.listingId,
+            action: 'SKIP',
+            status: 'PUBLICATION_COMMAND_UNRESOLVED',
+          })
+          continue
+        }
+
+        row.desiredPublicationStatus = 'ACTIVE'
+        row.publicationIntentSource = 'AUTOMATIC'
+        row.publicationIntentId = null
+      }
+    }
+
+    /*
      * TARGET STOCK = 0
      *
      * Allegro quantity=0 nem használható,
      * ezért az ajánlatot END állapotba tesszük.
      */
     if (row.targetStock === 0) {
-      // An explicit manual inactive intent must not become automation-owned
-      // merely because its END has not yet appeared in the observation.
-      if (!row.stockAutoPaused && row.desiredPublicationStatus === 'INACTIVE') {
+      // An explicit manual (or unresolved legacy) inactive intent must not
+      // become automation-owned merely because its END has not yet appeared
+      // in the observation. A pending automatic END continues below.
+      if (!row.stockAutoPaused && row.desiredPublicationStatus === 'INACTIVE' && ownership !== 'PENDING_AUTOMATIC') {
         skipped += 1
         results.push({ sku: row.sku, listingId: row.listingId, action: 'SKIP', status: 'MANUAL_INACTIVE' })
         continue
@@ -1408,26 +1531,30 @@ export async function syncAllegroInventoryRows(
 
       if (!(await reserveMutation())) break rowLoop
 
-      await database
-        .update(
-          listingDesiredStates,
-        )
-        .set({
-          desiredPublicationStatus:
-            'INACTIVE',
+      /*
+       * Durable AUTOMATIC END intent before any command (CAS on the state
+       * this decision was based on). A pending automatic END keeps its
+       * intent id, so evidence of an earlier command stays bound to it.
+       */
+      const endIntentId = await beginAutomaticEndIntent(database, row.listingId, {
+        desiredPublicationStatus: row.desiredPublicationStatus,
+        publicationIntentId: row.publicationIntentId ?? null,
+      })
 
-          updatedBy:
-            'COMMERCE_HUB_INVENTORY',
-
-          updatedAt:
-            new Date(),
+      if (!endIntentId) {
+        skipped += 1
+        results.push({
+          sku: row.sku,
+          listingId: row.listingId,
+          action: 'SKIP',
+          status: 'PUBLICATION_INTENT_CHANGED',
         })
-        .where(
-          eq(
-            listingDesiredStates.listingId,
-            row.listingId,
-          ),
-        )
+        continue
+      }
+
+      row.desiredPublicationStatus = 'INACTIVE'
+      row.publicationIntentSource = 'AUTOMATIC'
+      row.publicationIntentId = endIntentId
 
       attempted += 1
 
@@ -1469,35 +1596,10 @@ export async function syncAllegroInventoryRows(
 
       if (push.status === 202) {
         /*
-         * Az END parancs 202/PENDING esetén is
-         * a Commerce Hub által kezelt auto-pause.
-         * Így a későbbi készlet-visszatérés
-         * automatikusan újraaktiválhatja.
+         * 202/PENDING is not proof that our END took effect: ownership stays
+         * a pending AUTOMATIC intent (durable, never classified as manual)
+         * and is confirmed later only from journal evidence for this intent.
          */
-        await database
-          .update(
-            listingDesiredStates,
-          )
-          .set({
-            stockAutoPaused:
-              true,
-
-            updatedBy:
-              'COMMERCE_HUB_INVENTORY',
-
-            updatedAt:
-              new Date(),
-          })
-          .where(
-            eq(
-              listingDesiredStates.listingId,
-              row.listingId,
-            ),
-          )
-
-        row.stockAutoPaused = true
-        autoPaused += 1
-
         pending += 1
 
         pendingListingIds.add(row.listingId)
@@ -1538,27 +1640,29 @@ export async function syncAllegroInventoryRows(
         continue
       }
 
-      await database
-        .update(
-          listingDesiredStates,
-        )
-        .set({
-          stockAutoPaused:
-            true,
+      /*
+       * A success response alone (e.g. ALREADY_FIXED on an offer that was
+       * already ended) does not prove that our command paused it. Ownership
+       * is confirmed only from journal evidence of our END for this intent.
+       */
+      const confirmed = ownershipScope
+        ? await confirmAutomaticEndOwnership(database, row.listingId, endIntentId, ownershipScope)
+        : false
 
-          updatedBy:
-            'COMMERCE_HUB_INVENTORY',
-
-          updatedAt:
-            new Date(),
+      if (!confirmed) {
+        skipped += 1
+        results.push({
+          sku: row.sku,
+          listingId: row.listingId,
+          action: 'END',
+          status: 'OWNERSHIP_UNRESOLVED',
+          reason: 'NO_AUTOMATIC_END_EVIDENCE',
+          details: push.details,
         })
-        .where(
-          eq(
-            listingDesiredStates.listingId,
-            row.listingId,
-          ),
-        )
+        continue
+      }
 
+      row.stockAutoPaused = true
       autoPaused += 1
 
       results.push({
@@ -1792,26 +1896,27 @@ export async function syncAllegroInventoryRows(
     if (row.stockAutoPaused) {
       if (!(await reserveMutation())) break rowLoop
 
-      await database
-        .update(
-          listingDesiredStates,
-        )
-        .set({
-          desiredPublicationStatus:
-            'ACTIVE',
+      // Durable AUTOMATIC ACTIVATE intent (CAS); auto-pause stays until the
+      // existing ownership reconciliation releases it.
+      const activateIntentId = await beginAutomaticActivateIntent(database, row.listingId, {
+        desiredPublicationStatus: row.desiredPublicationStatus,
+        publicationIntentId: row.publicationIntentId ?? null,
+      })
 
-          updatedBy:
-            'COMMERCE_HUB_INVENTORY',
-
-          updatedAt:
-            new Date(),
+      if (!activateIntentId) {
+        skipped += 1
+        results.push({
+          sku: row.sku,
+          listingId: row.listingId,
+          action: 'SKIP',
+          status: 'PUBLICATION_INTENT_CHANGED',
         })
-        .where(
-          eq(
-            listingDesiredStates.listingId,
-            row.listingId,
-          ),
-        )
+        continue
+      }
+
+      row.desiredPublicationStatus = 'ACTIVE'
+      row.publicationIntentSource = 'AUTOMATIC'
+      row.publicationIntentId = activateIntentId
 
       attempted += 1
 

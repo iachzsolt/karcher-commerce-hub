@@ -48,7 +48,9 @@ function fixture(statuses = ['ACTIVE', 'ENDED']) {
     },
     campaignSafe: async () => true,
     send: async (action, commandId) => { sent.push(`${action}:${commandId}`); return { accepted: true } },
-    task: async () => 'PENDING', wait: async () => { waits++ },
+    // Allegro's task report confirms the command once its effect is visible.
+    task: async () => ['ENDED', 'INACTIVE'].includes(statuses[Math.min(Math.max(reads - 1, 0), statuses.length - 1)]) && sent.length ? 'SUCCESS' : 'PENDING',
+    wait: async () => { waits++ },
   }
   return { lease, adapter, audits, persisted, sent, get reads() { return reads }, get waits() { return waits },
     snapshot, replace: (value: Partial<PublicationSnapshot>) => { snapshot = { ...snapshot, ...value } },
@@ -174,6 +176,17 @@ test('async END is polled to authoritative completion with exactly one command',
   assert.equal(f.waits, 2)
   assert.equal(f.persisted.at(-1), 'ENDED')
   assert.ok(f.audits.some(e => e.status === 'PENDING'))
+  assert.equal(f.audits.find(e => e.status === 'SUCCESS')?.commandEvidence, 'ALLEGRO_TASK_SUCCESS')
+})
+test('matching remote state without a confirming task is FIXED but only REMOTE_STATE_ONLY evidence, never resent', async () => {
+  const f = fixture(['ACTIVE', 'ENDED'])
+  f.adapter.task = async () => 'PENDING'
+  const result = await execute(f)
+  assert.equal(result.outcome, 'FIXED')
+  assert.equal(f.sent.length, 1)
+  const success = f.audits.find(e => e.status === 'SUCCESS')
+  assert.equal(success?.commandEvidence, 'REMOTE_STATE_ONLY')
+  assert.equal(success?.taskResult, 'PENDING')
 })
 test('bounded timeout releases lease but retains pending command ID to prevent blind resend', async () => {
   const f = fixture(['ACTIVE'])

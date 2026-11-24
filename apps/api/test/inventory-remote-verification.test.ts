@@ -58,6 +58,7 @@ type JournalRow = { listingId: string; newValue: string; metadataJson: string }
 function fakeDatabase(options: { stockJournal?: JournalRow[] } = {}) {
   const inserted: Array<Record<string, unknown>> = []
   let updates = 0
+  let executes = 0
 
   const chain = (result: unknown): unknown => {
     const proxy: unknown = new Proxy(function () {}, {
@@ -88,12 +89,23 @@ function fakeDatabase(options: { stockJournal?: JournalRow[] } = {}) {
       updates += 1
       return chain([])
     },
+    /*
+     * Raw SQL (publication intent CAS). Intent creation succeeds; ownership
+     * confirmation finds no journal evidence in this fake. Real SQL
+     * semantics are covered by the PostgreSQL (PGlite) tests.
+     */
+    execute: async (query: { queryChunks?: Array<{ value?: string[] }> }) => {
+      executes += 1
+      const text = (query.queryChunks ?? []).map(chunk => chunk?.value?.join('') ?? '').join('')
+      return { rows: /returning d\.publication_intent_id/.test(text) ? [{ intent_id: '00000000-0000-4000-8000-0000000000aa' }] : [] }
+    },
   }
 
   return {
     database: database as unknown as Parameters<typeof syncAllegroInventoryRows>[0],
     inserted,
     updates: () => updates,
+    executes: () => executes,
   }
 }
 
@@ -757,7 +769,7 @@ void describe('zero-stock safety and visibility (B1)', () => {
     assert.equal(verified.results[0].status, 'MANUAL_INACTIVE')
   })
 
-  void it('keeps the existing automatic END for a verified ACTIVE offer with zero target', async () => {
+  void it('keeps the automatic END for a verified ACTIVE offer with zero target, but claims no ownership without evidence', async () => {
     const db = fakeDatabase()
     const recorder = recordingAdapter()
 
@@ -766,9 +778,12 @@ void describe('zero-stock safety and visibility (B1)', () => {
       remoteUnverified: new Map(),
     })
 
-    assert.deepEqual(recorder.calls, ['pushStatus:listing-a'])
-    assert.equal(result.summary.autoPaused, 1)
+    assert.deepEqual(recorder.calls, ['pushStatus:listing-a'], 'the END is still sent')
     assert.equal(result.summary.failed, 0)
+    // A success response alone is not ownership evidence; confirmation with
+    // real journal evidence is covered by the PostgreSQL tests.
+    assert.equal(result.summary.autoPaused, 0)
+    assert.equal(result.results[0].status, 'OWNERSHIP_UNRESOLVED')
   })
 
   void it('sends nothing and does not fail for an unverified ENDED offer with zero target', async () => {

@@ -30,6 +30,7 @@ export async function readPublicationSnapshot(database: Database, listingId: str
   const [row] = await database.select({
     listingId: platformListings.id, offerId: platformListings.externalListingId, accountId: platformListings.accountId,
     desiredPublication: listingDesiredStates.desiredPublicationStatus,
+    publicationIntentId: listingDesiredStates.publicationIntentId,
     intentVersion: sql<string>`to_jsonb(${listingDesiredStates})::text`,
     cachedPublication: listingRemoteStates.publicationStatus, observedAt: listingRemoteStates.updatedAt,
     productActive: products.active,
@@ -68,9 +69,26 @@ export async function latestPublicationCommand(database: Database, target: Publi
       sql`${allegroChangeEvents.metadataJson}::jsonb->>'offerId' = ${target.offerId}`))
     .orderBy(desc(allegroChangeEvents.occurredAt), desc(allegroChangeEvents.id)).limit(1)
   if (!row) return null
-  const metadata = JSON.parse(row.metadata ?? '{}') as { commandId?: string }
+  const metadata = JSON.parse(row.metadata ?? '{}') as { commandId?: string; intentId?: unknown; accountId?: unknown }
   if (!metadata.commandId || !['END', 'ACTIVATE'].includes(row.action ?? '')) throw new Error('PUBLICATION_JOURNAL_INVALID')
-  return { commandId: metadata.commandId, action: row.action as 'END' | 'ACTIVATE', status: row.status ?? 'PENDING' }
+  // A command journaled for another account never belongs to this target.
+  if (typeof metadata.accountId === 'string' && metadata.accountId !== target.accountId) throw new Error('PUBLICATION_JOURNAL_INVALID')
+  return {
+    commandId: metadata.commandId,
+    action: row.action as 'END' | 'ACTIVATE',
+    status: row.status ?? 'PENDING',
+    // Bound at ATTEMPTED; legacy commands carry none and never prove ownership.
+    intentId: typeof metadata.intentId === 'string' ? metadata.intentId : null,
+  }
+}
+
+/** When the command's durable intent (ATTEMPTED) was journaled; diagnostic only. */
+export async function publicationCommandAttemptedAt(database: Database, target: PublicationTarget, commandId: string): Promise<Date | null> {
+  const [row] = await database.select({ occurredAt: allegroChangeEvents.occurredAt })
+    .from(allegroChangeEvents).where(and(eq(allegroChangeEvents.listingId, target.listingId), eq(allegroChangeEvents.eventType, 'PUBLICATION_OPERATION'),
+      eq(allegroChangeEvents.newValue, 'ATTEMPTED'), sql`${allegroChangeEvents.metadataJson}::jsonb->>'commandId' = ${commandId}`))
+    .orderBy(allegroChangeEvents.occurredAt).limit(1)
+  return row?.occurredAt ?? null
 }
 
 /** Partial observation: deliberately does not advance full stock/price lastSyncedAt. */
@@ -103,7 +121,10 @@ export async function savePublicationIntent(database: Database, listingId: strin
     with previous as (select listing_id,desired_publication_status from listing_desired_states
       where listing_id=${listingId}::uuid for update),
     changed as (update listing_desired_states d
-      set desired_publication_status=${desiredStatus},stock_auto_paused=false,updated_by='COMMERCE_HUB_UI',updated_at=now()
+      set desired_publication_status=${desiredStatus},stock_auto_paused=false,updated_by='COMMERCE_HUB_UI',updated_at=now(),
+        -- Always a new MANUAL intent, even when the status does not change:
+        -- it supersedes every older automatic intent and its commands.
+        publication_intent_source='MANUAL',publication_intent_id=gen_random_uuid(),publication_intent_at=now()
       from previous where d.listing_id=previous.listing_id
       returning d.listing_id,d.desired_publication_status,d.updated_by,d.updated_at,previous.desired_publication_status as old_status),
     audit as (insert into allegro_change_events(listing_id,event_type,source,old_value,new_value,metadata_json,occurred_at)

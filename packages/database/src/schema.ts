@@ -528,6 +528,21 @@ export const listingDesiredStates = pgTable(
 
     updatedBy: text('updated_by'),
 
+    /*
+     * Durable publication intent (migration 0029). NULL means legacy or
+     * unresolved and never grants automatic ownership. A DB trigger clears
+     * all three when an unaware writer writes the publication status or
+     * the auto-pause flag (even with an unchanged value) without a new
+     * intent.
+     */
+    publicationIntentSource: text('publication_intent_source'),
+
+    publicationIntentId: uuid('publication_intent_id'),
+
+    publicationIntentAt: timestamp('publication_intent_at', {
+      withTimezone: true,
+    }),
+
     updatedAt: timestamp('updated_at', {
       withTimezone: true,
     })

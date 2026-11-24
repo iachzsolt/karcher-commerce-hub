@@ -2,6 +2,7 @@ import 'dotenv/config'
 import { randomUUID } from 'node:crypto'
 import { createRuntimeInitializer, needsPrimaryAllegroSession } from './runtime-initialization.js'
 import { logDiagnostic } from './inventory-resume-diagnostics.js'
+import { manualPublicationIntent } from './allegro-publication-intent.js'
 import {
   createDatabase,
   allegroChangeEvents,
@@ -1952,6 +1953,8 @@ app.post(
               ? {
                   desiredPublicationStatus:
                     nextDesiredPublicationStatus,
+                  // A user decision: always a new MANUAL intent.
+                  ...manualPublicationIntent(now),
                 }
               : {}
           ),
@@ -5673,8 +5676,17 @@ app.post(
                 then ${listingDesiredStates.desiredStock}
                 else ${nextStock} end`,
 
-            desiredPublicationStatus:
-              nextPublicationStatus,
+            // Discarding to a different publication status is a user decision
+            // (new MANUAL intent). Otherwise the status column is not written
+            // at all, so the 0029 guard keeps the existing publication intent
+            // on stock-/price-only discards.
+            ...(publicationChanged
+              ? {
+                  desiredPublicationStatus:
+                    nextPublicationStatus,
+                  ...manualPublicationIntent(now),
+                }
+              : {}),
 
             priceLocked:
               priceProtected
@@ -5993,13 +6005,20 @@ app.patch('/allegro/listings/:id/desired-stock', async (context) => {
      * ajánlatoknál stockAutoPaused=false, így azok
      * érintetlenek maradnak.
      */
+    const desiredStockUpdate = resolveDesiredStockUpdate(
+      current,
+      desiredStock,
+    )
+
     const [updated] = await db
       .update(listingDesiredStates)
       .set({
-        ...resolveDesiredStockUpdate(
-          current,
-          desiredStock,
-        ),
+        ...desiredStockUpdate,
+        // Ownership takeover changes publication: record a MANUAL intent.
+        // A plain stock edit leaves the publication intent untouched.
+        ...('desiredPublicationStatus' in desiredStockUpdate
+          ? manualPublicationIntent()
+          : {}),
         updatedBy: 'COMMERCE_HUB_UI',
         updatedAt: new Date(),
       })
