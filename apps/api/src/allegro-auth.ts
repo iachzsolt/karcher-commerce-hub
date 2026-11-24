@@ -7,7 +7,8 @@ import { shouldRestoreLockedBaseAfterPriceSchedule, shouldWriteAllegroPrice } fr
 import { compareObservedStock, observedStockMatches } from './allegro-stock-policy.js'
 import { readStockOwnershipSnapshot, reconcileStockOwnership } from './allegro-stock-ownership.js'
 import { executePublicationOperation, withPublicationLease, type PublicationTarget, type PublicationResult } from './allegro-publication-operation.js'
-import { createPublicationLeaseStore, readPublicationSnapshot, recordPublicationAudit, latestPublicationCommand, persistPublicationObservation } from './allegro-publication-store.js'
+import { createPublicationLeaseStore, readPublicationSnapshot, recordPublicationAudit, latestPublicationCommand, persistPublicationObservation, publicationCommandAttemptedAt } from './allegro-publication-store.js'
+import { lookupPublicationTask, publicationCommandDiagnostic, type PublicationTaskLookup } from './allegro-publication-task.js'
 import { getCommerceHubUser } from './access-auth.js'
 import { decryptSecret, encryptSecret } from './token-crypto.js'
 import { applyAllegroDesiredStock, resolveAllegroInventoryRows, syncAllegroInventoryRows } from './allegro-inventory-sync.js'
@@ -1573,6 +1574,11 @@ allegroAuth.post('/inventory-sync', async (context) => {
         ...(remoteUnverified
           ? { remoteUnverified }
           : {}),
+        // Scope for evidence-based auto-pause ownership confirmation.
+        publicationOwnership: {
+          accountId: currentSession!.platformAccountId,
+          environment: getAllegroEnvironment(),
+        },
       },
     ),
       result => ({
@@ -8025,6 +8031,7 @@ export async function executeAllegroPublicationTarget(target: PublicationTarget,
   const snapshot = await readLocal()
   if (!snapshot || !['ACTIVE', 'INACTIVE'].includes(snapshot.desiredPublication ?? '')) return { outcome: 'SKIPPED_SAFETY', reason: 'DESIRED_PUBLICATION_UNSUPPORTED' }
   const action = remediation || snapshot.desiredPublication === 'INACTIVE' ? 'END' : 'ACTIVATE'
+  const taskLookups = new Map<string, PublicationTaskLookup>()
   return executePublicationOperation(target, {
     leases: createPublicationLeaseStore(database), readLocal,
     readRemote: () => readAllegroPublication(target.offerId, session.accessToken),
@@ -8051,20 +8058,33 @@ export async function executeAllegroPublicationTarget(target: PublicationTarget,
       // A server error may occur after acceptance. Keep the recorded command ID
       // unresolved and read it back; never replay the PUT automatically.
       if (response.status >= 500 || response.status === 408) throw new Error('DISPATCH_RESULT_UNKNOWN')
+      // A refused PUT was not accepted; 429 keeps its meaning for the caller.
+      if (response.status === 429) return { accepted: false, reason: 'RATE_LIMITED' }
       return { accepted: response.ok, reason: response.ok ? undefined : `Allegro publication command: HTTP ${response.status}` }
     },
     task: async commandId => {
-      const response = await allegroFetch(`${apiUrl}/sale/offer-publication-commands/${commandId}/tasks`, {
+      // Read-only. Anything but a definite task result stays PENDING: the
+      // command is neither closed nor resent.
+      const lookup = await lookupPublicationTask(() => allegroFetch(`${apiUrl}/sale/offer-publication-commands/${commandId}/tasks`, {
         method: 'GET', signal: AbortSignal.timeout(10000),
         headers: { Authorization: `Bearer ${session.accessToken}`, Accept: 'application/vnd.allegro.public.v1+json' },
-      })
-      if (!response.ok) return 'PENDING'
-      const data = await response.json() as { tasks?: Array<{ offer?: { id?: string }; status?: string }> }
-      const task = data.tasks?.find(item => item.offer?.id === target.offerId)
-      return task?.status === 'SUCCESS' ? 'SUCCESS' : ['FAIL', 'FAILED'].includes(task?.status ?? '') ? 'FAILED' : 'PENDING'
+      }), target.offerId)
+      taskLookups.set(commandId, lookup)
+      return lookup.state
     },
+    describeCommand: async (command, ambiguousDispatch) => publicationCommandDiagnostic({
+      command,
+      lastLookup: taskLookups.get(command.commandId) ?? null,
+      ambiguousDispatch,
+      attemptedAt: await publicationCommandAttemptedAt(database, target, command.commandId).catch(() => null),
+    }),
     wait: () => new Promise(resolve => setTimeout(resolve, 5000)),
-  }, { action, remediation: Boolean(remediation), intentVersion: remediation?.expectedIntentVersion ?? snapshot.intentVersion })
+  }, {
+    action,
+    remediation: Boolean(remediation),
+    intentVersion: remediation?.expectedIntentVersion ?? snapshot.intentVersion,
+    publicationIntentId: snapshot.publicationIntentId ?? null,
+  })
 }
 
 allegroAuth.post('/push-status/:listingId', async (context) => {
@@ -8081,7 +8101,10 @@ allegroAuth.post('/push-status/:listingId', async (context) => {
     listingId: row.listingId, offerId: row.offerId, desiredPublicationStatus: row.desiredPublication,
     action: row.desiredPublication === 'ACTIVE' ? 'ACTIVATE' : 'END',
     message: result.reason ?? result.outcome,
-  }, ok ? 200 : result.outcome === 'PENDING_TIMEOUT' ? 202 : result.outcome === 'SKIPPED_SAFETY' ? 409 : 502)
+  }, ok ? 200 : result.outcome === 'PENDING_TIMEOUT' ? 202 : result.outcome === 'SKIPPED_SAFETY' ? 409
+    // A refused (not accepted) command due to rate limiting keeps HTTP 429 so the
+    // inventory slice applies its existing rate-limit stop and cooldown.
+    : result.outcome === 'FAILED' && result.reason === 'RATE_LIMITED' ? 429 : 502)
 })
 allegroAuth.post(
   '/stop-price-schedule/:scheduleId',

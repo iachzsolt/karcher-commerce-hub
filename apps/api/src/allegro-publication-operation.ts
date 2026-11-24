@@ -14,18 +14,60 @@ export type PublicationSnapshot = PublicationTarget & {
   campaignBlocked: boolean
   freshManualIntent?: boolean
   legacyPublicationPending?: boolean
+  /** Durable publication intent (0029); null for legacy rows. */
+  publicationIntentId?: string | null
 }
 export type PublicationObservation = { status: string; observedAt: Date }
-export type PublicationCommand = { commandId: string; action: PublicationAction; status: string }
+/** `intentId`: the publication intent the command was created for (null for legacy commands). */
+export type PublicationCommand = { commandId: string; action: PublicationAction; status: string; intentId?: string | null }
 export type PublicationOutcome = 'FIXED' | 'ALREADY_FIXED' | 'PENDING_TIMEOUT' | 'FAILED' | 'SKIPPED_SAFETY' | 'REMOTE_UNAVAILABLE'
-export type PublicationResult = { outcome: PublicationOutcome; reason?: string; commandId?: string; publicationStatus?: string }
+
+/** Read-only diagnostics for an unresolved command; never triggers a resend. */
+export type PublicationTaskState =
+  | 'TASK_NOT_FOUND'
+  | 'TASK_PENDING'
+  | 'RATE_LIMITED'
+  | 'AUTH_FAILED'
+  | 'UPSTREAM_ERROR'
+  | 'TIMEOUT'
+  | 'REQUEST_FAILED'
+  | 'DISPATCH_AMBIGUOUS'
+export type PublicationCommandDiagnostic = {
+  commandId: string
+  intentId: string | null
+  action: PublicationAction
+  taskState: PublicationTaskState
+  upstreamStatus: number | null
+  commandAgeMs: number | null
+  allegroErrors: Array<{ code: string | null; message: string | null; userMessage: string | null; path: string | null; details: string | null }>
+  /** What an operator can do; automatic replay is never performed. */
+  action_hint: string
+}
+export type PublicationResult = {
+  outcome: PublicationOutcome
+  reason?: string
+  commandId?: string
+  publicationStatus?: string
+  diagnostic?: PublicationCommandDiagnostic
+}
 export type PublicationAudit = {
   status: string
   action: PublicationAction
   commandId?: string
+  /** Bound to the command's own intent, never to a later one. */
+  intentId?: string | null
   reason?: string
   publicationStatus?: string
   observedAt?: string
+  diagnostic?: PublicationCommandDiagnostic
+  /**
+   * SUCCESS of a command only: what proves it. ALLEGRO_TASK_SUCCESS = Allegro's
+   * task report says this command succeeded for this offer (the only form
+   * accepted as ownership evidence); REMOTE_STATE_ONLY = the remote state
+   * matches, but the task report did not (yet) confirm the command.
+   */
+  commandEvidence?: 'ALLEGRO_TASK_SUCCESS' | 'REMOTE_STATE_ONLY'
+  taskResult?: 'PENDING' | 'SUCCESS' | 'FAILED'
 }
 export type PublicationLeaseStore = {
   acquire: (name: string, owner: string) => Promise<boolean>
@@ -87,16 +129,27 @@ export type PublicationAdapter = {
   send: (action: PublicationAction, commandId: string) => Promise<{ accepted: boolean; reason?: string }>
   task: (commandId: string) => Promise<'PENDING' | 'SUCCESS' | 'FAILED'>
   wait: () => Promise<void>
+  /** Optional, read-only: diagnostics for a command still unresolved after bounded verification. */
+  describeCommand?: (command: PublicationCommand, ambiguousDispatch: boolean) => Promise<PublicationCommandDiagnostic | null>
 }
 
 /** Only this executor dispatches a publication command. No quantity/price/badge ports exist. */
 export async function executePublicationOperation(target: PublicationTarget, adapter: PublicationAdapter,
-  options: { action: PublicationAction; intentVersion: string; remediation?: boolean; attempts?: number; now?: Date }): Promise<PublicationResult> {
+  options: {
+    action: PublicationAction
+    intentVersion: string
+    /** The durable publication intent a NEW command is created for. */
+    publicationIntentId?: string | null
+    remediation?: boolean
+    attempts?: number
+    now?: Date
+  }): Promise<PublicationResult> {
   const action = options.action
   if (options.remediation && action !== 'END') return { outcome: 'SKIPPED_SAFETY', reason: 'REMEDIATION_END_ONLY' }
   const attempts = Math.min(6, Math.max(1, options.attempts ?? 6))
   let activeCommand: PublicationCommand | null = null
   let dispatchMayHaveStarted = false
+  let dispatchAmbiguous = false
   const run = await withPublicationLease<PublicationResult>(adapter.leases, target, async assertOwned => {
     const check = async () => {
       const snapshot = await adapter.readLocal()
@@ -124,7 +177,26 @@ export async function executePublicationOperation(target: PublicationTarget, ada
         if (changed) return skip(changed)
         last = await observe()
         if (publicationMatches(action, last.status) && (!command || command.action === action)) {
+          /*
+           * A matching remote state proves the publication goal, not that OUR
+           * command caused it (manual Allegro action, sell-out, another
+           * system). Ask Allegro's task report (read-only) and journal which
+           * evidence exists; only ALLEGRO_TASK_SUCCESS may later prove
+           * automatic ownership. While attempts remain, a not-yet-final task
+           * is re-checked instead of settling for remote-state-only evidence.
+           */
+          let taskResult: 'PENDING' | 'SUCCESS' | 'FAILED' | null = null
+          if (command) {
+            await assertOwned()
+            taskResult = await adapter.task(command.commandId).catch(() => 'PENDING' as const)
+            if (taskResult === 'PENDING' && attempt < attempts - 1) continue
+          }
           await adapter.audit({ action, status: 'SUCCESS', commandId: command?.commandId,
+            ...(command ? {
+              intentId: command.intentId ?? null,
+              commandEvidence: taskResult === 'SUCCESS' ? 'ALLEGRO_TASK_SUCCESS' as const : 'REMOTE_STATE_ONLY' as const,
+              taskResult: taskResult ?? undefined,
+            } : {}),
             publicationStatus: last.status, observedAt: last.observedAt.toISOString() })
           return { outcome: 'FIXED', commandId: command?.commandId, publicationStatus: last.status }
         }
@@ -132,18 +204,28 @@ export async function executePublicationOperation(target: PublicationTarget, ada
           await assertOwned()
           const state = await adapter.task(command.commandId)
           if (state === 'FAILED') {
-            await adapter.audit({ action: command.action, status: 'FAILED', commandId: command.commandId, reason: 'ALLEGRO_TASK_FAILED' })
+            await adapter.audit({ action: command.action, status: 'FAILED', commandId: command.commandId,
+              intentId: command.intentId ?? null, reason: 'ALLEGRO_TASK_FAILED' })
             return { outcome: 'FAILED', commandId: command.commandId, reason: 'ALLEGRO_TASK_FAILED' }
           }
           if (state === 'SUCCESS' && command.action !== action) {
-            await adapter.audit({ action: command.action, status: 'SUCCESS', commandId: command.commandId, reason: 'PREVIOUS_OPERATION_COMPLETED' })
+            await adapter.audit({ action: command.action, status: 'SUCCESS', commandId: command.commandId,
+              intentId: command.intentId ?? null, commandEvidence: 'ALLEGRO_TASK_SUCCESS', taskResult: state,
+              reason: 'PREVIOUS_OPERATION_COMPLETED' })
             return skip('PREVIOUS_OPERATION_COMPLETED_RECHECK_INTENT')
           }
         }
       }
+      // Still unresolved: keep the same command, never resend, expose why.
+      const diagnostic = command && adapter.describeCommand
+        ? await adapter.describeCommand(command, dispatchAmbiguous).catch(() => null)
+        : null
       await adapter.audit({ action: command?.action ?? action, status: 'PENDING', commandId: command?.commandId,
-        reason: 'BOUNDED_VERIFICATION_TIMEOUT', publicationStatus: last?.status })
-      return { outcome: 'PENDING_TIMEOUT', commandId: command?.commandId, publicationStatus: last?.status }
+        ...(command ? { intentId: command.intentId ?? null } : {}),
+        reason: 'BOUNDED_VERIFICATION_TIMEOUT', publicationStatus: last?.status,
+        ...(diagnostic ? { diagnostic } : {}) })
+      return { outcome: 'PENDING_TIMEOUT', commandId: command?.commandId, publicationStatus: last?.status,
+        ...(diagnostic ? { diagnostic } : {}) }
     }
 
     try {
@@ -184,14 +266,16 @@ export async function executePublicationOperation(target: PublicationTarget, ada
       const changed = await check()
       if (changed) return skip(changed)
       const commandId = randomUUID()
-      activeCommand = { commandId, action, status: 'ATTEMPTED' }
+      const intentId = options.publicationIntentId ?? null
+      activeCommand = { commandId, action, status: 'ATTEMPTED', intentId }
       // Persist before dispatch: a crash or network timeout leaves an unresolved
       // command ID for read-only recovery, never a reason for blind resubmission.
-      await adapter.audit({ action, status: 'ATTEMPTED', commandId })
+      // The command is bound to the intent it was created for.
+      await adapter.audit({ action, status: 'ATTEMPTED', commandId, intentId })
       await assertOwned()
       const changedBeforeSend = await check()
       if (changedBeforeSend) {
-        await adapter.audit({ action, status: 'CANCELLED_BEFORE_SEND', commandId, reason: changedBeforeSend })
+        await adapter.audit({ action, status: 'CANCELLED_BEFORE_SEND', commandId, intentId, reason: changedBeforeSend })
         return skip(changedBeforeSend)
       }
       let sent: { accepted: boolean; reason?: string }
@@ -200,20 +284,21 @@ export async function executePublicationOperation(target: PublicationTarget, ada
         sent = await adapter.send(action, commandId)
       }
       catch {
-        await adapter.audit({ action, status: 'PENDING', commandId, reason: 'DISPATCH_RESULT_UNKNOWN' })
+        dispatchAmbiguous = true
+        await adapter.audit({ action, status: 'PENDING', commandId, intentId, reason: 'DISPATCH_RESULT_UNKNOWN' })
         return await verify(activeCommand)
       }
       if (!sent.accepted) {
-        await adapter.audit({ action, status: 'FAILED', commandId, reason: sent.reason })
+        await adapter.audit({ action, status: 'FAILED', commandId, intentId, reason: sent.reason })
         return { outcome: 'FAILED', commandId, reason: sent.reason }
       }
-      await adapter.audit({ action, status: 'PENDING', commandId, reason: 'COMMAND_ACCEPTED' })
+      await adapter.audit({ action, status: 'PENDING', commandId, intentId, reason: 'COMMAND_ACCEPTED' })
       return await verify(activeCommand)
     } catch (error) {
       const reason = error instanceof Error ? error.message : 'PUBLICATION_CHECK_FAILED'
       const safety = ['PUBLICATION_LEASE_LOST', 'MAPPING_OR_SCOPE_CHANGED', 'DESIRED_INTENT_CHANGED', 'DUPLICATE_SKU', 'CAMPAIGN_OWNERSHIP', 'PRODUCT_INACTIVE', 'FRESH_MANUAL_INTENT', 'LEGACY_PUBLICATION_PENDING'].includes(reason)
       await adapter.audit({ action: activeCommand?.action ?? action, status: activeCommand ? dispatchMayHaveStarted ? 'PENDING' : 'CANCELLED_BEFORE_SEND' : safety ? 'SKIPPED_SAFETY' : 'REMOTE_UNAVAILABLE',
-        commandId: activeCommand?.commandId, reason }).catch(() => undefined)
+        commandId: activeCommand?.commandId, ...(activeCommand ? { intentId: activeCommand.intentId ?? null } : {}), reason }).catch(() => undefined)
       return { outcome: safety ? 'SKIPPED_SAFETY' : 'REMOTE_UNAVAILABLE', reason, commandId: activeCommand?.commandId }
     }
   })

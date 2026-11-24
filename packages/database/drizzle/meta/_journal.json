@@ -204,6 +204,13 @@
                         "when":  1794851463099,
                         "tag":  "0028_inventory_import_parent_run",
                         "breakpoints":  true
+                    },
+                    {
+                        "idx":  29,
+                        "version":  "7",
+                        "when":  1795520773255,
+                        "tag":  "0029_publication_intent",
+                        "breakpoints":  true
                     }
                 ]
 }

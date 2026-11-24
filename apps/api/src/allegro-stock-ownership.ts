@@ -47,7 +47,10 @@ export async function reconcileStockOwnership(
   // insertion and the flag-only update commit or roll back together.
   const result = await database.execute(sql`
     with cleared as (
-      update listing_desired_states d set stock_auto_paused=false
+      update listing_desired_states d set stock_auto_paused=false,
+        -- Automatic release keeps an existing intent (0029 guard); legacy rows stay NULL.
+        publication_intent_at=case when d.publication_intent_id is null then null
+          else greatest(clock_timestamp(), d.publication_intent_at + interval '1 microsecond') end
       where d.listing_id=${snapshot.listingId}::uuid
         and to_jsonb(d)=${snapshot.version}::jsonb
         and d.stock_auto_paused=true and d.stock_locked=false and d.auto_stock_sync=true
