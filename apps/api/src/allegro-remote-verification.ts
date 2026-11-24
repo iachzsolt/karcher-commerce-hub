@@ -14,6 +14,11 @@
 export type RemoteVerificationFailureReason =
   /** Allegro did not return the offer for the requested id. */
   | 'OFFER_NOT_RETURNED'
+  /**
+   * The bulk list returned the offer, but its product-offer detail GET
+   * answered an explicit HTTP 404. Current unavailability, not deletion.
+   */
+  | 'OFFER_NOT_FOUND'
   /** Returned, but without allegro-hu marketplace data. */
   | 'MISSING_HU_MARKETPLACE'
   /** Returned, but without a seller SKU (`external.id`). */
@@ -33,6 +38,7 @@ export type RemoteVerificationFailureReason =
 
 export const VERIFICATION_FAILURE_REASONS: ReadonlySet<string> = new Set<RemoteVerificationFailureReason>([
   'OFFER_NOT_RETURNED',
+  'OFFER_NOT_FOUND',
   'MISSING_HU_MARKETPLACE',
   'MISSING_SKU',
   'MISSING_OFFER_ID',
@@ -53,7 +59,12 @@ export const VERIFICATION_FAILURE_REASONS: ReadonlySet<string> = new Set<RemoteV
  */
 export type SyncVerificationReport = {
   verifiedOfferIds: string[]
-  verified: Array<{ offerId: string; listingId: string }>
+  /**
+   * `publicationSource` (diagnostic only): DETAIL when the product-offer
+   * detail supplied the publication status, LIST when a non-404 detail
+   * failure fell back to the bulk-list status.
+   */
+  verified: Array<{ offerId: string; listingId: string; publicationSource?: 'DETAIL' | 'LIST' }>
   unverified: Array<{ offerId: string; reason: RemoteVerificationFailureReason }>
 }
 
@@ -229,6 +240,21 @@ function text(value: unknown): string | null {
   return null
 }
 
+/** Documented Allegro error fields only, bounded; anything else is dropped. */
+export function sanitizeAllegroErrorList(errors: unknown): AllegroTaskError[] {
+  const rawErrors = Array.isArray(errors) ? errors : []
+  return rawErrors.slice(0, MAX_ERRORS).map(error => {
+    const item = error && typeof error === 'object' ? error as Record<string, unknown> : {}
+    return {
+      code: text(item.code),
+      message: text(item.message),
+      userMessage: text(item.userMessage),
+      path: text(item.path),
+      details: text(item.details),
+    }
+  })
+}
+
 /**
  * Keep the fields Allegro documents for command tasks; drop anything else.
  * Task payloads never carry credentials, but values are still bounded.
@@ -236,23 +262,13 @@ function text(value: unknown): string | null {
 export function sanitizeAllegroTask(task: unknown): AllegroTaskDiagnostics {
   const record = task && typeof task === 'object' ? task as Record<string, unknown> : {}
   const offer = record.offer && typeof record.offer === 'object' ? record.offer as Record<string, unknown> : {}
-  const rawErrors = Array.isArray(record.errors) ? record.errors : []
 
   return {
     offerId: text(offer.id),
     status: text(record.status),
     field: text(record.field),
     message: text(record.message),
-    errors: rawErrors.slice(0, MAX_ERRORS).map(error => {
-      const item = error && typeof error === 'object' ? error as Record<string, unknown> : {}
-      return {
-        code: text(item.code),
-        message: text(item.message),
-        userMessage: text(item.userMessage),
-        path: text(item.path),
-        details: text(item.details),
-      }
-    }),
+    errors: sanitizeAllegroErrorList(record.errors),
     scheduledAt: text(record.scheduledAt),
     finishedAt: text(record.finishedAt),
   }

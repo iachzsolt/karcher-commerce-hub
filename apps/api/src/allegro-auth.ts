@@ -13,6 +13,7 @@ import { decryptSecret, encryptSecret } from './token-crypto.js'
 import { applyAllegroDesiredStock, resolveAllegroInventoryRows, syncAllegroInventoryRows } from './allegro-inventory-sync.js'
 import { assertInventoryExecutionLease, assertInventoryExecutionLeaseOwned, type InventoryExecutionLease } from './inventory-execution-lease.js'
 import { logDiagnostic, tracePhase } from './inventory-resume-diagnostics.js'
+import { lookupOfferDetail, offerDebugUpstreamError } from './allegro-offer-detail.js'
 import {
   authorizeStockCommandDiagnostic,
   boundedResponseText,
@@ -5893,16 +5894,19 @@ allegroAuth.get(
     )
 
     if (!response.ok) {
-      const body = await response.text()
+      // 404 and 429 keep their meaning; other upstream failures stay 502
+      // with the original upstream status. Only a validated Retry-After
+      // header is forwarded.
+      const mapped = offerDebugUpstreamError({
+        offerId,
+        upstreamStatus: response.status,
+        retryAfter: response.headers.get('retry-after'),
+        bodyText: await response.text().catch(() => ''),
+      })
 
-      return context.json(
-        {
-          status: 'error',
-          allegroStatus: response.status,
-          body,
-        },
-        502,
-      )
+      if (mapped.retryAfter) context.header('Retry-After', mapped.retryAfter)
+
+      return context.json(mapped.body, mapped.status)
     }
 
     const data =
@@ -6649,6 +6653,7 @@ allegroAuth.post('/sync', async (context) => {
     reason:
       | 'MISSING_HU_MARKETPLACE'
       | 'MISSING_SKU'
+      | 'OFFER_NOT_FOUND'
   }> = []
 
   const importedOffers: Array<{
@@ -6705,6 +6710,74 @@ if (!hasHuMarketplace) {
       verification.unverified.push({ offerId: offer.id, reason: 'MISSING_SKU' })
 
       continue
+    }
+
+    /*
+     * Publication status from the product-offer detail, looked up BEFORE
+     * any write for this offer. Read-only, bounded by a timeout.
+     *
+     * - FOUND: the detail status is used (publicationSource DETAIL).
+     * - Explicit 404 in partial mode (inventory refresh): the offer is
+     *   currently unavailable, so the list data must not be persisted or
+     *   count as verified. Nothing is written for it; last_synced_at and
+     *   the stored remote state stay untouched. Not a deletion claim.
+     * - Any other failure (401/403/429/5xx/timeout/unreadable body), and a
+     *   404 for non-partial callers: unchanged fallback to the list status
+     *   of this same, successful bulk read (publicationSource LIST).
+     */
+    let publicationStatus =
+      normalizeAllegroListingStatus(
+        offer.publication?.status,
+      )
+    let publicationSource: 'DETAIL' | 'LIST' = 'LIST'
+
+    if (environment === 'PRODUCTION') {
+      const detailAccessToken = currentSession.accessToken
+      const detail = await lookupOfferDetail(() =>
+        allegroFetch(
+          apiUrl +
+            '/sale/product-offers/' +
+            encodeURIComponent(offer.id),
+          {
+            signal: AbortSignal.timeout(10_000),
+            headers: {
+              Authorization:
+                'Bearer ' +
+                detailAccessToken,
+              Accept:
+                'application/vnd.allegro.public.v1+json',
+              'Accept-Language':
+                'hu-HU',
+            },
+          },
+        ),
+      )
+
+      if (detail.kind === 'FOUND') {
+        publicationStatus =
+          normalizeAllegroListingStatus(
+            detail.publicationStatus,
+          )
+        publicationSource = 'DETAIL'
+      } else if (detail.kind === 'NOT_FOUND' && allowPartial) {
+        skipped++
+
+        skippedOffers.push({
+          offerId: offer.id,
+          name: offer.name,
+          reason: 'OFFER_NOT_FOUND',
+        })
+        verification.unverified.push({ offerId: offer.id, reason: 'OFFER_NOT_FOUND' })
+
+        continue
+      } else {
+        console.warn(
+          'Allegro product-offer publication lookup failed; using list status:',
+          offer.id,
+          detail.httpStatus,
+          detail.kind === 'UNAVAILABLE' ? detail.failure : 'NOT_FOUND',
+        )
+      }
     }
 
     const [product] = await db
@@ -6785,66 +6858,6 @@ const currency =
         ?.price
         ?.currency ??
       'HUF'
-
-    let publicationStatus =
-      normalizeAllegroListingStatus(
-        offer.publication?.status,
-      )
-
-    if (environment === 'PRODUCTION') {
-      try {
-        const detailResponse =
-          await allegroFetch(
-            apiUrl +
-              '/sale/product-offers/' +
-              encodeURIComponent(offer.id),
-            {
-              /*
-               * Read-only lookup with an existing fallback (the catch
-               * below keeps the list status). Without a bound, one slow
-               * response stalls the whole inventory slice while its
-               * execution lease keeps renewing.
-               */
-              signal: AbortSignal.timeout(10_000),
-              headers: {
-                Authorization:
-                  'Bearer ' +
-                  currentSession.accessToken,
-                Accept:
-                  'application/vnd.allegro.public.v1+json',
-                'Accept-Language':
-                  'hu-HU',
-              },
-            },
-          )
-
-        if (detailResponse.ok) {
-          const detail =
-            (await detailResponse.json()) as {
-              publication?: {
-                status?: string
-              }
-            }
-
-          publicationStatus =
-            normalizeAllegroListingStatus(
-              detail.publication?.status,
-            )
-        } else {
-          console.warn(
-            'Allegro product-offer publication lookup failed; using list status:',
-            offer.id,
-            detailResponse.status,
-          )
-        }
-      } catch (detailError) {
-        console.warn(
-          'Allegro product-offer publication lookup failed; using list status:',
-          offer.id,
-          detailError,
-        )
-      }
-    }
 
     const stockAvailable =
       offer.stock?.available ?? null
@@ -7182,7 +7195,7 @@ const currency =
     // Every remote-state write for this offer has completed; report the
     // exact listing that was persisted so the caller can bind identity.
     verification.verifiedOfferIds.push(offer.id)
-    verification.verified.push({ offerId: offer.id, listingId: listing.id })
+    verification.verified.push({ offerId: offer.id, listingId: listing.id, publicationSource })
 
     importedOffers.push({
       offerId: offer.id,
