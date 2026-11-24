@@ -91,11 +91,30 @@ remote state that was read from Allegro and persisted during the same
   batch and the run fail visibly. **This improves visibility only. It does not
   remove the overselling risk: the offer stays live until a later verified run
   ends it or someone acts on the failure.**
+- Detail 404: in partial mode `/sync` looks up the product-offer detail before
+  writing anything for an offer. An explicit HTTP 404 makes the offer
+  `OFFER_NOT_FOUND` (unverified); nothing is persisted for it, so
+  `last_synced_at` and the stored remote state stay untouched. This means
+  "currently unavailable", never "deleted". Detail 401, 403, 429, 5xx, timeouts,
+  transport errors and unreadable bodies keep the previous fallback to the status
+  of the same successful bulk read and still verify the offer
+  (`publicationSource: LIST`, diagnostic only): they say nothing about whether the
+  offer exists, and stock comes from the bulk read. Non-partial callers keep the
+  previous fallback for 404 as well.
 - `listing_remote_states.last_synced_at` is refreshed for every offer `/sync`
   persists, whether or not a value changed. An old timestamp therefore means the
   offer was not persisted by `/sync`, not that nothing changed.
 - LEGACY `/inventory-sync` execution performs no pre-decision refresh and is
   unchanged.
+
+## Offer debug errors
+
+`GET /auth/allegro/offer-debug/:offerId` answers an upstream 404 with 404
+(`error: OFFER_NOT_FOUND`), an upstream 429 with 429 (validated `Retry-After`
+forwarded) and any other upstream failure with 502 (`error: UPSTREAM_ERROR`).
+Every error carries `upstreamStatus`, the documented Allegro error fields
+(`allegroErrors`) and, for existing readers, `allegroStatus` and a bounded `body`.
+The success response is unchanged.
 
 ## Stock command failures
 

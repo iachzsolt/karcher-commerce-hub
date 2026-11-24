@@ -249,7 +249,7 @@ void describe('/sync verification wiring', () => {
     const remoteUpsert = syncRoute.indexOf('.insert(listingRemoteStates)')
     const desiredInsert = syncRoute.indexOf('.insert(listingDesiredStates)')
     const verified = syncRoute.indexOf('verification.verifiedOfferIds.push(offer.id)')
-    const identity = syncRoute.indexOf('verification.verified.push({ offerId: offer.id, listingId: listing.id })')
+    const identity = syncRoute.indexOf('verification.verified.push({ offerId: offer.id, listingId: listing.id')
     assert.ok(remoteUpsert > 0 && desiredInsert > remoteUpsert && verified > desiredInsert)
     assert.ok(identity > desiredInsert, 'the persisted listing id is reported after the writes')
   })
