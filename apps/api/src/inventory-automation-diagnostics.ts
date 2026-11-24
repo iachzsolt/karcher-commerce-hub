@@ -44,6 +44,8 @@ export type InventoryAutomationPlatformDiagnostics = {
     stockLocked: number
     duplicateSkuSkipped: number
     manuallyInactive: number
+    /** Additive: remote state could not be verified, no mutation decided. */
+    remoteUnverified: number
     other: number
   }
   failedListings: {
@@ -194,6 +196,7 @@ export function buildInventoryAutomationDiagnostics(
       stockLocked: 0,
       duplicateSkuSkipped: 0,
       manuallyInactive: 0,
+      remoteUnverified: 0,
       other: 0,
     }
     const failedListings: FailedInventoryListingDiagnostic[] = []
@@ -227,6 +230,8 @@ export function buildInventoryAutomationDiagnostics(
             skipBreakdown.duplicateSkuSkipped += 1
           } else if (result.status === 'MANUAL_INACTIVE') {
             skipBreakdown.manuallyInactive += 1
+          } else if (result.status === 'REMOTE_UNVERIFIED') {
+            skipBreakdown.remoteUnverified += 1
           } else {
             skipBreakdown.other += 1
           }

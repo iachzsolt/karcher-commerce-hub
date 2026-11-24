@@ -1,6 +1,6 @@
 ﻿import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Hono } from 'hono'
-import { and, desc, eq, inArray } from 'drizzle-orm'
+import { and, desc, eq, inArray, sql } from 'drizzle-orm'
 import { reconcileAllegroObservation, type AllegroObservedOffer } from './allegro-remote-observation.js'
 import { loadAllegroPricePolicies } from './allegro-price-policy-store.js'
 import { shouldRestoreLockedBaseAfterPriceSchedule, shouldWriteAllegroPrice } from './allegro-price-policy.js'
@@ -12,12 +12,27 @@ import { getCommerceHubUser } from './access-auth.js'
 import { decryptSecret, encryptSecret } from './token-crypto.js'
 import { applyAllegroDesiredStock, resolveAllegroInventoryRows, syncAllegroInventoryRows } from './allegro-inventory-sync.js'
 import { assertInventoryExecutionLease, assertInventoryExecutionLeaseOwned, type InventoryExecutionLease } from './inventory-execution-lease.js'
-import { tracePhase } from './inventory-resume-diagnostics.js'
+import { logDiagnostic, tracePhase } from './inventory-resume-diagnostics.js'
+import {
+  authorizeStockCommandDiagnostic,
+  boundedResponseText,
+  evaluateSyncChunk,
+  precheckStockCommandDiagnostic,
+  sanitizeAllegroTask,
+  sanitizeAllegroTaskList,
+  unverifiedListings,
+  type AllegroTaskDiagnostics,
+  type OfferVerificationResult,
+  type StockCommandOwnership,
+  type SyncVerificationReport,
+} from './allegro-remote-verification.js'
 import {
   createSliceBudget,
   resolveInventoryRefreshSliceConfig,
 } from './inventory-refresh-slice.js'
 import {
+  STOCK_JOURNAL_SOURCE,
+  STOCK_OPERATION_EVENT,
   executeStockMutation,
   latestStockCommand,
   parseRetryAfterMs,
@@ -1199,6 +1214,12 @@ allegroAuth.post('/inventory-sync', async (context) => {
    * inferred from the cursor: the decision input is always a fresh
    * Allegro observation.
    */
+  /*
+   * Per-offer verification of this request's remote read. Only SLICED
+   * execution refreshes before deciding, so only SLICED decisions are gated.
+   */
+  const offerVerification = new Map<string, OfferVerificationResult>()
+
   if (body.executionMode === 'SLICED') {
     const offerIds = rowsToApply
       .map((row) => row.offerId)
@@ -1209,24 +1230,45 @@ allegroAuth.post('/inventory-sync', async (context) => {
     const chunkCount = Math.ceil(offerIds.length / 10)
 
     for (let index = 0; index < offerIds.length; index += 10) {
-      // Diagnostics only: the response is still not inspected here.
-      await tracePhase(
+      const chunkOfferIds = offerIds.slice(index, index + 10)
+      const syncResponse = await tracePhase(
         'inventory-sync.allegro-sync-request',
         {
           ...syncDiagnostics,
           chunk: index / 10 + 1,
           chunkCount,
-          chunkOffers: offerIds.slice(index, index + 10).length,
+          chunkOffers: chunkOfferIds.length,
         },
         () => allegroAuth.request('/sync', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            offerIds: offerIds.slice(index, index + 10),
+            offerIds: chunkOfferIds,
+            partial: true,
           }),
         }),
-        syncResponse => ({ httpStatus: syncResponse.status }),
+        response => ({ httpStatus: response.status }),
       )
+
+      const chunkResult = evaluateSyncChunk(chunkOfferIds, {
+        ok: syncResponse.ok,
+        status: syncResponse.status,
+        body: await syncResponse.json().catch(() => null),
+      })
+
+      for (const [offerId, result] of chunkResult) offerVerification.set(offerId, result)
+
+      const unverifiedInChunk = [...chunkResult.values()].filter(result => !result.verified)
+      logDiagnostic('inventory-sync.remote-verification', 'info', {
+        ...syncDiagnostics,
+        chunk: index / 10 + 1,
+        httpStatus: syncResponse.status,
+        verifiedOffers: chunkOfferIds.length - unverifiedInChunk.length,
+        unverifiedOffers: unverifiedInChunk.length,
+        firstUnverifiedReason: unverifiedInChunk[0] && !unverifiedInChunk[0].verified
+          ? unverifiedInChunk[0].reason
+          : null,
+      })
     }
 
     await tracePhase('inventory-sync.execution-lease-check', { ...syncDiagnostics, checkpoint: 'after-allegro-sync' }, assertExecutionOwned)
@@ -1276,6 +1318,16 @@ allegroAuth.post('/inventory-sync', async (context) => {
       409,
     )
   }
+
+  /*
+   * Listings whose remote state this request could not verify. SLICED
+   * decisions never dispatch a new mutation for them; LEGACY execution does
+   * no pre-decision refresh and keeps its existing behavior.
+   */
+  const remoteUnverified =
+    body.executionMode === 'SLICED'
+      ? unverifiedListings(rows, offerVerification)
+      : undefined
 
   const postAllegro =
     async (
@@ -1516,6 +1568,9 @@ allegroAuth.post('/inventory-sync', async (context) => {
             : undefined,
         ...(sliceBudget
           ? { slice: sliceBudget }
+          : {}),
+        ...(remoteUnverified
+          ? { remoteUnverified }
           : {}),
       },
     ),
@@ -5861,6 +5916,129 @@ allegroAuth.get(
   },
 )
 
+/*
+ * Read-only diagnostics for one Allegro stock quantity command.
+ *
+ * - Administrators only; the command id must be a UUID.
+ * - Only commands this Commerce Hub journal created for the currently
+ *   connected account and environment are looked up; anything else is
+ *   answered as not found, so other accounts' command ids cannot be probed.
+ * - Exactly one Allegro GET (`.../tasks`). No stock or publication
+ *   mutation, no retry, no journal write.
+ *
+ * OAuth: like every other Allegro route, `refreshAllegroSessionIfNeeded()`
+ * renews the access token when it expires within five minutes. A renewal
+ * rotates the refresh token and stores the new encrypted pair in
+ * `platform_account_credentials`. That is the normal session upkeep the
+ * schedulers perform as well; no other database write happens here.
+ */
+allegroAuth.get(
+  '/stock-command-tasks/:commandId',
+  async (context) => {
+    const user = getCommerceHubUser(context)
+    const commandId = context.req.param('commandId')
+
+    const rejected = precheckStockCommandDiagnostic({
+      role: user?.role ?? null,
+      commandId,
+    })
+
+    if (rejected) {
+      return context.json({ status: 'error', reason: rejected.reason }, rejected.status)
+    }
+
+    const databaseUrl = process.env.DATABASE_URL
+    const apiUrl = process.env.ALLEGRO_API_URL
+
+    if (!databaseUrl || !apiUrl) {
+      return context.json(
+        { status: 'error', message: 'Database or Allegro API configuration is missing' },
+        500,
+      )
+    }
+
+    await refreshAllegroSessionIfNeeded()
+
+    const session = currentSession
+
+    if (!session) {
+      return context.json({ status: 'error', reason: 'ALLEGRO_NOT_CONNECTED' }, 401)
+    }
+
+    const db = createDatabase(databaseUrl)
+    const journalMatches: StockCommandOwnership[] = await db
+      .select({
+        listingId: platformListings.id,
+        offerId: platformListings.externalListingId,
+        accountId: platformListings.accountId,
+        environment: platformAccounts.environment,
+      })
+      .from(allegroChangeEvents)
+      .innerJoin(platformListings, eq(platformListings.id, allegroChangeEvents.listingId))
+      .innerJoin(platformAccounts, eq(platformAccounts.id, platformListings.accountId))
+      .where(
+        and(
+          eq(allegroChangeEvents.eventType, STOCK_OPERATION_EVENT),
+          eq(allegroChangeEvents.source, STOCK_JOURNAL_SOURCE),
+          sql`${allegroChangeEvents.metadataJson}::jsonb->>'commandId' = ${commandId}`,
+        ),
+      )
+      .limit(50)
+
+    const decision = authorizeStockCommandDiagnostic({
+      role: user?.role ?? null,
+      commandId,
+      session: {
+        platformAccountId: session.platformAccountId,
+        environment: getAllegroEnvironment(),
+      },
+      journalMatches,
+    })
+
+    if (!decision.allowed) {
+      return context.json({ status: 'error', reason: decision.reason }, decision.status)
+    }
+
+    const response = await allegroFetch(
+      `${apiUrl}/sale/offer-quantity-change-commands/${encodeURIComponent(commandId)}/tasks`,
+      {
+        method: 'GET',
+        signal: AbortSignal.timeout(10_000),
+        headers: {
+          Authorization: `Bearer ${session.accessToken}`,
+          Accept: 'application/vnd.allegro.public.v1+json',
+        },
+      },
+    )
+
+    if (!response.ok) {
+      return context.json(
+        {
+          status: 'error',
+          commandId,
+          listingId: decision.command.listingId,
+          offerId: decision.command.offerId,
+          httpStatus: response.status,
+          allegroResponse: boundedResponseText(await response.text().catch(() => '')),
+        },
+        502,
+      )
+    }
+
+    const tasks = sanitizeAllegroTaskList(await response.json().catch(() => null))
+
+    return context.json({
+      status: 'ok',
+      commandId,
+      listingId: decision.command.listingId,
+      offerId: decision.command.offerId,
+      httpStatus: response.status,
+      offerTask: tasks.find(task => task.offerId === decision.command.offerId) ?? null,
+      tasks,
+    })
+  },
+)
+
 allegroAuth.get(
   '/open-offer/:offerId',
   async (context) => {
@@ -6215,8 +6393,16 @@ allegroAuth.post('/sync', async (context) => {
     (await context.req.json().catch(() => null)) as
       | {
           offerIds?: unknown[]
+          /*
+           * Opt-in for the sliced inventory refresh: offers Allegro does not
+           * return are reported as unverified instead of failing the whole
+           * request, so the offers that were returned can still be verified.
+           */
+          partial?: unknown
         }
       | null
+
+  const allowPartial = body?.partial === true
 
   if (!databaseUrl || !apiUrl) {
     return context.json(
@@ -6341,6 +6527,17 @@ allegroAuth.post('/sync', async (context) => {
         )
       : availableOffers
 
+  /*
+   * Per-offer verification report: an offer counts as verified only once
+   * its remote state has been persisted below. A chunk-level success never
+   * implies that every requested offer was verified.
+   */
+  const verification: SyncVerificationReport = {
+    verifiedOfferIds: [],
+    verified: [],
+    unverified: [],
+  }
+
   if (
     requestedOfferIds.size > 0 &&
     offersToImport.length !==
@@ -6358,15 +6555,29 @@ allegroAuth.post('/sync', async (context) => {
         (offerId) => !foundIds.has(offerId),
       )
 
-    return context.json(
-      {
-        status: 'error',
-        message:
-          'One or more requested Allegro offers were not returned by the current sync scope',
-        missingOfferIds,
-      },
-      409,
-    )
+    if (!allowPartial) {
+      return context.json(
+        {
+          status: 'error',
+          message:
+            'One or more requested Allegro offers were not returned by the current sync scope',
+          missingOfferIds,
+          verification: {
+            verifiedOfferIds: [],
+            verified: [],
+            unverified: [...requestedOfferIds].map(offerId => ({
+              offerId,
+              reason: foundIds.has(offerId) ? 'NOT_VERIFIED' : 'OFFER_NOT_RETURNED',
+            })),
+          } satisfies SyncVerificationReport,
+        },
+        409,
+      )
+    }
+
+    for (const offerId of missingOfferIds) {
+      verification.unverified.push({ offerId, reason: 'OFFER_NOT_RETURNED' })
+    }
   }
 
 
@@ -6476,6 +6687,7 @@ if (!hasHuMarketplace) {
     name: offer.name,
     reason: 'MISSING_HU_MARKETPLACE',
   })
+  verification.unverified.push({ offerId: offer.id, reason: 'MISSING_HU_MARKETPLACE' })
 
   continue
 }
@@ -6490,6 +6702,7 @@ if (!hasHuMarketplace) {
         name: offer.name,
         reason: 'MISSING_SKU',
       })
+      verification.unverified.push({ offerId: offer.id, reason: 'MISSING_SKU' })
 
       continue
     }
@@ -6966,6 +7179,10 @@ const currency =
       })
 
     imported++
+    // Every remote-state write for this offer has completed; report the
+    // exact listing that was persisted so the caller can bind identity.
+    verification.verifiedOfferIds.push(offer.id)
+    verification.verified.push({ offerId: offer.id, listingId: listing.id })
 
     importedOffers.push({
       offerId: offer.id,
@@ -6991,6 +7208,8 @@ const currency =
     skippedOffers,
 
     offers: importedOffers,
+
+    verification,
 
     syncedAt: now.toISOString(),
   })
@@ -7537,11 +7756,17 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
     )
 
     if (!task) return 'PENDING' as const
+
+    // Keep Allegro's own task status, message and error codes for the journal.
+    taskDiagnostics.set(commandId, sanitizeAllegroTask(task))
+
     if (task.status === 'SUCCESS') return 'SUCCESS' as const
     if (task.status === 'FAIL' || task.status === 'FAILED') return 'FAILED' as const
 
     return 'PENDING' as const
   }
+
+  const taskDiagnostics = new Map<string, AllegroTaskDiagnostics>()
 
   let mutationDispatched = false
   let outcome: StockMutationOutcome
@@ -7614,7 +7839,9 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
           }
 
           if (!commandResponse.ok) {
-            const errorBody = await commandResponse.text()
+            const errorBody = boundedResponseText(
+              await commandResponse.text().catch(() => ''),
+            )
 
             console.error(
               'Allegro stock command failed:',
@@ -7626,6 +7853,7 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
               kind: 'REJECTED' as const,
               httpStatus: commandResponse.status,
               reason: 'Allegro rejected the stock change command',
+              allegroResponse: errorBody || null,
             }
           }
 
@@ -7636,6 +7864,7 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
         onDispatch: () => {
           mutationDispatched = true
         },
+        describeTask: commandId => taskDiagnostics.get(commandId) ?? null,
       },
     )
   } catch (error) {
@@ -7745,6 +7974,14 @@ allegroAuth.post('/push-stock/:listingId', async (context) => {
       commandId: outcome.commandId,
       httpStatus: outcome.httpStatus,
       taskStatus: outcome.taskStatus ?? null,
+      /*
+       * ALLEGRO_TASK_FAILED: the PUT was accepted and Allegro's async task
+       * failed (httpStatus 502 is synthetic). ALLEGRO_COMMAND_REJECTED: the
+       * PUT itself was refused with the real httpStatus.
+       */
+      failureKind: outcome.failureKind ?? null,
+      allegroTask: outcome.allegroTask ?? null,
+      allegroResponse: outcome.allegroResponse ?? null,
     }),
     502,
   )
